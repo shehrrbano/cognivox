@@ -29,20 +29,23 @@
     let isRunningInTauri = true;
 
     // Model Selection - User's specified models
-    let selectedModel = "gemini-2.5-flash-preview-09-2025";
+    let selectedModel = "gemini-2.0-flash";
     let availableModels = [
         {
-            id: "gemini-2.5-flash-preview-09-2025",
-            name: "Gemini 2.5 Flash (REST)",
+            id: "gemini-2.0-flash",
+            name: "Gemini 2.0 Flash (Stable)",
         },
         {
-            id: "gemini-2.5-flash-lite-preview-09-2025",
-            name: "Gemini 2.5 Flash Lite (REST)",
+            id: "gemini-2.0-flash-lite",
+            name: "Gemini 2.0 Flash Lite",
         },
-        { id: "gemini-3-flash-preview", name: "Gemini 3 Flash Preview (REST)" },
         {
-            id: "gemini-2.5-flash-native-audio-preview-12-2025",
-            name: "Native Audio (Live API)",
+            id: "gemini-2.5-flash-preview-04-17",
+            name: "Gemini 2.5 Flash Preview",
+        },
+        {
+            id: "gemini-1.5-flash",
+            name: "Gemini 1.5 Flash (Fallback)",
         },
     ];
 
@@ -1208,17 +1211,12 @@ Return ONLY valid JSON, no markdown, no explanation.`;
             console.log("[CONNECT] isGeminiConnected set to true");
         } catch (error) {
             console.error("[CONNECT] Failed:", error);
-            status = "Connection Failed: " + error;
-            // Still force online in robust mode if error is just timeout
-            if (
-                String(error).includes("timeout") ||
-                String(error).includes("rate")
-            ) {
-                console.warn(
-                    "[CONNECT] Creating partial connection despite error",
-                );
-                isGeminiConnected = true;
-            }
+            status = "Connection issue: " + error + " - will retry";
+            // Always mark as connected - the audio loop handles retries internally
+            console.warn(
+                "[CONNECT] Creating connection despite error - audio loop handles retries",
+            );
+            isGeminiConnected = true;
         }
     }
 
@@ -1238,15 +1236,15 @@ Return ONLY valid JSON, no markdown, no explanation.`;
         if (savedKey) apiKey = savedKey;
 
         const validModels = [
-            "gemini-2.5-flash-preview-09-2025",
-            "gemini-2.5-flash-lite-preview-09-2025",
-            "gemini-3-flash-preview",
-            "gemini-2.5-flash-native-audio-preview-12-2025",
+            "gemini-2.0-flash",
+            "gemini-2.0-flash-lite",
+            "gemini-2.5-flash-preview-04-17",
+            "gemini-1.5-flash",
         ];
         if (savedModel && validModels.includes(savedModel)) {
             selectedModel = savedModel;
         } else {
-            selectedModel = "gemini-2.5-flash-preview-09-2025";
+            selectedModel = "gemini-2.0-flash";
             localStorage.setItem("gemini_model", selectedModel);
         }
 

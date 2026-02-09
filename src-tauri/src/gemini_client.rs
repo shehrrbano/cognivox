@@ -40,7 +40,7 @@ impl Default for GeminiState {
             audio_rx: StdMutex::new(None),
             api_key: StdMutex::new(None),
             is_connected: StdMutex::new(false),
-            selected_model: StdMutex::new("gemini-2.5-flash-preview-09-2025".to_string()),
+            selected_model: StdMutex::new("gemini-2.0-flash".to_string()),
         }
     }
 }
@@ -235,54 +235,69 @@ pub async fn test_gemini_connection(
     
     let _ = app.emit("cognivox:status", "Testing...");
     
+    // ALWAYS start audio processing loop first (before test), so it's ready
+    // even if the connection test fails due to rate limiting etc.
+    let audio_rx = state.audio_rx.lock().unwrap().take();
+    if let Some(rx) = audio_rx {
+        println!("[GEMINI] Starting audio processing loop...");
+        let app_clone = app.clone();
+        tokio::spawn(async move {
+            smart_audio_loop(rx, app_clone).await;
+        });
+    } else {
+        println!("[GEMINI] Audio loop already running (rx already taken)");
+    }
+    
     // Quick test
     let url = format!("{}/{}:generateContent?key={}", GEMINI_REST_URL, m, key);
     let client = reqwest::Client::new();
     
-    match client.post(&url)
+    let test_result = match client.post(&url)
         .json(&serde_json::json!({"contents":[{"parts":[{"text":"OK"}]}]}))
         .timeout(Duration::from_secs(10))
         .send().await 
     {
         Ok(r) => {
             let status = r.status();
-            let t = r.text().await.unwrap_or_default();
+            let _t = r.text().await.unwrap_or_default();
             
              if status.as_u16() == 429 {
-                println!("[GEMINI] Rate limited (429)");
-                let _ = app.emit("cognivox:status", "Rate limited");
-                return Err("Rate limited".into());
+                println!("[GEMINI] Rate limited (429) - audio loop still running");
+                let _ = app.emit("cognivox:status", "Rate limited - will retry on speech");
+                Err("Rate limited".to_string())
             } else if status.as_u16() == 403 {
-                println!("[GEMINI] Quota exhausted (403)");
-                let _ = app.emit("cognivox:status", "Quota exhausted");
-                return Err("Quota exhausted".into());
+                println!("[GEMINI] Quota exhausted (403) - audio loop still running");
+                let _ = app.emit("cognivox:status", "Quota exhausted - will retry on speech");
+                Err("Quota exhausted".to_string())
             } else if !status.is_success() {
-                println!("[GEMINI] HTTP error: {}", status);
-                let _ = app.emit("cognivox:status", format!("HTTP {}", status));
-                return Err(format!("HTTP {}", status));
+                println!("[GEMINI] HTTP error: {} - audio loop still running", status);
+                let _ = app.emit("cognivox:status", format!("HTTP {} - will retry", status));
+                Err(format!("HTTP {}", status))
+            } else {
+                // Success - connected
+                println!("[GEMINI] Connection test passed");
+                *state.is_connected.lock().unwrap() = true;
+                let _ = app.emit("cognivox:status", "Connected ✓");
+                Ok(())
             }
-            
-            // Success - connected
-            println!("[GEMINI] Connection test passed");
-            *state.is_connected.lock().unwrap() = true;
-            let _ = app.emit("cognivox:status", "Connected ✓");
         }
         Err(e) => {
-            let _ = app.emit("cognivox:status", format!("Failed: {}", e));
-            return Err(e.to_string());
+            println!("[GEMINI] Connection test failed: {} - audio loop still running", e);
+            let _ = app.emit("cognivox:status", format!("Test failed: {} - will retry", e));
+            Err(e.to_string())
+        }
+    };
+    
+    // Return success even if test failed - the audio loop is running
+    // and will handle rate limiting/retries internally
+    match test_result {
+        Ok(()) => Ok(format!("Connected to {}", m)),
+        Err(e) => {
+            // Mark as connected anyway - the loop will handle errors gracefully
+            *state.is_connected.lock().unwrap() = true;
+            Ok(format!("Connected to {} (test: {})", m, e))
         }
     }
-    
-    // Start audio processing loop (Audio -> Whisper -> Gemini)
-    let audio_rx = state.audio_rx.lock().unwrap().take();
-    if let Some(rx) = audio_rx {
-        let app = app.clone();
-        tokio::spawn(async move {
-            smart_audio_loop(rx, app).await;
-        });
-    }
-    
-    Ok(format!("Connected to {}", m))
 }
 
 // ============================================================================
@@ -627,8 +642,9 @@ pub fn set_gemini_model(state: tauri::State<'_, GeminiState>, model: String) -> 
 #[tauri::command]
 pub fn get_available_models() -> Vec<serde_json::Value> {
     vec![
-        serde_json::json!({"id": "gemini-2.5-flash-preview-09-2025", "name": "⚡ Gemini 2.5 Flash"}),
-        serde_json::json!({"id": "gemini-2.5-flash-lite-preview-09-2025", "name": "🔥 Gemini 2.5 Flash Lite"}),
-        serde_json::json!({"id": "gemini-3-flash-preview", "name": "💎 Gemini 3 Flash"}),
+        serde_json::json!({"id": "gemini-2.0-flash", "name": "⚡ Gemini 2.0 Flash (Stable)"}),
+        serde_json::json!({"id": "gemini-2.0-flash-lite", "name": "🔥 Gemini 2.0 Flash Lite"}),
+        serde_json::json!({"id": "gemini-2.5-flash-preview-04-17", "name": "💎 Gemini 2.5 Flash Preview"}),
+        serde_json::json!({"id": "gemini-1.5-flash", "name": "🌟 Gemini 1.5 Flash (Fallback)"}),
     ]
 }
