@@ -3,7 +3,7 @@ mod gemini_client;
 mod whisper_client;
 mod processing_engine;
 mod session_manager;
-use audio_capture::AudioState;
+use audio_capture::{AudioState, TaggedAudio};
 use gemini_client::GeminiState;
 use whisper_client::WhisperState;
 use std::sync::Mutex;
@@ -21,7 +21,7 @@ fn greet(name: &str) -> String {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let (audio_tx, audio_rx) = unbounded::<Vec<f32>>();
+    let (audio_tx, audio_rx) = unbounded::<TaggedAudio>();
 
     let audio_state = AudioState {
         audio_tx: Mutex::new(Some(audio_tx)),

@@ -5,6 +5,7 @@ use tokio::sync::Mutex;
 use tokio::time::{Duration, interval, timeout, Instant, sleep};
 use crossbeam_channel::Receiver;
 use crate::whisper_client::{WhisperState, transcribe_audio};
+use crate::audio_capture::{TaggedAudio, AudioSource};
 
 // ============================================================================
 // GEMINI CLIENT - Text-Only Intelligence Extraction (Post-Whisper)
@@ -27,7 +28,7 @@ const SILENCE_THRESHOLD: f32 = 0.0001;         // Silence detection
 
 
 pub struct GeminiState {
-    pub audio_rx: StdMutex<Option<Receiver<Vec<f32>>>>,
+    pub audio_rx: StdMutex<Option<Receiver<TaggedAudio>>>,
     pub api_key: StdMutex<Option<String>>,
     pub is_connected: StdMutex<bool>,
     pub selected_model: StdMutex<String>,
@@ -46,19 +47,21 @@ impl Default for GeminiState {
 
 const COGNIVOX_INTELLIGENCE_PROMPT: &str = r#"You are a PASSIVE MEETING INTELLIGENCE ENGINE analyzing transcribed speech.
 
-INPUT: Transcribed text from a meeting.
+INPUT: Transcribed text from a meeting with speaker tag ("You" = microphone user, "Speaker 2" = other participant).
 OUTPUT: JSON intelligence extraction.
 
 FORMAT:
-{"transcript":"original text","speaker":"Speaker 1","tone":"NEUTRAL","category":["TASK"],"confidence":0.85,"summary":"Brief summary if applicable"}
+{"transcript":"original text","speaker":"<keep the speaker tag from input exactly as given>","tone":"NEUTRAL","category":["TASK"],"confidence":0.85,"summary":"Brief summary if applicable","entities":[{"name":"entity name","type":"PERSON|PROJECT|TOPIC|LOCATION|DATE|ORG"}],"graph_edges":[{"from":"entity or speaker","to":"entity or speaker","relation":"verb or relationship"}]}
 
 RULES:
 - JSON only, no markdown
-- Analyze the PROVIDED TEXT (already transcribed)
+- CRITICAL: Keep the speaker tag exactly as provided in the input (e.g. "You" or "Speaker 2"). Do NOT reassign or change the speaker.
 - tone: NEUTRAL|URGENT|FRUSTRATED|EXCITED|POSITIVE|NEGATIVE|HESITANT|DOMINANT|EMPATHETIC
 - category: TASK|DECISION|DEADLINE|QUERY|ACTION_ITEM|RISK|SENTIMENT|URGENCY|INTERRUPTION|AGREEMENT|DISAGREEMENT|OFF_TOPIC|EMOTION_SHIFT|DOMINANCE_SHIFT|EMPATHY_GAP|TOPIC_DRIFT
 - confidence: 0.0-1.0
-- Extract entities (people, dates, projects) if present
+- entities: Extract ALL people, projects, topics, organizations, locations, dates mentioned
+- graph_edges: Create relationships between entities. E.g. {"from":"John","to":"Project X","relation":"works on"}, {"from":"You","to":"deadline","relation":"mentioned"}
+- Always include at least one graph_edge connecting the speaker to the main topic
 - For low-confidence or unclear: lower confidence value, not error"#;
 
 // ============================================================================
@@ -154,7 +157,7 @@ async fn call_gemini_with_text(
         system_instruction: Some(SystemInstruction {
             parts: vec![TextPart { text: COGNIVOX_INTELLIGENCE_PROMPT.into() }],
         }),
-        generation_config: GenerationConfig { temperature: 0.3, max_output_tokens: 512 },
+        generation_config: GenerationConfig { temperature: 0.3, max_output_tokens: 1024 },
     };
     
     let url = format!("{}/{}:generateContent?key={}", GEMINI_REST_URL, model, key);
@@ -343,9 +346,10 @@ pub fn update_gemini_key(state: tauri::State<'_, GeminiState>, key: String) -> R
 // Smart Audio Loop: Audio -> Whisper -> Gemini
 // ============================================================================
 
-async fn smart_audio_loop(rx: Receiver<Vec<f32>>, app: AppHandle) {
+async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle) {
     println!("[WHISPER->GEMINI] Audio processing loop started");
     println!("[WHISPER->GEMINI] Pipeline: Audio -> Whisper STT -> Gemini Intelligence");
+    println!("[WHISPER->GEMINI] Speaker diarization: Mic=You, System=Speaker 2");
     
     let _ = app.emit("cognivox:status", "Listening for speech...");
     
@@ -354,6 +358,12 @@ async fn smart_audio_loop(rx: Receiver<Vec<f32>>, app: AppHandle) {
     let mut speech_start: Option<Instant> = None;
     let mut last_speech: Option<Instant> = None;
     let mut processing = false;
+    
+    // Speaker diarization: track energy from each source
+    let mut mic_energy: f64 = 0.0;
+    let mut system_energy: f64 = 0.0;
+    let mut mic_sample_count: u64 = 0;
+    let mut system_sample_count: u64 = 0;
     
     // Rate limiting state
     let mut backoff: u64 = 0;
@@ -375,9 +385,22 @@ async fn smart_audio_loop(rx: Receiver<Vec<f32>>, app: AppHandle) {
         
         if processing { continue; }
         
-        // Collect audio
+        // Collect tagged audio
         let mut new: Vec<f32> = Vec::new();
-        while let Ok(s) = rx.try_recv() { new.extend(s); }
+        while let Ok(tagged) = rx.try_recv() {
+            let source_rms = rms(&tagged.samples) as f64;
+            match tagged.source {
+                AudioSource::Microphone => {
+                    mic_energy += source_rms;
+                    mic_sample_count += 1;
+                }
+                AudioSource::System => {
+                    system_energy += source_rms;
+                    system_sample_count += 1;
+                }
+            }
+            new.extend(tagged.samples);
+        }
         
         // Process new audio if available (but DON'T skip the processing check below)
         if !new.is_empty() {
@@ -435,8 +458,14 @@ async fn smart_audio_loop(rx: Receiver<Vec<f32>>, app: AppHandle) {
                 processing = true;
                 request_count += 1;
                 
+                // Determine dominant speaker based on mic vs system energy
+                let avg_mic = if mic_sample_count > 0 { mic_energy / mic_sample_count as f64 } else { 0.0 };
+                let avg_system = if system_sample_count > 0 { system_energy / system_sample_count as f64 } else { 0.0 };
+                let dominant_speaker = if avg_mic >= avg_system { "You" } else { "Speaker 2" };
+                
                 println!("[AUDIO] ========================================");
                 println!("[AUDIO] >>> PROCESSING {:.1}s AUDIO (request #{}) <<<", duration, request_count);
+                println!("[DIARIZATION] Mic energy: {:.6}, System energy: {:.6} -> Speaker: {}", avg_mic, avg_system, dominant_speaker);
                 println!("[AUDIO] ========================================");
                 let _ = app.emit("cognivox:status", format!("Whisper transcribing {:.1}s audio...", duration));
                 
@@ -445,6 +474,14 @@ async fn smart_audio_loop(rx: Receiver<Vec<f32>>, app: AppHandle) {
                 speaking = false;
                 speech_start = None;
                 last_speech = None;
+                
+                // Reset energy counters for next segment
+                mic_energy = 0.0;
+                system_energy = 0.0;
+                mic_sample_count = 0;
+                system_sample_count = 0;
+                
+                let speaker_tag = dominant_speaker.to_string();
                 
                 // Get Whisper state
                 let whisper_state = app.state::<WhisperState>();
@@ -480,7 +517,8 @@ async fn smart_audio_loop(rx: Receiver<Vec<f32>>, app: AppHandle) {
                             "text": result.text.clone(),
                             "language": result.language,
                             "confidence": result.confidence,
-                            "source": "whisper"
+                            "source": "whisper",
+                            "speaker": speaker_tag.clone()
                         }));
                         result.text
                     }
@@ -517,16 +555,20 @@ async fn smart_audio_loop(rx: Receiver<Vec<f32>>, app: AppHandle) {
                     continue;
                 }
                 
-                match call_gemini_with_text(&key, &model, &transcription, &mut backoff, &mut last_request).await {
+                // Include speaker tag in the transcript text sent to Gemini
+                let speaker_annotated_transcript = format!("[{}]: {}", speaker_tag, transcription);
+                
+                match call_gemini_with_text(&key, &model, &speaker_annotated_transcript, &mut backoff, &mut last_request).await {
                     Ok(response) => {
                         println!("[GEMINI] ========================================");
                         println!("[GEMINI] ✓ INTELLIGENCE EXTRACTED:");
                         println!("[GEMINI]   Response: '{}'", if response.len() > 150 { &response[..150] } else { &response });
                         println!("[GEMINI] ========================================");
                         println!("[GEMINI] >>> EMITTING cognivox:gemini_intelligence EVENT <<<");
-                        println!("[GEMINI]   transcript: '{}'", &transcription);
+                        println!("[GEMINI]   transcript: '{}', speaker: '{}'", &transcription, &speaker_tag);
                         let _ = app.emit("cognivox:gemini_intelligence", serde_json::json!({
                             "transcript": transcription.clone(),
+                            "speaker": speaker_tag.clone(),
                             "intelligence": response
                         }));
                         let _ = app.emit("cognivox:status", "Listening for speech...");
@@ -538,8 +580,9 @@ async fn smart_audio_loop(rx: Receiver<Vec<f32>>, app: AppHandle) {
                         // STILL emit the transcript so user sees it even if Gemini failed
                         let _ = app.emit("cognivox:gemini_intelligence", serde_json::json!({
                             "transcript": transcription.clone(),
-                            "intelligence": format!("{{\"transcript\":\"{}\",\"tone\":\"NEUTRAL\",\"category\":[\"INFO\"],\"confidence\":0.5}}", 
-                                transcription.replace('"', "'").replace('\n', " "))
+                            "speaker": speaker_tag.clone(),
+                            "intelligence": format!("{{\"transcript\":\"{}\",\"speaker\":\"{}\",\"tone\":\"NEUTRAL\",\"category\":[\"INFO\"],\"confidence\":0.5}}", 
+                                transcription.replace('"', "'").replace('\n', " "), speaker_tag)
                         }));
                         
                         let _ = app.emit("cognivox:status", format!("Gemini error: {}. Transcript saved.", e));

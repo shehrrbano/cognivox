@@ -915,8 +915,8 @@ Return ONLY valid JSON, no markdown, no explanation.`;
             status = "Building Knowledge Graph...";
             await new Promise((r) => setTimeout(r, 500));
 
-            // Add entities from transcripts to graph
-            if (graphNodes.length === 0 && transcripts.length > 0) {
+            // Ensure root Meeting node exists
+            if (!graphNodes.find((n) => n.id === "Meeting")) {
                 graphNodes = [
                     {
                         id: "Meeting",
@@ -929,7 +929,7 @@ Return ONLY valid JSON, no markdown, no explanation.`;
 
             // Build knowledge graph from all transcripts
             for (const t of transcripts) {
-                // Add speaker nodes
+                // Add speaker nodes with connections
                 const speakerNode = t.speaker || "Speaker";
                 if (!graphNodes.find((n) => n.id === speakerNode)) {
                     graphNodes = [
@@ -950,54 +950,117 @@ Return ONLY valid JSON, no markdown, no explanation.`;
                         },
                     ];
                 }
-                // Add category nodes
+
+                // Add category nodes with proper edges
                 if (t.category) {
                     for (const cat of t.category) {
-                        if (
-                            cat !== "INFO" &&
-                            !graphNodes.find((n) => n.id === cat)
-                        ) {
-                            graphNodes = [
-                                ...graphNodes,
-                                {
-                                    id: cat,
-                                    type: "Category",
-                                    label: cat,
-                                    weight: 1.5,
-                                },
-                            ];
+                        if (cat !== "INFO") {
+                            if (!graphNodes.find((n) => n.id === cat)) {
+                                graphNodes = [
+                                    ...graphNodes,
+                                    {
+                                        id: cat,
+                                        type: "Category",
+                                        label: cat,
+                                        weight: 1.5,
+                                    },
+                                ];
+                                graphEdges = [
+                                    ...graphEdges,
+                                    {
+                                        from: "Meeting",
+                                        to: cat,
+                                        relation: "contains",
+                                    },
+                                ];
+                            }
+                            // Connect speaker to category
                             graphEdges = [
                                 ...graphEdges,
                                 {
-                                    from: "Meeting",
+                                    from: speakerNode,
                                     to: cat,
-                                    relation: "detected",
+                                    relation: "raised",
                                 },
                             ];
                         }
                     }
                 }
-                // Add tone nodes
-                if (
-                    t.tone &&
-                    t.tone !== "NEUTRAL" &&
-                    !graphNodes.find((n) => n.id === `tone_${t.tone}`)
-                ) {
-                    graphNodes = [
-                        ...graphNodes,
-                        {
-                            id: `tone_${t.tone}`,
-                            type: "Tone",
-                            label: t.tone,
-                            weight: 1.2,
-                        },
-                    ];
+
+                // Add tone nodes connected to speaker
+                if (t.tone && t.tone !== "NEUTRAL") {
+                    const toneId = `tone_${t.tone}`;
+                    if (!graphNodes.find((n) => n.id === toneId)) {
+                        graphNodes = [
+                            ...graphNodes,
+                            {
+                                id: toneId,
+                                type: "Tone",
+                                label: t.tone,
+                                weight: 1.2,
+                            },
+                        ];
+                    }
                     graphEdges = [
                         ...graphEdges,
                         {
-                            from: "Meeting",
-                            to: `tone_${t.tone}`,
+                            from: speakerNode,
+                            to: toneId,
                             relation: "expressed",
+                        },
+                    ];
+                }
+
+                // Extract key topics from transcript text for graph
+                const words = t.text.split(/\s+/);
+                const keyPhrases = words.filter(
+                    (w: string) =>
+                        w.length > 4 &&
+                        w[0] === w[0].toUpperCase() &&
+                        w[0] !== w[0].toLowerCase() &&
+                        ![
+                            "Speaker",
+                            "Meeting",
+                            "The",
+                            "This",
+                            "That",
+                            "There",
+                            "Their",
+                            "These",
+                            "Those",
+                            "With",
+                            "From",
+                            "About",
+                            "Would",
+                            "Could",
+                            "Should",
+                        ].includes(w),
+                );
+
+                // Add unique proper nouns as entity nodes
+                const addedEntities = new Set<string>();
+                for (const phrase of keyPhrases.slice(0, 3)) {
+                    const clean = phrase.replace(/[.,!?;:'"]/g, "").trim();
+                    if (clean.length < 3 || addedEntities.has(clean)) continue;
+                    addedEntities.add(clean);
+
+                    if (!graphNodes.find((n) => n.id === clean)) {
+                        graphNodes = [
+                            ...graphNodes,
+                            {
+                                id: clean,
+                                type: "Entity",
+                                label: clean,
+                                weight: 1.0,
+                            },
+                        ];
+                    }
+                    graphEdges = [
+                        ...graphEdges,
+                        {
+                            from: speakerNode,
+                            to: clean,
+                            relation: "mentioned",
                         },
                     ];
                 }
@@ -1266,16 +1329,25 @@ Return ONLY valid JSON, no markdown, no explanation.`;
 
                         const payload = event.payload as {
                             transcript: string;
+                            speaker?: string;
                             intelligence: string;
                         };
 
                         // Get raw values
                         const rawIntel = payload?.intelligence || "";
                         let transcriptText = payload?.transcript || "";
-                        let speaker = "Speaker";
+                        // Use backend speaker tag (from audio diarization) as primary source
+                        let speaker = payload?.speaker || "Speaker";
                         let tone = "NEUTRAL";
                         let confidence = 0.9;
                         let categories: string[] = ["INFO"];
+                        let entities: Array<{ name: string; type: string }> =
+                            [];
+                        let graphEdgesFromGemini: Array<{
+                            from: string;
+                            to: string;
+                            relation: string;
+                        }> = [];
 
                         // Update debug state
                         debugLastTranscript =
@@ -1308,15 +1380,39 @@ Return ONLY valid JSON, no markdown, no explanation.`;
                                 ) {
                                     transcriptText = parsed.transcript;
                                 }
-                                speaker = parsed.speaker || speaker;
+                                // Speaker: prefer backend diarization (payload.speaker),
+                                // only use Gemini's if backend didn't provide one
+                                if (!payload?.speaker && parsed.speaker) {
+                                    speaker = parsed.speaker;
+                                }
                                 tone = parsed.tone || tone;
                                 confidence = parsed.confidence || confidence;
                                 categories = parsed.category || categories;
+
+                                // Extract entities for knowledge graph
+                                if (
+                                    parsed.entities &&
+                                    Array.isArray(parsed.entities)
+                                ) {
+                                    entities = parsed.entities;
+                                }
+                                // Extract graph edges from Gemini
+                                if (
+                                    parsed.graph_edges &&
+                                    Array.isArray(parsed.graph_edges)
+                                ) {
+                                    graphEdgesFromGemini = parsed.graph_edges;
+                                }
+
                                 console.log(
-                                    "[GEMINI] Parsed successfully - tone:",
+                                    "[GEMINI] Parsed successfully - speaker:",
+                                    speaker,
+                                    "tone:",
                                     tone,
-                                    "categories:",
-                                    categories,
+                                    "entities:",
+                                    entities.length,
+                                    "graph_edges:",
+                                    graphEdgesFromGemini.length,
                                 );
                             }
                         } catch (e) {
@@ -1376,30 +1472,198 @@ Return ONLY valid JSON, no markdown, no explanation.`;
                         );
                         latencyMs = Math.round(performance.now() - startTime);
 
-                        // Update graph with tone node
+                        // ======================================
+                        // BUILD PROPER KNOWLEDGE GRAPH
+                        // ======================================
+
+                        // Ensure root "Meeting" node exists
+                        if (!graphNodes.find((n) => n.id === "Meeting")) {
+                            graphNodes = [
+                                ...graphNodes,
+                                {
+                                    id: "Meeting",
+                                    type: "Topic",
+                                    label: "Meeting",
+                                    weight: 3,
+                                },
+                            ];
+                        }
+
+                        // 1. Add speaker node and connect to Meeting
+                        const speakerNodeId = speaker || "Speaker";
+                        if (!graphNodes.find((n) => n.id === speakerNodeId)) {
+                            graphNodes = [
+                                ...graphNodes,
+                                {
+                                    id: speakerNodeId,
+                                    type: "Speaker",
+                                    label: speakerNodeId,
+                                    weight: 2,
+                                },
+                            ];
+                            graphEdges = [
+                                ...graphEdges,
+                                {
+                                    from: "Meeting",
+                                    to: speakerNodeId,
+                                    relation: "participant",
+                                },
+                            ];
+                        }
+
+                        // 2. Add tone node and connect speaker to tone
                         if (tone && tone !== "NEUTRAL") {
-                            if (
-                                !graphNodes.find((n) => n.id === `tone_${tone}`)
-                            ) {
+                            const toneId = `tone_${tone}`;
+                            if (!graphNodes.find((n) => n.id === toneId)) {
                                 graphNodes = [
                                     ...graphNodes,
                                     {
-                                        id: `tone_${tone}`,
+                                        id: toneId,
                                         type: "Tone",
                                         label: tone,
                                         weight: 1.2,
                                     },
                                 ];
+                            }
+                            // Connect speaker to tone (not just Meeting to tone)
+                            graphEdges = [
+                                ...graphEdges,
+                                {
+                                    from: speakerNodeId,
+                                    to: toneId,
+                                    relation: "expressed",
+                                },
+                            ];
+                        }
+
+                        // 3. Add category nodes and connect speaker to categories
+                        if (categories && categories.length > 0) {
+                            for (const cat of categories) {
+                                if (cat !== "INFO") {
+                                    if (!graphNodes.find((n) => n.id === cat)) {
+                                        graphNodes = [
+                                            ...graphNodes,
+                                            {
+                                                id: cat,
+                                                type: "Category",
+                                                label: cat,
+                                                weight: 1.5,
+                                            },
+                                        ];
+                                        // Connect category to Meeting
+                                        graphEdges = [
+                                            ...graphEdges,
+                                            {
+                                                from: "Meeting",
+                                                to: cat,
+                                                relation: "contains",
+                                            },
+                                        ];
+                                    }
+                                    // Connect speaker to category
+                                    graphEdges = [
+                                        ...graphEdges,
+                                        {
+                                            from: speakerNodeId,
+                                            to: cat,
+                                            relation: "raised",
+                                        },
+                                    ];
+                                }
+                            }
+                        }
+
+                        // 4. Add entity nodes from Gemini extraction
+                        if (entities.length > 0) {
+                            for (const entity of entities) {
+                                const entityId = entity.name.trim();
+                                if (!entityId || entityId.length === 0)
+                                    continue;
+
+                                if (
+                                    !graphNodes.find((n) => n.id === entityId)
+                                ) {
+                                    graphNodes = [
+                                        ...graphNodes,
+                                        {
+                                            id: entityId,
+                                            type: entity.type || "Entity",
+                                            label: entityId,
+                                            weight: 1.3,
+                                        },
+                                    ];
+                                    // Connect entity to Meeting
+                                    graphEdges = [
+                                        ...graphEdges,
+                                        {
+                                            from: "Meeting",
+                                            to: entityId,
+                                            relation: "mentions",
+                                        },
+                                    ];
+                                }
+                                // Connect speaker to entity
                                 graphEdges = [
                                     ...graphEdges,
                                     {
-                                        from: "Meeting",
-                                        to: `tone_${tone}`,
-                                        relation: "expressed",
+                                        from: speakerNodeId,
+                                        to: entityId,
+                                        relation: "mentioned",
                                     },
                                 ];
                             }
                         }
+
+                        // 5. Add Gemini-extracted graph edges (proper relationships)
+                        if (graphEdgesFromGemini.length > 0) {
+                            for (const edge of graphEdgesFromGemini) {
+                                const fromId = edge.from?.trim();
+                                const toId = edge.to?.trim();
+                                const relation = edge.relation?.trim();
+                                if (!fromId || !toId || !relation) continue;
+
+                                // Ensure both nodes exist
+                                if (!graphNodes.find((n) => n.id === fromId)) {
+                                    graphNodes = [
+                                        ...graphNodes,
+                                        {
+                                            id: fromId,
+                                            type: "Entity",
+                                            label: fromId,
+                                            weight: 1.0,
+                                        },
+                                    ];
+                                }
+                                if (!graphNodes.find((n) => n.id === toId)) {
+                                    graphNodes = [
+                                        ...graphNodes,
+                                        {
+                                            id: toId,
+                                            type: "Entity",
+                                            label: toId,
+                                            weight: 1.0,
+                                        },
+                                    ];
+                                }
+                                // Add the relationship edge
+                                graphEdges = [
+                                    ...graphEdges,
+                                    {
+                                        from: fromId,
+                                        to: toId,
+                                        relation: relation,
+                                    },
+                                ];
+                            }
+                        }
+
+                        console.log(
+                            "[GRAPH] Updated: ",
+                            graphNodes.length,
+                            "nodes,",
+                            graphEdges.length,
+                            "edges",
+                        );
 
                         // --- LOCAL INTELLIGENCE EXTRACTION ---
                         try {
@@ -1413,37 +1677,6 @@ Return ONLY valid JSON, no markdown, no explanation.`;
                                     ...localInsights,
                                     ...freshInsights,
                                 ];
-                            }
-
-                            // Update graph nodes from extraction or direct categories
-                            if (categories && categories.length > 0) {
-                                for (const cat of categories) {
-                                    if (cat !== "INFO") {
-                                        if (
-                                            !graphNodes.find(
-                                                (n) => n.id === cat,
-                                            )
-                                        ) {
-                                            graphNodes = [
-                                                ...graphNodes,
-                                                {
-                                                    id: cat,
-                                                    type: "Category",
-                                                    label: cat,
-                                                    weight: 1.5,
-                                                },
-                                            ];
-                                            graphEdges = [
-                                                ...graphEdges,
-                                                {
-                                                    from: "Meeting",
-                                                    to: cat,
-                                                    relation: "detected",
-                                                },
-                                            ];
-                                        }
-                                    }
-                                }
                             }
                         } catch (e) {
                             console.error("Live extraction error:", e);
@@ -1467,6 +1700,8 @@ Return ONLY valid JSON, no markdown, no explanation.`;
 
                         // Show whisper transcription in status
                         if (intel?.text && intel.text.trim().length > 0) {
+                            // Use speaker from backend diarization
+                            const whisperSpeaker = intel?.speaker || "You";
                             status = `Whisper (${intel.language}): "${intel.text.substring(0, 50)}..."`;
 
                             // Also add as a partial transcript immediately for live feedback
@@ -1478,7 +1713,11 @@ Return ONLY valid JSON, no markdown, no explanation.`;
                                 // Update existing partial
                                 transcripts = transcripts.map((t) =>
                                     t.isPartial
-                                        ? { ...t, text: intel.text }
+                                        ? {
+                                              ...t,
+                                              text: intel.text,
+                                              speaker: whisperSpeaker,
+                                          }
                                         : t,
                                 );
                             } else {
@@ -1492,8 +1731,12 @@ Return ONLY valid JSON, no markdown, no explanation.`;
                                             minute: "2-digit",
                                         },
                                     ),
-                                    speaker: "You",
-                                    speakerId: 1,
+                                    speaker: whisperSpeaker,
+                                    speakerId:
+                                        whisperSpeaker === "You" ||
+                                        whisperSpeaker.includes("1")
+                                            ? 1
+                                            : 0,
                                     text: intel.text,
                                     tone: "NEUTRAL",
                                     category: ["INFO"],

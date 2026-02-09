@@ -1,8 +1,14 @@
 <script lang="ts">
     import { onMount, onDestroy } from "svelte";
-    
-    export let nodes: Array<{ id: string; type: string; weight?: number; label?: string }> = [];
-    export let edges: Array<{ from: string; to: string; relation: string }> = [];
+
+    export let nodes: Array<{
+        id: string;
+        type: string;
+        weight?: number;
+        label?: string;
+    }> = [];
+    export let edges: Array<{ from: string; to: string; relation: string }> =
+        [];
 
     // Force-directed layout state
     interface NodePosition {
@@ -13,7 +19,7 @@
         fx?: number | null; // Fixed x (when dragging)
         fy?: number | null; // Fixed y (when dragging)
     }
-    
+
     let positions: Map<string, NodePosition> = new Map();
     let svgElement: SVGSVGElement;
     let containerWidth = 600;
@@ -22,84 +28,94 @@
     let isSimulating = true;
     let draggedNode: string | null = null;
     let simulationTick = 0;
-    
+
     // Pan & Zoom state
     let zoomLevel = 1.0;
     let panX = 0;
     let panY = 0;
     let isPanning = false;
-    
+
     // Force simulation constants
     const REPULSION = 5000;
     const ATTRACTION = 0.05;
     const DAMPING = 0.85;
     const CENTER_PULL = 0.01;
     const MIN_DISTANCE = 80;
-    
+
     // Initialize node positions
     function initializePositions() {
         const centerX = containerWidth / 2;
         const centerY = containerHeight / 2;
-        
+
         nodes.forEach((node, i) => {
             if (!positions.has(node.id)) {
                 const angle = (i / Math.max(nodes.length, 1)) * 2 * Math.PI;
                 const radius = Math.min(containerWidth, containerHeight) * 0.3;
                 positions.set(node.id, {
-                    x: centerX + radius * Math.cos(angle) + (Math.random() - 0.5) * 50,
-                    y: centerY + radius * Math.sin(angle) + (Math.random() - 0.5) * 50,
+                    x:
+                        centerX +
+                        radius * Math.cos(angle) +
+                        (Math.random() - 0.5) * 50,
+                    y:
+                        centerY +
+                        radius * Math.sin(angle) +
+                        (Math.random() - 0.5) * 50,
                     vx: 0,
                     vy: 0,
                 });
             }
         });
-        
+
         // Remove positions for deleted nodes
-        const nodeIds = new Set(nodes.map(n => n.id));
+        const nodeIds = new Set(nodes.map((n) => n.id));
         for (const id of positions.keys()) {
             if (!nodeIds.has(id)) {
                 positions.delete(id);
             }
         }
-        
+
         positions = new Map(positions);
     }
-    
+
     // Force simulation step
     function simulateStep() {
         if (!isSimulating || nodes.length === 0) return;
-        
+
         const centerX = containerWidth / 2;
         const centerY = containerHeight / 2;
-        
+
         // Apply forces
         nodes.forEach((node) => {
             const pos = positions.get(node.id);
-            if (!pos || pos.fx !== undefined && pos.fx !== null) return;
-            
-            let fx = 0, fy = 0;
-            
+            if (!pos || (pos.fx !== undefined && pos.fx !== null)) return;
+
+            let fx = 0,
+                fy = 0;
+
             // Repulsion from other nodes
             nodes.forEach((other) => {
                 if (other.id === node.id) return;
                 const otherPos = positions.get(other.id);
                 if (!otherPos) return;
-                
+
                 const dx = pos.x - otherPos.x;
                 const dy = pos.y - otherPos.y;
-                const dist = Math.max(Math.sqrt(dx * dx + dy * dy), MIN_DISTANCE);
+                const dist = Math.max(
+                    Math.sqrt(dx * dx + dy * dy),
+                    MIN_DISTANCE,
+                );
                 const force = REPULSION / (dist * dist);
-                
+
                 fx += (dx / dist) * force;
                 fy += (dy / dist) * force;
             });
-            
+
             // Attraction to connected nodes
             edges.forEach((edge) => {
                 let otherId: string | null = null;
                 if (edge.from === node.id) otherId = edge.to;
                 else if (edge.to === node.id) otherId = edge.from;
-                
+
                 if (otherId) {
                     const otherPos = positions.get(otherId);
                     if (otherPos) {
@@ -110,39 +126,45 @@
                     }
                 }
             });
-            
+
             // Pull toward center
             fx += (centerX - pos.x) * CENTER_PULL;
             fy += (centerY - pos.y) * CENTER_PULL;
-            
+
             // Update velocity
             pos.vx = (pos.vx + fx) * DAMPING;
             pos.vy = (pos.vy + fy) * DAMPING;
-            
+
             // Update position
             pos.x += pos.vx;
             pos.y += pos.vy;
-            
+
             // Boundary constraints
             const padding = 50;
-            pos.x = Math.max(padding, Math.min(containerWidth - padding, pos.x));
-            pos.y = Math.max(padding, Math.min(containerHeight - padding, pos.y));
+            pos.x = Math.max(
+                padding,
+                Math.min(containerWidth - padding, pos.x),
+            );
+            pos.y = Math.max(
+                padding,
+                Math.min(containerHeight - padding, pos.y),
+            );
         });
-        
+
         positions = new Map(positions);
         simulationTick++;
-        
+
         // Slow down simulation over time
         if (simulationTick > 300) {
             isSimulating = false;
         }
     }
-    
+
     function animate() {
         simulateStep();
         animationFrame = requestAnimationFrame(animate);
     }
-    
+
     // Drag handlers
     function handleMouseDown(event: MouseEvent, nodeId: string) {
         draggedNode = nodeId;
@@ -153,14 +175,14 @@
         }
         event.preventDefault();
     }
-    
+
     function handleMouseMove(event: MouseEvent) {
         if (!draggedNode || !svgElement) return;
-        
+
         const rect = svgElement.getBoundingClientRect();
         const x = event.clientX - rect.left;
         const y = event.clientY - rect.top;
-        
+
         const pos = positions.get(draggedNode);
         if (pos) {
             pos.x = x;
@@ -172,7 +194,7 @@
             positions = new Map(positions);
         }
     }
-    
+
     function handleMouseUp() {
         if (draggedNode) {
             const pos = positions.get(draggedNode);
@@ -192,13 +214,16 @@
         event.preventDefault();
         const zoomSpeed = 0.001;
         const delta = -event.deltaY;
-        const newZoom = Math.max(0.2, Math.min(3, zoomLevel + delta * zoomSpeed));
-        
+        const newZoom = Math.max(
+            0.2,
+            Math.min(3, zoomLevel + delta * zoomSpeed),
+        );
+
         // Target focus
         const rect = svgElement.getBoundingClientRect();
         const mouseX = event.clientX - rect.left;
         const mouseY = event.clientY - rect.top;
-        
+
         // Adjust pan to zoom toward mouse
         const zoomRatio = newZoom / zoomLevel;
         panX = mouseX - (mouseX - panX) * zoomRatio;
@@ -226,24 +251,36 @@
         const colors: Record<string, string> = {
             TASK: "#00c8ff",
             DECISION: "#4dd2ff",
-            PERSON: "#00b4e6",
+            PERSON: "#a78bfa",
             DEADLINE: "#ef4444",
             RISK: "#f59e0b",
             ACTION_ITEM: "#10b981",
-            Entity: "#00c8ff",
-            entity: "#00c8ff",
+            Speaker: "#22d3ee",
+            Topic: "#6366f1",
+            Tone: "#f472b6",
+            Category: "#818cf8",
+            Entity: "#34d399",
+            entity: "#34d399",
+            PROJECT: "#f97316",
+            TOPIC: "#06b6d4",
+            LOCATION: "#84cc16",
+            DATE: "#e879f9",
+            ORG: "#fb923c",
+            URGENCY: "#dc2626",
+            SENTIMENT: "#a855f7",
+            QUERY: "#2dd4bf",
             default: "#00c8ff",
         };
         return colors[type] || colors.default;
     }
-    
+
     // Reactive updates
     $: if (nodes.length > 0) {
         initializePositions();
         isSimulating = true;
         simulationTick = 0;
     }
-    
+
     onMount(() => {
         // Get container dimensions
         if (svgElement?.parentElement) {
@@ -251,46 +288,61 @@
             containerWidth = rect.width || 600;
             containerHeight = rect.height || 400;
         }
-        
+
         initializePositions();
         animate();
-        
+
         // Add global mouse handlers
-        window.addEventListener('mousemove', handleGlobalMouseMove);
-        window.addEventListener('mouseup', handleMouseUp);
+        window.addEventListener("mousemove", handleGlobalMouseMove);
+        window.addEventListener("mouseup", handleMouseUp);
         // Only add wheel listener if svg element exists (won't exist if nodes.length === 0)
         if (svgElement) {
-            svgElement.addEventListener('wheel', handleZoom, { passive: false });
+            svgElement.addEventListener("wheel", handleZoom, {
+                passive: false,
+            });
         }
     });
-    
+
     onDestroy(() => {
         if (animationFrame) cancelAnimationFrame(animationFrame);
-        window.removeEventListener('mousemove', handleGlobalMouseMove);
-        window.removeEventListener('mouseup', handleMouseUp);
-        if (svgElement) svgElement.removeEventListener('wheel', handleZoom);
+        window.removeEventListener("mousemove", handleGlobalMouseMove);
+        window.removeEventListener("mouseup", handleMouseUp);
+        if (svgElement) svgElement.removeEventListener("wheel", handleZoom);
     });
 </script>
 
-<div class="w-full h-full rounded-lg relative overflow-hidden" style="background: linear-gradient(135deg, rgba(13, 17, 23, 0.95) 0%, rgba(10, 12, 15, 0.9) 100%); border: 1px solid rgba(0, 200, 255, 0.15);">
+<div
+    class="w-full h-full rounded-lg relative overflow-hidden"
+    style="background: linear-gradient(135deg, rgba(13, 17, 23, 0.95) 0%, rgba(10, 12, 15, 0.9) 100%); border: 1px solid rgba(0, 200, 255, 0.15);"
+>
     {#if nodes.length === 0}
         <div class="absolute inset-0 flex items-center justify-center">
             <div class="text-center">
-                <svg class="w-10 h-10 mx-auto mb-3 opacity-50 text-cyan-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-                    <circle cx="12" cy="5" r="3"/>
-                    <circle cx="5" cy="19" r="3"/>
-                    <circle cx="19" cy="19" r="3"/>
-                    <line x1="12" y1="8" x2="5" y2="16"/>
-                    <line x1="12" y1="8" x2="19" y2="16"/>
+                <svg
+                    class="w-10 h-10 mx-auto mb-3 opacity-50 text-cyan-500"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.5"
+                >
+                    <circle cx="12" cy="5" r="3" />
+                    <circle cx="5" cy="19" r="3" />
+                    <circle cx="19" cy="19" r="3" />
+                    <line x1="12" y1="8" x2="5" y2="16" />
+                    <line x1="12" y1="8" x2="19" y2="16" />
                 </svg>
-                <p class="text-sm text-cyan-500/50">Knowledge graph will appear here</p>
-                <p class="text-xs text-slate-500 mt-1">Start recording or simulate to add nodes</p>
+                <p class="text-sm text-cyan-500/50">
+                    Knowledge graph will appear here
+                </p>
+                <p class="text-xs text-slate-500 mt-1">
+                    Start recording or simulate to add nodes
+                </p>
             </div>
         </div>
     {:else}
-        <svg 
-            bind:this={svgElement} 
-            class="w-full h-full touch-none" 
+        <svg
+            bind:this={svgElement}
+            class="w-full h-full touch-none"
             viewBox="0 0 {containerWidth} {containerHeight}"
             onmousedown={handleBackgroundMouseDown}
             role="application"
@@ -299,19 +351,34 @@
             <!-- Glow filter -->
             <defs>
                 <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
-                    <feGaussianBlur stdDeviation="3" result="coloredBlur"/>
+                    <feGaussianBlur stdDeviation="3" result="coloredBlur" />
                     <feMerge>
-                        <feMergeNode in="coloredBlur"/>
-                        <feMergeNode in="SourceGraphic"/>
+                        <feMergeNode in="coloredBlur" />
+                        <feMergeNode in="SourceGraphic" />
                     </feMerge>
                 </filter>
-                
-                <linearGradient id="edgeGradient" x1="0%" y1="0%" x2="100%" y2="0%">
-                    <stop offset="0%" style="stop-color:#00c8ff;stop-opacity:0.1" />
-                    <stop offset="50%" style="stop-color:#00c8ff;stop-opacity:0.4" />
-                    <stop offset="100%" style="stop-color:#00c8ff;stop-opacity:0.1" />
+
+                <linearGradient
+                    id="edgeGradient"
+                    x1="0%"
+                    y1="0%"
+                    x2="100%"
+                    y2="0%"
+                >
+                    <stop
+                        offset="0%"
+                        style="stop-color:#00c8ff;stop-opacity:0.1"
+                    />
+                    <stop
+                        offset="50%"
+                        style="stop-color:#00c8ff;stop-opacity:0.4"
+                    />
+                    <stop
+                        offset="100%"
+                        style="stop-color:#00c8ff;stop-opacity:0.1"
+                    />
                 </linearGradient>
-                
+
                 <marker
                     id="arrowhead"
                     markerWidth="10"
@@ -365,9 +432,12 @@
                     {#each nodes as node}
                         {@const pos = positions.get(node.id)}
                         {#if pos}
-                            <g 
-                                transform="translate({pos.x}, {pos.y})" 
-                                class="cursor-grab transition-transform {draggedNode === node.id ? 'cursor-grabbing' : 'hover:scale-110'}"
+                            <g
+                                transform="translate({pos.x}, {pos.y})"
+                                class="cursor-grab transition-transform {draggedNode ===
+                                node.id
+                                    ? 'cursor-grabbing'
+                                    : 'hover:scale-110'}"
                                 onmousedown={(e) => handleMouseDown(e, node.id)}
                                 role="button"
                                 tabindex="0"
@@ -378,16 +448,24 @@
                                     fill="none"
                                     stroke={getNodeColor(node.type)}
                                     stroke-width="1"
-                                    stroke-opacity={draggedNode === node.id ? 0.5 : 0.2}
-                                    class={draggedNode === node.id ? '' : 'animate-pulse'}
+                                    stroke-opacity={draggedNode === node.id
+                                        ? 0.5
+                                        : 0.2}
+                                    class={draggedNode === node.id
+                                        ? ""
+                                        : "animate-pulse"}
                                 />
                                 <!-- Main node circle -->
                                 <circle
                                     r="22"
                                     fill={getNodeColor(node.type)}
-                                    fill-opacity={draggedNode === node.id ? 0.25 : 0.1}
+                                    fill-opacity={draggedNode === node.id
+                                        ? 0.25
+                                        : 0.1}
                                     stroke={getNodeColor(node.type)}
-                                    stroke-width={draggedNode === node.id ? 3 : 2}
+                                    stroke-width={draggedNode === node.id
+                                        ? 3
+                                        : 2}
                                     filter="url(#glow)"
                                 />
                                 <!-- Inner highlight -->
@@ -447,7 +525,7 @@
             </g>
         </svg>
     {/if}
-    
+
     <!-- Stats overlay -->
     <div class="absolute bottom-3 left-3 text-xs text-slate-500 flex gap-3">
         <span class="flex items-center gap-1">

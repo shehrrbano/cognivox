@@ -2,12 +2,26 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use crossbeam_channel::{unbounded, Sender, Receiver};
+use serde::{Serialize, Deserialize};
+
+/// Tagged audio chunk with source information for speaker diarization
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TaggedAudio {
+    pub samples: Vec<f32>,
+    pub source: AudioSource,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub enum AudioSource {
+    Microphone,  // User's voice
+    System,      // Other speakers (WASAPI loopback)
+}
 
 // Audio state for Tauri
 pub struct AudioState {
     pub is_recording: Mutex<bool>,
     pub stream_control: Mutex<Option<Sender<()>>>,
-    pub audio_tx: Mutex<Option<Sender<Vec<f32>>>>,
+    pub audio_tx: Mutex<Option<Sender<TaggedAudio>>>,
     pub current_volume: Arc<Mutex<f32>>,
     pub capture_mode: Mutex<CaptureMode>,
 }
@@ -26,7 +40,7 @@ impl Default for AudioState {
             stream_control: Mutex::new(None),
             audio_tx: Mutex::new(None),
             current_volume: Arc::new(Mutex::new(0.0)),
-            capture_mode: Mutex::new(CaptureMode::Both), // Default to Both (Mic + System)
+            capture_mode: Mutex::new(CaptureMode::Both),
         }
     }
 }
@@ -170,13 +184,16 @@ pub fn start_audio_capture(state: tauri::State<'_, AudioState>) -> Result<String
                                 }
                             }
                             
-                            // Buffer and send chunks
+                            // Buffer and send tagged chunks (Microphone source)
                             if let Ok(mut b) = buf.lock() {
                                 b.extend(resampled);
                                 while b.len() >= MICRO_CHUNK_SAMPLES {
                                     let chunk: Vec<f32> = b.drain(..MICRO_CHUNK_SAMPLES).collect();
                                     if let Some(ref tx) = tx {
-                                        let _ = tx.send(chunk);
+                                        let _ = tx.send(TaggedAudio {
+                                            samples: chunk,
+                                            source: AudioSource::Microphone,
+                                        });
                                     }
                                 }
                             }
@@ -241,12 +258,16 @@ pub fn start_audio_capture(state: tauri::State<'_, AudioState>) -> Result<String
                                 }
                             }
                             
+                            // Buffer and send tagged chunks (System/loopback source)
                             if let Ok(mut b) = buf.lock() {
                                 b.extend(resampled);
                                 while b.len() >= MICRO_CHUNK_SAMPLES {
                                     let chunk: Vec<f32> = b.drain(..MICRO_CHUNK_SAMPLES).collect();
                                     if let Some(ref tx) = tx {
-                                        let _ = tx.send(chunk);
+                                        let _ = tx.send(TaggedAudio {
+                                            samples: chunk,
+                                            source: AudioSource::System,
+                                        });
                                     }
                                 }
                             }
@@ -311,12 +332,16 @@ pub fn start_audio_capture(state: tauri::State<'_, AudioState>) -> Result<String
                                     }
                                 }
                                 
+                                // Buffer and send tagged chunks (System/Stereo Mix source)
                                 if let Ok(mut b) = buf.lock() {
                                     b.extend(resampled);
                                     while b.len() >= MICRO_CHUNK_SAMPLES {
                                         let chunk: Vec<f32> = b.drain(..MICRO_CHUNK_SAMPLES).collect();
                                         if let Some(ref tx) = tx {
-                                            let _ = tx.send(chunk);
+                                            let _ = tx.send(TaggedAudio {
+                                                samples: chunk,
+                                                source: AudioSource::System,
+                                            });
                                         }
                                     }
                                 }
