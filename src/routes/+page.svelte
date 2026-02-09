@@ -450,6 +450,29 @@
         status = `Restored: ${session.metadata.title || "Session"}`;
     }
 
+    async function handleSessionDelete(sessionId: string, event: MouseEvent) {
+        event.stopPropagation();
+        const confirmed = confirm(
+            "Delete this session? This cannot be undone.",
+        );
+        if (!confirmed) return;
+        try {
+            await invoke("delete_session", { sessionId });
+            const result = (await invoke("list_sessions")) as string;
+            pastSessions = JSON.parse(result);
+            if (currentSession?.id === sessionId) {
+                currentSession = null;
+                transcripts = [];
+                graphNodes = [];
+                graphEdges = [];
+            }
+            status = "Session deleted";
+        } catch (error) {
+            console.error("[SESSION] Delete failed:", error);
+            status = "Failed to delete session";
+        }
+    }
+
     async function saveSession(isFinal = false) {
         if (!isRunningInTauri || (!isRecording && !isFinal)) return;
 
@@ -1951,41 +1974,64 @@ Return ONLY valid JSON, no markdown, no explanation.`;
                     </div>
                 {:else}
                     {#each pastSessions as session}
-                        <button
-                            class="w-full text-left p-3 rounded-lg border transition-all duration-300 {currentSession?.id ===
-                            session.id
-                                ? 'bg-cyan-500/10 border-cyan-500/40 shadow-lg shadow-cyan-500/10'
-                                : 'bg-[#0d1117] border-cyan-500/5 hover:border-cyan-500/20'}"
-                            onclick={() => handleSessionLoad(session)}
-                        >
-                            <div class="flex justify-between items-start mb-1">
-                                <span
-                                    class="text-xs font-bold text-slate-200 truncate pr-2"
-                                >
-                                    {session.metadata.title ||
-                                        "Untitled Mission"}
-                                </span>
-                                <span
-                                    class="text-[9px] font-mono text-cyan-500"
-                                >
-                                    {Math.floor(
-                                        session.metadata.duration_seconds / 60,
-                                    )}m
-                                </span>
-                            </div>
-                            <div
-                                class="flex justify-between items-center text-[9px] text-slate-500 font-mono"
+                        <div class="relative group">
+                            <button
+                                class="w-full text-left p-3 rounded-lg border transition-all duration-300 {currentSession?.id ===
+                                session.id
+                                    ? 'bg-cyan-500/10 border-cyan-500/40 shadow-lg shadow-cyan-500/10'
+                                    : 'bg-[#0d1117] border-cyan-500/5 hover:border-cyan-500/20'}"
+                                onclick={() => handleSessionLoad(session)}
                             >
-                                <span
-                                    >{new Date(
-                                        session.created_at,
-                                    ).toLocaleDateString()}</span
+                                <div
+                                    class="flex justify-between items-start mb-1"
                                 >
-                                <span
-                                    >{session.metadata.total_transcripts} tags</span
+                                    <span
+                                        class="text-xs font-bold text-slate-200 truncate pr-6"
+                                    >
+                                        {session.metadata.title ||
+                                            "Untitled Mission"}
+                                    </span>
+                                    <span
+                                        class="text-[9px] font-mono text-cyan-500"
+                                    >
+                                        {Math.floor(
+                                            session.metadata.duration_seconds /
+                                                60,
+                                        )}m
+                                    </span>
+                                </div>
+                                <div
+                                    class="flex justify-between items-center text-[9px] text-slate-500 font-mono"
                                 >
-                            </div>
-                        </button>
+                                    <span
+                                        >{new Date(
+                                            session.created_at,
+                                        ).toLocaleDateString()}</span
+                                    >
+                                    <span
+                                        >{session.metadata.total_transcripts} tags</span
+                                    >
+                                </div>
+                            </button>
+                            <!-- Delete button -->
+                            <button
+                                class="absolute top-2 right-2 p-1 rounded opacity-0 group-hover:opacity-100 transition-opacity bg-red-500/10 hover:bg-red-500/30 text-red-400 hover:text-red-300 border border-red-500/20"
+                                onclick={(e) =>
+                                    handleSessionDelete(session.id, e)}
+                                title="Delete session"
+                            >
+                                <svg
+                                    class="w-3 h-3"
+                                    viewBox="0 0 24 24"
+                                    fill="none"
+                                    stroke="currentColor"
+                                    stroke-width="2"
+                                    ><polyline points="3 6 5 6 21 6" /><path
+                                        d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"
+                                    /></svg
+                                >
+                            </button>
+                        </div>
                     {/each}
                 {/if}
             </div>
@@ -2001,7 +2047,11 @@ Return ONLY valid JSON, no markdown, no explanation.`;
             </div>
 
             <div class="sidebar-card h-48 overflow-hidden">
-                <KnowledgeGraph nodes={graphNodes} edges={graphEdges} />
+                <KnowledgeGraph
+                    nodes={graphNodes}
+                    edges={graphEdges}
+                    compact={true}
+                />
             </div>
         </div>
 
@@ -2793,7 +2843,10 @@ Return ONLY valid JSON, no markdown, no explanation.`;
                         </div>
                     {/if}
                 {:else if activeTab === "graph"}
-                    <div class="content-card h-[500px]">
+                    <div
+                        class="content-card"
+                        style="height: calc(100vh - 220px); min-height: 500px;"
+                    >
                         <div class="content-card-header">
                             <span class="text-sm font-medium text-slate-200"
                                 >Knowledge Graph Visualization</span
@@ -2803,10 +2856,11 @@ Return ONLY valid JSON, no markdown, no explanation.`;
                                 edges</span
                             >
                         </div>
-                        <div class="h-full p-4">
+                        <div class="h-full p-2">
                             <KnowledgeGraph
                                 nodes={graphNodes}
                                 edges={graphEdges}
+                                compact={false}
                             />
                         </div>
                     </div>
