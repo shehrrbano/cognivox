@@ -1,0 +1,17 @@
+=== COGNIVOX BUILD STARTED ===
+
+Checking tools:
+C:\Program Files\CMake\bin\cmake.exe
+[OK] cmake found 
+C:\msys64\mingw64\bin\gcc.exe
+[OK] gcc found 
+[FAIL] cl not found (may need VS Developer prompt)
+LIBCLANG_PATH=D:\llvm\bin
+
+Starting cargo build...
+    Blocking waiting for file lock on build directory
+
+=== BUILD EXIT CODE: 1 ===
+[FAIL] cognivox.exe not found
+=== BUILD COMPLETE ===
+Press any key to continue . . . 
