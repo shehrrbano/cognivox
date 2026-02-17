@@ -1,10 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex as StdMutex};
 use tauri::{AppHandle, Emitter, Manager};
-use tokio::sync::Mutex;
-use tokio::time::{Duration, interval, timeout, Instant, sleep};
+use tokio::time::{Duration, interval, Instant, sleep};
 use crossbeam_channel::Receiver;
-use crate::whisper_client::{WhisperState, transcribe_audio};
+use crate::whisper_client::{WhisperState, transcribe_audio_with_context};
 use crate::audio_capture::{TaggedAudio, AudioSource};
 
 // ============================================================================
@@ -20,11 +19,12 @@ const MAX_BACKOFF_SECS: u64 = 60;              // Max 60 second backoff
 const RATE_LIMIT_CODES: [&str; 3] = ["429", "RESOURCE_EXHAUSTED", "rate"];
 
 // AUDIO SEGMENTATION CONFIG (used before Whisper)
-const MIN_SPEECH_SECS: f32 = 0.5;              // Minimum 0.5s of speech (more sensitive)
-const SILENCE_TIMEOUT_SECS: f32 = 1.5;         // 1.5s silence = end
-const MAX_BATCH_SECS: f32 = 15.0;              // Max 15 seconds per batch
-const SPEECH_THRESHOLD: f32 = 0.0003;          // Very sensitive speech detection
-const SILENCE_THRESHOLD: f32 = 0.0001;         // Silence detection
+const MIN_SPEECH_SECS: f32 = 0.4;              // Minimum 0.4s of speech (catch quick utterances)
+const SILENCE_TIMEOUT_SECS: f32 = 2.5;         // 2.5s silence = end of segment (more patient)
+const MAX_BATCH_SECS: f32 = 30.0;              // Max 30 seconds per batch (good for conversations)
+const OVERLAP_SECS: f32 = 1.0;                 // 1s base overlap (we'll use 1.5x in code)
+const SPEECH_THRESHOLD: f32 = 0.00025;         // Slightly lower - more sensitive to soft speech
+const SILENCE_THRESHOLD: f32 = 0.00008;        // Lower - capture very quiet audio too
 
 
 pub struct GeminiState {
@@ -372,7 +372,14 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle) {
     let mut speaking = false;
     let mut speech_start: Option<Instant> = None;
     let mut last_speech: Option<Instant> = None;
-    let mut processing = false;
+    
+    // Use Arc<Mutex<bool>> so we can share processing state with the spawned task
+    // This way the main loop keeps collecting audio even while processing
+    let processing = Arc::new(StdMutex::new(false));
+    
+    // Pending audio: audio collected during processing that we must not lose
+    let pending_buffer: Arc<StdMutex<Vec<f32>>> = Arc::new(StdMutex::new(Vec::new()));
+    let pending_speaking: Arc<StdMutex<bool>> = Arc::new(StdMutex::new(false));
     
     // Speaker diarization: track energy from each source
     let mut mic_energy: f64 = 0.0;
@@ -381,10 +388,10 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle) {
     let mut system_sample_count: u64 = 0;
     
     // Rate limiting state
-    let mut backoff: u64 = 0;
-    let mut last_request = Instant::now() - Duration::from_secs(MIN_REQUEST_INTERVAL_SECS);
+    let backoff = Arc::new(StdMutex::new(0u64));
+    let last_request = Arc::new(StdMutex::new(Instant::now() - Duration::from_secs(MIN_REQUEST_INTERVAL_SECS)));
     let mut request_count = 0u32;
-    let mut audio_received_count = 0u64;
+    let mut _audio_received_count = 0u64;
     let mut last_level_log = Instant::now();
     
     let mut tick = interval(Duration::from_millis(50)); // More frequent polling
@@ -392,15 +399,17 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle) {
     
     println!("[AUDIO] ========================================");
     println!("[AUDIO] Speech threshold: {}, Silence threshold: {}", SPEECH_THRESHOLD, SILENCE_THRESHOLD);
-    println!("[AUDIO] Min speech: {}s, Silence timeout: {}s", MIN_SPEECH_SECS, SILENCE_TIMEOUT_SECS);
+    println!("[AUDIO] Min speech: {}s, Silence timeout: {}s, Max batch: {}s", MIN_SPEECH_SECS, SILENCE_TIMEOUT_SECS, MAX_BATCH_SECS);
+    println!("[AUDIO] Overlap between chunks: {}s", OVERLAP_SECS);
     println!("[AUDIO] ========================================");
     
     loop {
         tick.tick().await;
         
-        if processing { continue; }
+        let is_processing = *processing.lock().unwrap();
         
-        // Collect tagged audio
+        // ALWAYS collect audio from rx, even while processing
+        // CRITICAL: NO PACKET LOSS - collect ALL audio regardless of processing state
         let mut new: Vec<f32> = Vec::new();
         while let Ok(tagged) = rx.try_recv() {
             let source_rms = rms(&tagged.samples) as f64;
@@ -417,21 +426,41 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle) {
             new.extend(tagged.samples);
         }
         
+        // If processing, store ALL audio in pending buffer so NOTHING is lost
+        // CRITICAL: Do NOT skip any audio based on level - save everything
+        if is_processing && !new.is_empty() {
+            let level = rms(&new);
+            // Save ALL audio to pending buffer regardless of level
+            if let Ok(mut pb) = pending_buffer.lock() {
+                pb.extend(&new);
+            }
+            // Track speaking state
+            if level > SPEECH_THRESHOLD {
+                if let Ok(mut ps) = pending_speaking.lock() {
+                    *ps = true;
+                }
+            }
+            // Update counters
+            _audio_received_count += 1;
+            total_samples_received += new.len() as u64;
+            continue;  // Skip further processing, continue collecting
+        }
+        
         // Process new audio if available (but DON'T skip the processing check below)
         if !new.is_empty() {
-            audio_received_count += 1;
+            _audio_received_count += 1;
             total_samples_received += new.len() as u64;
             let level = rms(&new);
             
-            // Log audio level every 1 second for better diagnostics
-            if last_level_log.elapsed() > Duration::from_secs(1) {
+            // Log audio level every 2 seconds for diagnostics
+            if last_level_log.elapsed() > Duration::from_secs(2) {
                 let buffer_duration = buffer.len() as f32 / 16000.0;
                 println!("[AUDIO] Level: {:.6} (threshold: {:.6}) | Speaking: {} | Buffer: {:.1}s | Total samples: {}", 
                          level, SPEECH_THRESHOLD, speaking, buffer_duration, total_samples_received);
                 last_level_log = Instant::now();
             }
             
-            // Speech detection
+            // Speech detection - CONSERVATIVE to avoid losing packets
             if level > SPEECH_THRESHOLD {
                 if !speaking {
                     speaking = true;
@@ -441,18 +470,26 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle) {
                 }
                 last_speech = Some(Instant::now());
                 buffer.extend(new);
-            } else if level > SILENCE_THRESHOLD && speaking {
-                buffer.extend(new);
-                last_speech = Some(Instant::now());
-            } else if speaking {
-                buffer.extend(new);
+            } else if level > SILENCE_THRESHOLD {
+                // CRITICAL: Continue collecting audio if we're speaking OR if level is above silence
+                // This captures soft-spoken words and prevents packet loss at sentence boundaries
+                if speaking {
+                    buffer.extend(new);
+                    last_speech = Some(Instant::now());
+                } else {
+                    // Even if not actively speaking, buffer quiet audio in case speech starts
+                    // This prevents losing the start of softly spoken words
+                    buffer.extend(new);
+                }
+            } else {
+                // Complete silence - only extend buffer if we're actively speaking
+                if speaking {
+                    buffer.extend(new);
+                }
             }
         }
         
         // CRITICAL: Always check if we should process, even when no new audio arrives.
-        // This ensures buffered speech gets transcribed when audio stops (e.g., recording ends
-        // or silence filtering kicks in). Previously, `if new.is_empty() { continue; }` 
-        // would skip this check entirely, causing buffered audio to never be processed.
         let should_process = if speaking && !buffer.is_empty() {
             let duration = speech_start.map(|s| s.elapsed().as_secs_f32()).unwrap_or(0.0);
             let silence = last_speech.map(|s| s.elapsed().as_secs_f32()).unwrap_or(0.0);
@@ -470,7 +507,7 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle) {
             let duration = buffer.len() as f32 / 16000.0;
             
             if duration >= MIN_SPEECH_SECS {
-                processing = true;
+                *processing.lock().unwrap() = true;
                 request_count += 1;
                 
                 // Determine dominant speaker based on mic vs system energy
@@ -484,11 +521,27 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle) {
                 println!("[AUDIO] ========================================");
                 let _ = app.emit("cognivox:status", format!("Whisper transcribing {:.1}s audio...", duration));
                 
+                // Keep MORE overlap samples for next chunk to avoid losing words at boundaries
+                // Use 1.5 seconds of overlap instead of 1.0 for better continuity
+                let overlap_samples = ((OVERLAP_SECS * 1.5) * 16000.0) as usize;
                 let audio = buffer.clone();
-                buffer.clear();
-                speaking = false;
-                speech_start = None;
-                last_speech = None;
+                
+                // CRITICAL: Keep last overlap_samples in buffer for perfect continuity
+                // This ensures no words are lost between chunks
+                if buffer.len() > overlap_samples {
+                    let start = buffer.len() - overlap_samples;
+                    buffer = buffer[start..].to_vec();
+                    // DON'T clear speaking state - maintain continuity
+                    println!("[AUDIO] Retained {:.2}s overlap for next chunk", overlap_samples as f32 / 16000.0);
+                } else {
+                    // If buffer is smaller than overlap, keep everything
+                    // Don't clear - this might be mid-sentence
+                    println!("[AUDIO] Buffer smaller than overlap - keeping all {:.2}s", buffer.len() as f32 / 16000.0);
+                }
+                
+                // Update but don't reset speech timing - maintain continuity
+                speaking = false;  // Will restart on next audio
+                // Don't clear speech_start and last_speech yet - let them timeout naturally
                 
                 // Reset energy counters for next segment
                 mic_energy = 0.0;
@@ -498,124 +551,165 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle) {
                 
                 let speaker_tag = dominant_speaker.to_string();
                 
-                // Get Whisper state
-                let whisper_state = app.state::<WhisperState>();
-                let is_init = *whisper_state.is_initialized.lock().unwrap();
-                if !is_init {
-                    println!("[WHISPER] ✗ Not initialized - CANNOT TRANSCRIBE");
-                    let _ = app.emit("cognivox:status", "Whisper not initialized");
-                    processing = false;
-                    continue;
-                }
-                let model_path = match whisper_state.model_path.lock().unwrap().clone() {
-                    Some(p) => p,
-                    None => {
-                        println!("[WHISPER] ✗ Model path missing - CANNOT TRANSCRIBE");
-                        let _ = app.emit("cognivox:status", "Whisper model missing");
-                        processing = false;
-                        continue;
+                // Spawn the processing as a separate task so the main loop continues collecting audio
+                let app_clone = app.clone();
+                let processing_clone = processing.clone();
+                let backoff_clone = backoff.clone();
+                let last_request_clone = last_request.clone();
+                let _pending_buf_clone = pending_buffer.clone();
+                let _pending_speak_clone = pending_speaking.clone();
+                
+                // Spawn processing as async task so main loop keeps collecting audio
+                tokio::spawn(async move {
+                    let app = app_clone;
+                    
+                    // Get Whisper state
+                    let whisper_state = app.state::<WhisperState>();
+                    let is_init = *whisper_state.is_initialized.lock().unwrap();
+                    if !is_init {
+                        println!("[WHISPER] ✗ Not initialized - CANNOT TRANSCRIBE");
+                        let _ = app.emit("cognivox:status", "Whisper not initialized");
+                        *processing_clone.lock().unwrap() = false;
+                        return;
                     }
-                };
-                let language = whisper_state.language.lock().unwrap().clone();
-                println!("[WHISPER] Using language: '{}', model: {:?}", language, model_path);
-                
-                // Transcribe with Whisper
-                let transcription = match transcribe_audio(&model_path, &language, &audio).await {
-                    Ok(result) => {
-                        println!("[WHISPER] ========================================");
-                        println!("[WHISPER] ✓ TRANSCRIPTION SUCCESS:");
-                        println!("[WHISPER]   Text: '{}'", &result.text);
-                        println!("[WHISPER]   Language: {}, Confidence: {:.2}", result.language, result.confidence);
-                        println!("[WHISPER] ========================================");
-                        println!("[WHISPER] >>> EMITTING cognivox:whisper_transcription EVENT <<<");
-                        let _ = app.emit("cognivox:whisper_transcription", serde_json::json!({
-                            "text": result.text.clone(),
-                            "language": result.language,
-                            "confidence": result.confidence,
-                            "source": "whisper",
-                            "speaker": speaker_tag.clone()
-                        }));
-                        result.text
-                    }
-                    Err(e) => {
-                        println!("[WHISPER] ✗ TRANSCRIPTION FAILED: {}", e);
-                        let _ = app.emit("cognivox:status", format!("Whisper error: {}", e));
-                        processing = false;
-                        continue;
-                    }
-                };
-                
-                if transcription.trim().is_empty() {
-                    println!("[WHISPER] Empty transcription result, skipping Gemini");
-                    let _ = app.emit("cognivox:status", "Listening for speech...");
-                    processing = false;
-                    continue;
-                }
-                
-                let _ = app.emit("cognivox:status", "Extracting intelligence...");
-                
-                // Get current key and model from state
-                let (key, model) = {
-                    let state = app.state::<GeminiState>();
-                    let k: String = state.api_key.lock().unwrap().clone().unwrap_or_default();
-                    let m = state.selected_model.lock().unwrap().clone();
-                    (k, m)
-                };
-
-                if key.is_empty() {
-                    println!("[GEMINI] ✗ Error: No API key configured");
-                    let _ = app.emit("cognivox:status", "Error: No API key");
-                    let _ = app.emit("cognivox:api_error", serde_json::json!({"code": 401, "message": "No API key configured"}));
-                    processing = false;
-                    continue;
-                }
-                
-                // Include speaker tag in the transcript text sent to Gemini
-                let speaker_annotated_transcript = format!("[{}]: {}", speaker_tag, transcription);
-                
-                match call_gemini_with_text(&key, &model, &speaker_annotated_transcript, &mut backoff, &mut last_request).await {
-                    Ok(response) => {
-                        println!("[GEMINI] ========================================");
-                        println!("[GEMINI] ✓ INTELLIGENCE EXTRACTED:");
-                        println!("[GEMINI]   Response: '{}'", if response.len() > 150 { &response[..150] } else { &response });
-                        println!("[GEMINI] ========================================");
-                        println!("[GEMINI] >>> EMITTING cognivox:gemini_intelligence EVENT <<<");
-                        println!("[GEMINI]   transcript: '{}', speaker: '{}'", &transcription, &speaker_tag);
-                        let _ = app.emit("cognivox:gemini_intelligence", serde_json::json!({
-                            "transcript": transcription.clone(),
-                            "speaker": speaker_tag.clone(),
-                            "intelligence": response
-                        }));
+                    let model_path = match whisper_state.model_path.lock().unwrap().clone() {
+                        Some(p) => p,
+                        None => {
+                            println!("[WHISPER] ✗ Model path missing - CANNOT TRANSCRIBE");
+                            let _ = app.emit("cognivox:status", "Whisper model missing");
+                            *processing_clone.lock().unwrap() = false;
+                            return;
+                        }
+                    };
+                    let language = whisper_state.language.lock().unwrap().clone();
+                    println!("[WHISPER] Using language: '{}', model: {:?}", language, model_path);
+                    
+                    // Get recent context for better accuracy (last 2 transcriptions)
+                    let context = {
+                        let history = whisper_state.context_history.lock().unwrap();
+                        if history.is_empty() {
+                            None
+                        } else {
+                            let recent: String = history.iter()
+                                .rev()
+                                .take(2)
+                                .rev()
+                                .map(|s| s.as_str())
+                                .collect::<Vec<_>>()
+                                .join(" ");
+                            Some(recent)
+                        }
+                    };
+                    
+                    // Transcribe with Whisper using context for better accuracy
+                    let transcription = match transcribe_audio_with_context(&model_path, &language, &audio, context).await {
+                        Ok(result) => {
+                            println!("[WHISPER] ========================================");
+                            println!("[WHISPER] ✓ TRANSCRIPTION SUCCESS:");
+                            println!("[WHISPER]   Text: '{}'", &result.text);
+                            println!("[WHISPER]   Language: {}, Confidence: {:.2}", result.language, result.confidence);
+                            println!("[WHISPER] ========================================");
+                            
+                            // Update context history for next transcription
+                            let mut history = whisper_state.context_history.lock().unwrap();
+                            history.push(result.text.clone());
+                            // Keep only last 5 transcriptions for context
+                            if history.len() > 5 {
+                                history.remove(0);
+                            }
+                            drop(history);
+                            
+                            let _ = app.emit("cognivox:whisper_transcription", serde_json::json!({
+                                "text": result.text.clone(),
+                                "language": result.language,
+                                "confidence": result.confidence,
+                                "source": "whisper",
+                                "speaker": speaker_tag.clone()
+                            }));
+                            result.text
+                        }
+                        Err(e) => {
+                            println!("[WHISPER] ✗ TRANSCRIPTION FAILED: {}", e);
+                            let _ = app.emit("cognivox:status", format!("Whisper error: {}", e));
+                            *processing_clone.lock().unwrap() = false;
+                            return;
+                        }
+                    };
+                    
+                    if transcription.trim().is_empty() {
+                        println!("[WHISPER] Empty transcription result, skipping Gemini");
                         let _ = app.emit("cognivox:status", "Listening for speech...");
+                        *processing_clone.lock().unwrap() = false;
+                        return;
                     }
-                    Err(e) => {
-                        println!("[GEMINI] ✗ API Error: {}", e);
-                        println!("[GEMINI] >>> EMITTING FALLBACK cognivox:gemini_intelligence EVENT <<<");
-                        
-                        // STILL emit the transcript so user sees it even if Gemini failed
-                        let _ = app.emit("cognivox:gemini_intelligence", serde_json::json!({
-                            "transcript": transcription.clone(),
-                            "speaker": speaker_tag.clone(),
-                            "intelligence": format!("{{\"transcript\":\"{}\",\"speaker\":\"{}\",\"tone\":\"NEUTRAL\",\"category\":[\"INFO\"],\"confidence\":0.5}}", 
-                                transcription.replace('"', "'").replace('\n', " "), speaker_tag)
-                        }));
-                        
-                        let _ = app.emit("cognivox:status", format!("Gemini error: {}. Transcript saved.", e));
-                        
-                        // Emit error for frontend rotation
-                        let code = if e.contains("429") || e.contains("Rate limit") { 429 } else { 500 };
-                        let _ = app.emit("cognivox:api_error", serde_json::json!({
-                            "code": code,
-                            "message": e
-                        }));
+                    
+                    let _ = app.emit("cognivox:status", "Extracting intelligence...");
+                    
+                    // Get current key and model from state
+                    let (key, model) = {
+                        let state = app.state::<GeminiState>();
+                        let k: String = state.api_key.lock().unwrap().clone().unwrap_or_default();
+                        let m = state.selected_model.lock().unwrap().clone();
+                        (k, m)
+                    };
 
-                        // Extra wait on error
-                        sleep(Duration::from_secs(2)).await;
-                        let _ = app.emit("cognivox:status", "Listening for speech...");
+                    if key.is_empty() {
+                        println!("[GEMINI] ✗ Error: No API key configured");
+                        let _ = app.emit("cognivox:status", "Error: No API key");
+                        let _ = app.emit("cognivox:api_error", serde_json::json!({"code": 401, "message": "No API key configured"}));
+                        *processing_clone.lock().unwrap() = false;
+                        return;
                     }
-                }
+                    
+                    // Include speaker tag in the transcript text sent to Gemini
+                    let speaker_annotated_transcript = format!("[{}]: {}", speaker_tag, transcription);
+                    
+                    let mut bo = *backoff_clone.lock().unwrap();
+                    let mut lr = *last_request_clone.lock().unwrap();
+                    
+                    match call_gemini_with_text(&key, &model, &speaker_annotated_transcript, &mut bo, &mut lr).await {
+                        Ok(response) => {
+                            println!("[GEMINI] ✓ INTELLIGENCE EXTRACTED");
+                            let _ = app.emit("cognivox:gemini_intelligence", serde_json::json!({
+                                "transcript": transcription.clone(),
+                                "speaker": speaker_tag.clone(),
+                                "intelligence": response
+                            }));
+                            let _ = app.emit("cognivox:status", "Listening for speech...");
+                        }
+                        Err(e) => {
+                            println!("[GEMINI] ✗ API Error: {}", e);
+                            
+                            // STILL emit the transcript so user sees it even if Gemini failed
+                            let _ = app.emit("cognivox:gemini_intelligence", serde_json::json!({
+                                "transcript": transcription.clone(),
+                                "speaker": speaker_tag.clone(),
+                                "intelligence": format!("{{\"transcript\":\"{}\",\"speaker\":\"{}\",\"tone\":\"NEUTRAL\",\"category\":[\"INFO\"],\"confidence\":0.5}}", 
+                                    transcription.replace('"', "'").replace('\n', " "), speaker_tag)
+                            }));
+                            
+                            let _ = app.emit("cognivox:status", format!("Gemini error: {}. Transcript saved.", e));
+                            
+                            // Emit error for frontend rotation
+                            let code = if e.contains("429") || e.contains("Rate limit") { 429 } else { 500 };
+                            let _ = app.emit("cognivox:api_error", serde_json::json!({
+                                "code": code,
+                                "message": e
+                            }));
+
+                            sleep(Duration::from_secs(2)).await;
+                            let _ = app.emit("cognivox:status", "Listening for speech...");
+                        }
+                    }
+                    
+                    // Save backoff/last_request back
+                    *backoff_clone.lock().unwrap() = bo;
+                    *last_request_clone.lock().unwrap() = lr;
+                    
+                    // Mark processing complete
+                    *processing_clone.lock().unwrap() = false;
+                });
                 
-                processing = false;
             } else {
                 println!("[AUDIO] Discarding short segment ({:.1}s)", duration);
                 buffer.clear();
@@ -625,10 +719,41 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle) {
             }
         }
         
-        // Prevent buffer from growing too large
-        let max_samples = (MAX_BATCH_SECS * 16000.0) as usize;
+        // After processing completes, merge any pending audio back into main buffer
+        // CRITICAL: This ensures NO audio is lost during processing
+        if !*processing.lock().unwrap() {
+            if let Ok(mut pb) = pending_buffer.lock() {
+                if !pb.is_empty() {
+                    let pending_len = pb.len();
+                    println!("[AUDIO] Reintegrating {:.2}s of pending audio", pending_len as f32 / 16000.0);
+                    
+                    // PREPEND pending audio to buffer (it was collected while processing)
+                    // This maintains proper chronological order
+                    let mut new_buffer = pb.drain(..).collect::<Vec<f32>>();
+                    new_buffer.extend(&buffer);
+                    buffer = new_buffer;
+                    
+                    // Check if we should be in speaking state based on pending audio
+                    if let Ok(mut ps) = pending_speaking.lock() {
+                        if *ps {
+                            speaking = true;
+                            speech_start = Some(Instant::now());
+                            last_speech = Some(Instant::now());
+                            *ps = false;
+                            println!("[AUDIO] Resumed speaking state from pending audio");
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Allow buffer to grow up to max batch size (no truncation - we process before it gets too big)
+        let max_samples = (MAX_BATCH_SECS * 16000.0 * 1.5) as usize; // 1.5x to allow some overflow
         if buffer.len() > max_samples {
-            buffer.drain(0..buffer.len() - max_samples);
+            // Keep the most recent audio instead of discarding
+            let keep_from = buffer.len() - (MAX_BATCH_SECS * 16000.0) as usize;
+            buffer = buffer[keep_from..].to_vec();
+            println!("[AUDIO] Buffer overflow - kept last {:.1}s", MAX_BATCH_SECS);
         }
     }
 }

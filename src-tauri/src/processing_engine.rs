@@ -514,17 +514,17 @@ pub fn validate_json_schema(json_str: String) -> Result<bool, String> {
 
 #[tauri::command]
 pub fn update_processing_settings(
-    confidence_threshold: Option<f32>,
-    prediction_aggression: Option<f32>,
-    enable_optimistic: Option<bool>,
-    categories: Option<Vec<String>>,
+    _confidence_threshold: Option<f32>,
+    _prediction_aggression: Option<f32>,
+    _enable_optimistic: Option<bool>,
+    _categories: Option<Vec<String>>,
 ) -> Result<String, String> {
     // This would update the global state - simplified for now
     Ok("Settings updated".to_string())
 }
 
 #[tauri::command]
-pub fn get_recent_intelligence(count: u32) -> Result<Vec<String>, String> {
+pub fn get_recent_intelligence(_count: u32) -> Result<Vec<String>, String> {
     // Would return from cache - simplified for now
     Ok(vec![])
 }

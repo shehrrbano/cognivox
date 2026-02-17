@@ -118,6 +118,7 @@ pub fn run() {
             whisper_client::set_whisper_language,
             whisper_client::get_whisper_status,
             whisper_client::transcribe_audio_chunk,
+            whisper_client::clear_whisper_context,
             processing_engine::validate_json_schema,
             processing_engine::update_processing_settings,
             processing_engine::get_recent_intelligence,

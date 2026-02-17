@@ -41,12 +41,13 @@
     let isFullscreen = false;
     let selectedNode: string | null = null;
 
-    // Force simulation constants
-    const REPULSION = 5000;
-    const ATTRACTION = 0.05;
-    const DAMPING = 0.85;
-    const CENTER_PULL = 0.01;
-    const MIN_DISTANCE = 80;
+    // Force simulation constants - tuned for clear, non-overlapping layout
+    const REPULSION = 25000;
+    const ATTRACTION = 0.008;
+    const DAMPING = 0.82;
+    const CENTER_PULL = 0.003;
+    const MIN_DISTANCE = 180;
+    const IDEAL_EDGE_LENGTH = 220;
 
     // Initialize node positions
     function initializePositions() {
@@ -56,16 +57,21 @@
         nodes.forEach((node, i) => {
             if (!positions.has(node.id)) {
                 const angle = (i / Math.max(nodes.length, 1)) * 2 * Math.PI;
-                const radius = Math.min(containerWidth, containerHeight) * 0.3;
+                // Spread nodes out more based on count - use larger radius
+                const baseRadius =
+                    Math.min(containerWidth, containerHeight) * 0.35;
+                const radius =
+                    baseRadius +
+                    (nodes.length > 5 ? (nodes.length - 5) * 15 : 0);
                 positions.set(node.id, {
                     x:
                         centerX +
                         radius * Math.cos(angle) +
-                        (Math.random() - 0.5) * 50,
+                        (Math.random() - 0.5) * 80,
                     y:
                         centerY +
                         radius * Math.sin(angle) +
-                        (Math.random() - 0.5) * 50,
+                        (Math.random() - 0.5) * 80,
                     vx: 0,
                     vy: 0,
                 });
@@ -98,7 +104,7 @@
             let fx = 0,
                 fy = 0;
 
-            // Repulsion from other nodes
+            // Repulsion from other nodes (stronger, with larger min distance)
             nodes.forEach((other) => {
                 if (other.id === node.id) return;
                 const otherPos = positions.get(other.id);
@@ -106,17 +112,21 @@
 
                 const dx = pos.x - otherPos.x;
                 const dy = pos.y - otherPos.y;
-                const dist = Math.max(
-                    Math.sqrt(dx * dx + dy * dy),
-                    MIN_DISTANCE,
-                );
+                const distSq = dx * dx + dy * dy;
+                const dist = Math.max(Math.sqrt(distSq), 1);
+
+                // Strong repulsion that prevents overlap
                 const force = REPULSION / (dist * dist);
 
-                fx += (dx / dist) * force;
-                fy += (dy / dist) * force;
+                // Extra strong push if nodes are too close
+                const pushMultiplier =
+                    dist < MIN_DISTANCE ? (MIN_DISTANCE / dist) * 3 : 1;
+
+                fx += (dx / dist) * force * pushMultiplier;
+                fy += (dy / dist) * force * pushMultiplier;
             });
 
-            // Attraction to connected nodes
+            // Attraction to connected nodes (with ideal distance)
             edges.forEach((edge) => {
                 let otherId: string | null = null;
                 if (edge.from === node.id) otherId = edge.to;
@@ -127,8 +137,14 @@
                     if (otherPos) {
                         const dx = otherPos.x - pos.x;
                         const dy = otherPos.y - pos.y;
-                        fx += dx * ATTRACTION;
-                        fy += dy * ATTRACTION;
+                        const dist = Math.sqrt(dx * dx + dy * dy);
+                        // Spring force: attract if too far, repel if too close
+                        const displacement = dist - IDEAL_EDGE_LENGTH;
+                        const springForce = displacement * ATTRACTION;
+                        if (dist > 0) {
+                            fx += (dx / dist) * springForce;
+                            fy += (dy / dist) * springForce;
+                        }
                     }
                 }
             });
@@ -145,8 +161,8 @@
             pos.x += pos.vx;
             pos.y += pos.vy;
 
-            // Boundary constraints
-            const padding = 50;
+            // Boundary constraints with generous padding
+            const padding = 80;
             pos.x = Math.max(
                 padding,
                 Math.min(containerWidth - padding, pos.x),
@@ -160,8 +176,8 @@
         positions = new Map(positions);
         simulationTick++;
 
-        // Slow down simulation over time
-        if (simulationTick > 300) {
+        // Run simulation longer to ensure good layout
+        if (simulationTick > 600) {
             isSimulating = false;
         }
     }
@@ -429,6 +445,8 @@
         initializePositions();
         isSimulating = true;
         simulationTick = 0;
+        // Auto fit after simulation settles a bit
+        setTimeout(() => fitToView(), 500);
     }
 
     onMount(() => {
@@ -708,24 +726,52 @@
                             {@const from = positions.get(edge.from)}
                             {@const to = positions.get(edge.to)}
                             {#if from && to}
+                                {@const dx = to.x - from.x}
+                                {@const dy = to.y - from.y}
+                                {@const dist = Math.sqrt(dx * dx + dy * dy)}
+                                {@const nodeRadius = 28}
+                                {@const startX =
+                                    from.x +
+                                    (dx / Math.max(dist, 1)) * nodeRadius}
+                                {@const startY =
+                                    from.y +
+                                    (dy / Math.max(dist, 1)) * nodeRadius}
+                                {@const endX =
+                                    to.x -
+                                    (dx / Math.max(dist, 1)) * nodeRadius}
+                                {@const endY =
+                                    to.y -
+                                    (dy / Math.max(dist, 1)) * nodeRadius}
+                                {@const midX = (startX + endX) / 2}
+                                {@const midY = (startY + endY) / 2}
                                 <line
-                                    x1={from.x}
-                                    y1={from.y}
-                                    x2={to.x}
-                                    y2={to.y}
-                                    stroke="url(#edgeGradient)"
+                                    x1={startX}
+                                    y1={startY}
+                                    x2={endX}
+                                    y2={endY}
+                                    stroke="#00c8ff"
+                                    stroke-opacity="0.5"
                                     stroke-width="2"
                                     marker-end="url(#arrowhead)"
-                                    class="transition-all duration-300"
+                                />
+                                <rect
+                                    x={midX - edge.relation.length * 3.2}
+                                    y={midY - 8}
+                                    width={edge.relation.length * 6.4}
+                                    height={14}
+                                    fill="#0a0c0f"
+                                    fill-opacity="0.85"
+                                    rx="3"
                                 />
                                 <text
-                                    x={(from.x + to.x) / 2}
-                                    y={(from.y + to.y) / 2}
+                                    x={midX}
+                                    y={midY + 3}
                                     fill="#00c8ff"
                                     font-size="10"
-                                    opacity="0.6"
+                                    opacity="0.8"
                                     text-anchor="middle"
                                     class="font-sans">{edge.relation}</text
+                                >
                                 >
                             {/if}
                         {/each}
@@ -1162,22 +1208,45 @@
                         {@const from = positions.get(edge.from)}
                         {@const to = positions.get(edge.to)}
                         {#if from && to}
+                            {@const dx = to.x - from.x}
+                            {@const dy = to.y - from.y}
+                            {@const dist = Math.sqrt(dx * dx + dy * dy)}
+                            {@const nodeRadius = 28}
+                            {@const startX =
+                                from.x + (dx / Math.max(dist, 1)) * nodeRadius}
+                            {@const startY =
+                                from.y + (dy / Math.max(dist, 1)) * nodeRadius}
+                            {@const endX =
+                                to.x - (dx / Math.max(dist, 1)) * nodeRadius}
+                            {@const endY =
+                                to.y - (dy / Math.max(dist, 1)) * nodeRadius}
+                            {@const midX = (startX + endX) / 2}
+                            {@const midY = (startY + endY) / 2}
                             <line
-                                x1={from.x}
-                                y1={from.y}
-                                x2={to.x}
-                                y2={to.y}
-                                stroke="url(#edgeGradient)"
+                                x1={startX}
+                                y1={startY}
+                                x2={endX}
+                                y2={endY}
+                                stroke="#00c8ff"
+                                stroke-opacity="0.5"
                                 stroke-width="2"
                                 marker-end="url(#arrowhead)"
-                                class="transition-all duration-300"
+                            />
+                            <rect
+                                x={midX - edge.relation.length * 3.2}
+                                y={midY - 8}
+                                width={edge.relation.length * 6.4}
+                                height={14}
+                                fill="#0a0c0f"
+                                fill-opacity="0.85"
+                                rx="3"
                             />
                             <text
-                                x={(from.x + to.x) / 2}
-                                y={(from.y + to.y) / 2}
+                                x={midX}
+                                y={midY + 3}
                                 fill="#00c8ff"
                                 font-size="10"
-                                opacity="0.6"
+                                opacity="0.8"
                                 text-anchor="middle"
                                 class="font-sans">{edge.relation}</text
                             >

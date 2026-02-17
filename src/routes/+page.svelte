@@ -769,28 +769,43 @@ Return ONLY valid JSON, no markdown, no explanation.`;
                     summary: null,
                 };
 
-                // SMART: Pre-check API key before starting (3s timeout per key)
+                // SMART: Pre-check API key before starting (with timeout per key)
                 if (keyState.keys.length > 0) {
                     status = "Checking API keys...";
                     const keyResult = await keyManager.getNextWorkingKeyFast();
                     if (!keyResult.success) {
-                        status = keyResult.message;
-                        console.error(
-                            "[Recording] No working key found:",
+                        // Even if pre-check totally failed, warn but DON'T block if we have keys
+                        console.warn(
+                            "[Recording] Key pre-check failed:",
                             keyResult.message,
+                            "- will try anyway",
                         );
-                        setTimeout(() => {
-                            status = "Ready";
-                        }, 3000);
-                        return;
+                        // Use the first available key as fallback
+                        const fallbackKey =
+                            keyState.keys.find((k) => !k.isDisabled) ||
+                            keyState.keys[0];
+                        if (fallbackKey) {
+                            apiKey = fallbackKey.key;
+                            showToast(
+                                `Pre-check issue: ${keyResult.message} - trying anyway`,
+                                "warning",
+                            );
+                        } else {
+                            status = "No API keys available";
+                            setTimeout(() => {
+                                status = "Ready";
+                            }, 3000);
+                            return;
+                        }
+                    } else {
+                        isGeminiConnected = true;
+                        status = keyResult.message;
+                        apiKey = keyResult.key!.key;
+                        console.log(
+                            "[Recording] Ready with key:",
+                            keyResult.key?.name,
+                        );
                     }
-                    isGeminiConnected = true;
-                    status = keyResult.message;
-                    apiKey = keyResult.key!.key; // Update local apiKey
-                    console.log(
-                        "[Recording] Ready with key:",
-                        keyResult.key?.name,
-                    );
 
                     // Ensure Whisper is initialized before recording
                     try {

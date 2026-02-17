@@ -11,6 +11,7 @@ pub struct WhisperState {
     pub is_initialized: StdMutex<bool>,
     pub model_path: StdMutex<Option<PathBuf>>,
     pub language: StdMutex<String>,
+    pub context_history: StdMutex<Vec<String>>, // Previous transcriptions for context
 }
 
 impl Default for WhisperState {
@@ -19,6 +20,7 @@ impl Default for WhisperState {
             is_initialized: StdMutex::new(false),
             model_path: StdMutex::new(None),
             language: StdMutex::new("en".to_string()), // Default to English
+            context_history: StdMutex::new(Vec::new()),
         }
     }
 }
@@ -40,7 +42,9 @@ pub async fn initialize_whisper(
     app: AppHandle,
     model_size: Option<String>,
 ) -> Result<String, String> {
-    let size = model_size.unwrap_or_else(|| "base".to_string());
+    // Use "small" model by default for MUCH better accuracy than "base"
+    // Small model is better at handling names and uncommon words
+    let size = model_size.unwrap_or_else(|| "small".to_string());
     
     println!("[WHISPER] Initializing {} model...", size);
     let _ = app.emit("cognivox:status", "Loading Whisper model...");
@@ -74,7 +78,8 @@ async fn download_whisper_model(model_size: &str) -> Result<PathBuf, String> {
         "base" => ("ggerganov/whisper.cpp", "ggml-base.bin"),
         "small" => ("ggerganov/whisper.cpp", "ggml-small.bin"),
         "medium" => ("ggerganov/whisper.cpp", "ggml-medium.bin"),
-        _ => ("ggerganov/whisper.cpp", "ggml-base.bin"),
+        "large" => ("ggerganov/whisper.cpp", "ggml-large-v2.bin"),
+        _ => ("ggerganov/whisper.cpp", "ggml-small.bin"), // Default to small for accuracy
     };
     
     println!("[WHISPER] Downloading {} from Hugging Face...", filename);
@@ -115,10 +120,11 @@ pub fn get_whisper_status(state: tauri::State<'_, WhisperState>) -> Result<Strin
 // Transcription (v0.13 API)
 // ============================================================================
 
-pub async fn transcribe_audio(
+pub async fn transcribe_audio_with_context(
     model_path: &PathBuf,
     language: &str,
     audio_samples: &[f32],
+    previous_context: Option<String>,
 ) -> Result<TranscriptionResult, String> {
     let duration_secs = audio_samples.len() as f32 / 16000.0;
     println!("[WHISPER] Transcribing {:.1}s of audio ({} samples)...", duration_secs, audio_samples.len());
@@ -135,31 +141,75 @@ pub async fn transcribe_audio(
     let mut state = ctx.create_state()
         .map_err(|e| format!("Failed to create Whisper state: {:?}", e))?;
     
-    // Configure parameters
-    let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+    // Configure parameters - use LARGE beam search for MAXIMUM accuracy
+    // Beam size 10 provides much better accuracy than default (5)
+    let mut params = FullParams::new(SamplingStrategy::BeamSearch { beam_size: 10, patience: 1.5 });
     params.set_language(Some(language));
     params.set_translate(false);
     params.set_print_special(false);
     params.set_print_progress(false);
     params.set_print_realtime(false);
     params.set_print_timestamps(false);
-    params.set_single_segment(false);
-    params.set_n_threads(4);
+    params.set_single_segment(true);     // CRITICAL: Keep speech as one segment for better context
+    params.set_n_threads(6);              // More threads for faster processing
+    
+    // OPTIMIZE FOR PERFECT ACCURACY
+    params.set_temperature(0.2);          // Slight temperature for better natural language handling
+    params.set_temperature_inc(0.0);      // No temperature fallback - stay accurate
+    params.set_no_speech_thold(0.4);      // Lower threshold - capture more speech
+    params.set_entropy_thold(2.8);        // Higher entropy threshold - accept more varied output
+    params.set_logprob_thold(-1.0);       // Accept lower probability tokens for names/unique words
+    params.set_suppress_blank(true);      // Suppress blank outputs
+    
+    // CRITICAL: Context-aware prompt for consistency and proper name handling
+    let base_prompt = "This is a professional conversation transcript with proper names like Anila, Sarah, John, etc. \
+                      Transcribe exactly as spoken with correct spelling of all words and names. \
+                      Use proper punctuation and capitalization. Preserve all spoken words completely.";
+    
+    let full_prompt = if let Some(ref context) = previous_context {
+        // Include recent context for continuity and name consistency
+        // Truncate context to last 150 chars to avoid overwhelming the prompt
+        let context_snippet = if context.len() > 150 {
+            &context[context.len() - 150..]
+        } else {
+            context.as_str()
+        };
+        format!("{} Previous: {}", base_prompt, context_snippet)
+    } else {
+        base_prompt.to_string()
+    };
+    
+    if previous_context.is_some() {
+        println!("[WHISPER] Using context: {}", 
+                 if full_prompt.len() > 100 { &full_prompt[..100] } else { &full_prompt });
+    }
+    
+    params.set_initial_prompt(&full_prompt);
     
     // Run transcription
     state.full(params, audio_samples)
         .map_err(|e| format!("Transcription failed: {:?}", e))?;
     
-    // Collect results
+    // Collect results - ensure we get ALL segments with NO loss
     let num_segments = state.full_n_segments()
         .map_err(|e| format!("Failed to get segments: {:?}", e))?;
     
     let mut full_result = String::new();
+    let mut segment_count = 0;
     for i in 0..num_segments {
         if let Ok(seg) = state.full_get_segment_text(i) {
-            full_result.push_str(&seg);
+            let trimmed = seg.trim();
+            if !trimmed.is_empty() {
+                if !full_result.is_empty() && !full_result.ends_with(' ') {
+                    full_result.push(' ');
+                }
+                full_result.push_str(trimmed);
+                segment_count += 1;
+            }
         }
     }
+    
+    println!("[WHISPER] Processed {} segments from {:.1}s audio", segment_count, duration_secs);
     
     let confidence = 0.85;
     
@@ -172,6 +222,14 @@ pub async fn transcribe_audio(
         language: language.to_string(),
         confidence,
     })
+}
+
+pub async fn transcribe_audio(
+    model_path: &PathBuf,
+    language: &str,
+    audio_samples: &[f32],
+) -> Result<TranscriptionResult, String> {
+    transcribe_audio_with_context(model_path, language, audio_samples, None).await
 }
 
 // ============================================================================
@@ -211,4 +269,13 @@ pub async fn transcribe_audio_chunk(
             Err(e)
         }
     }
+}
+
+#[tauri::command]
+pub fn clear_whisper_context(state: tauri::State<'_, WhisperState>) -> Result<String, String> {
+    let mut history = state.context_history.lock().unwrap();
+    let count = history.len();
+    history.clear();
+    println!("[WHISPER] Context cleared ({} items removed)", count);
+    Ok(format!("Context cleared ({} items)", count))
 }
