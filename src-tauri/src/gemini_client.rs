@@ -48,6 +48,7 @@ impl Default for GeminiState {
 const COGNIVOX_INTELLIGENCE_PROMPT: &str = r#"You are a PASSIVE MEETING INTELLIGENCE ENGINE analyzing transcribed speech.
 
 INPUT: Transcribed text from a meeting with speaker tag ("You" = microphone user, "Speaker 2" = other participant).
+The conversation may be in English, Urdu (Roman Urdu), or a mix of both languages (code-switching).
 OUTPUT: JSON intelligence extraction.
 
 FORMAT:
@@ -56,6 +57,7 @@ FORMAT:
 RULES:
 - JSON only, no markdown
 - CRITICAL: Keep the speaker tag exactly as provided in the input (e.g. "You" or "Speaker 2"). Do NOT reassign or change the speaker.
+- If the text is in Urdu or Roman Urdu, still analyze it and extract intelligence. Write the summary in the same language as the input.
 - tone: NEUTRAL|URGENT|FRUSTRATED|EXCITED|POSITIVE|NEGATIVE|HESITANT|DOMINANT|EMPATHETIC
 - category: TASK|DECISION|DEADLINE|QUERY|ACTION_ITEM|RISK|SENTIMENT|URGENCY|INTERRUPTION|AGREEMENT|DISAGREEMENT|OFF_TOPIC|EMOTION_SHIFT|DOMINANCE_SHIFT|EMPATHY_GAP|TOPIC_DRIFT
 - confidence: 0.0-1.0
@@ -767,9 +769,9 @@ pub fn set_gemini_model(state: tauri::State<'_, GeminiState>, model: String) -> 
 #[tauri::command]
 pub fn get_available_models() -> Vec<serde_json::Value> {
     vec![
-        serde_json::json!({"id": "gemini-2.0-flash", "name": "⚡ Gemini 2.0 Flash (Stable)"}),
-        serde_json::json!({"id": "gemini-2.0-flash-lite", "name": "🔥 Gemini 2.0 Flash Lite"}),
-        serde_json::json!({"id": "gemini-2.5-flash-preview-04-17", "name": "💎 Gemini 2.5 Flash Preview"}),
-        serde_json::json!({"id": "gemini-1.5-flash", "name": "🌟 Gemini 1.5 Flash (Fallback)"}),
+        serde_json::json!({"id": "gemini-2.0-flash", "name": "Gemini 2.0 Flash (Stable)"}),
+        serde_json::json!({"id": "gemini-2.0-flash-lite", "name": "Gemini 2.0 Flash Lite"}),
+        serde_json::json!({"id": "gemini-2.5-flash-preview-04-17", "name": "Gemini 2.5 Flash Preview"}),
+        serde_json::json!({"id": "gemini-1.5-flash", "name": "Gemini 1.5 Flash (Fallback)"}),
     ]
 }

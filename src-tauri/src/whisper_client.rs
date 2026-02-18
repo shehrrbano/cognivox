@@ -19,7 +19,7 @@ impl Default for WhisperState {
         Self {
             is_initialized: StdMutex::new(false),
             model_path: StdMutex::new(None),
-            language: StdMutex::new("en".to_string()), // Default to English
+            language: StdMutex::new("auto".to_string()), // Auto-detect: supports English + Urdu
             context_history: StdMutex::new(Vec::new()),
         }
     }
@@ -143,9 +143,17 @@ pub async fn transcribe_audio_with_context(
     
     // Configure parameters - use LARGE beam search for MAXIMUM accuracy
     // Beam size 10 provides much better accuracy than default (5)
-    let mut params = FullParams::new(SamplingStrategy::BeamSearch { beam_size: 10, patience: 1.5 });
-    params.set_language(Some(language));
-    params.set_translate(false);
+    let mut params = FullParams::new(SamplingStrategy::BeamSearch { beam_size: 8, patience: 1.5 });
+    
+    // Language handling: "auto" means let Whisper detect (supports English, Urdu, etc.)
+    if language == "auto" {
+        params.set_language(None); // None = auto-detect language
+        println!("[WHISPER] Language: auto-detect (English + Urdu + others)");
+    } else {
+        params.set_language(Some(language));
+        println!("[WHISPER] Language: fixed to '{}'", language);
+    }
+    params.set_translate(false);          // Keep original language, don't translate to English
     params.set_print_special(false);
     params.set_print_progress(false);
     params.set_print_realtime(false);
@@ -162,15 +170,19 @@ pub async fn transcribe_audio_with_context(
     params.set_suppress_blank(true);      // Suppress blank outputs
     
     // CRITICAL: Context-aware prompt for consistency and proper name handling
-    let base_prompt = "This is a professional conversation transcript with proper names like Anila, Sarah, John, etc. \
-                      Transcribe exactly as spoken with correct spelling of all words and names. \
+    // Supports both English and Urdu transcription
+    let base_prompt = "This is a professional conversation transcript. \
+                      The speakers may use English, Urdu, or a mix of both (code-switching). \
+                      Transcribe exactly as spoken in the original language. \
+                      For Urdu words spoken in conversation, write them in Roman Urdu (Latin script). \
+                      Preserve proper names like Anila, Sarah, John, Ahmed, Fatima etc. \
                       Use proper punctuation and capitalization. Preserve all spoken words completely.";
     
     let full_prompt = if let Some(ref context) = previous_context {
         // Include recent context for continuity and name consistency
-        // Truncate context to last 150 chars to avoid overwhelming the prompt
-        let context_snippet = if context.len() > 150 {
-            &context[context.len() - 150..]
+        // Truncate context to last 200 chars to avoid overwhelming the prompt
+        let context_snippet = if context.len() > 200 {
+            &context[context.len() - 200..]
         } else {
             context.as_str()
         };

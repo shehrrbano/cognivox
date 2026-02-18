@@ -78,13 +78,13 @@
     // AI Model
     let selectedModel = "gemini-2.0-flash";
     const availableModels = [
-        { id: "gemini-2.0-flash", name: "⚡ Gemini 2.0 Flash (Stable)" },
-        { id: "gemini-2.0-flash-lite", name: "🔥 Gemini 2.0 Flash Lite" },
+        { id: "gemini-2.0-flash", name: "Gemini 2.0 Flash (Stable)" },
+        { id: "gemini-2.0-flash-lite", name: "Gemini 2.0 Flash Lite" },
         {
             id: "gemini-2.5-flash-preview-04-17",
-            name: "💎 Gemini 2.5 Flash Preview",
+            name: "Gemini 2.5 Flash Preview",
         },
-        { id: "gemini-1.5-flash", name: "🌟 Gemini 1.5 Flash (Fallback)" },
+        { id: "gemini-1.5-flash", name: "Gemini 1.5 Flash (Fallback)" },
     ];
 
     // Permissions status
@@ -166,7 +166,7 @@
 
             // If switched, show which key
             if (result.switched && result.newKey) {
-                connectionTestMessage = `⚠ ${result.message}`;
+                connectionTestMessage = `${result.message}`;
             }
         } finally {
             isTestingConnection = false;
@@ -511,8 +511,8 @@
                             class="p-4 rounded-lg bg-yellow-500/10 border border-yellow-500/30 mb-4"
                         >
                             <p class="text-yellow-400 text-sm">
-                                ⚠️ No API keys configured. Add a Gemini API key
-                                to enable AI features.
+                                No API keys configured. Add a Gemini API key to
+                                enable AI features.
                             </p>
                         </div>
                     {/if}
@@ -562,8 +562,8 @@
                                     apiKeys.length === 0}
                             >
                                 {isTestingConnection
-                                    ? "⏳ Testing..."
-                                    : "🔌 Test Connection"}
+                                    ? "Testing..."
+                                    : "Test Connection"}
                             </button>
 
                             {#if connectionTestResult}
@@ -599,9 +599,7 @@
                                         : 'bg-cyan-500/20 text-cyan-400'}"
                                     onclick={toggleShuffleMode}
                                 >
-                                    {shuffleMode
-                                        ? "🔀 Shuffle"
-                                        : "🔁 Sequential"}
+                                    {shuffleMode ? "Shuffle" : "Sequential"}
                                 </button>
                             </div>
                         {/if}
@@ -612,10 +610,10 @@
                                 class="text-xs text-slate-500 flex items-center gap-4"
                             >
                                 <span
-                                    >📊 {keyState.totalCalls} total API calls</span
+                                    >{keyState.totalCalls} total API calls</span
                                 >
                                 <span
-                                    >🔑 {keyManager.getActiveKeyCount()}/{apiKeys.length}
+                                    >{keyManager.getActiveKeyCount()}/{apiKeys.length}
                                     keys available</span
                                 >
                             </div>
@@ -628,7 +626,7 @@
                     <h3
                         class="text-sm font-semibold text-cyan-400 uppercase tracking-wider mb-4 flex items-center gap-2"
                     >
-                        <span>🎤</span> Audio Input
+                        Audio Input
                     </h3>
 
                     <!-- Permission Status -->
@@ -690,7 +688,7 @@
                                     : "btn-secondary"}
                                 onclick={() => setCaptureMode("mic")}
                             >
-                                🎤 Microphone
+                                Microphone
                             </button>
                             <button
                                 class={captureMode === "system"
@@ -698,7 +696,7 @@
                                     : "btn-secondary"}
                                 onclick={() => setCaptureMode("system")}
                             >
-                                🔊 System
+                                System
                             </button>
                             <button
                                 class={captureMode === "both"
@@ -706,7 +704,7 @@
                                     : "btn-secondary"}
                                 onclick={() => setCaptureMode("both")}
                             >
-                                📻 Both
+                                Both
                             </button>
                         </div>
                     </div>
@@ -725,7 +723,7 @@
                                     : 'btn-secondary'} text-sm"
                                 onclick={testMicrophone}
                             >
-                                {isTesting ? "⏹ Stop Test" : "🎙 Start Test"}
+                                {isTesting ? "Stop Test" : "Start Test"}
                             </button>
                         </div>
 
@@ -848,7 +846,7 @@
                     <h3
                         class="text-sm font-semibold text-cyan-400 uppercase tracking-wider mb-4 flex items-center gap-2"
                     >
-                        <span>🎯</span> Intelligence Filters
+                        Intelligence Filters
                     </h3>
                     <p class="text-xs text-slate-500 mb-4">
                         Select which insights to extract during recording
@@ -961,7 +959,7 @@
                     <h3
                         class="text-sm font-semibold text-cyan-400 uppercase tracking-wider mb-4 flex items-center gap-2"
                     >
-                        <span>🎤</span> Smart Audio Buffering
+                        Smart Audio Buffering
                     </h3>
                     <p class="text-xs text-slate-500 mb-4">
                         Configure intelligent speech detection to reduce API

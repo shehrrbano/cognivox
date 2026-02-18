@@ -771,41 +771,69 @@ Return ONLY valid JSON, no markdown, no explanation.`;
 
                 // SMART: Pre-check API key before starting (with timeout per key)
                 if (keyState.keys.length > 0) {
-                    status = "Checking API keys...";
+                    status = "Validating API key...";
                     const keyResult = await keyManager.getNextWorkingKeyFast();
-                    if (!keyResult.success) {
-                        // Even if pre-check totally failed, warn but DON'T block if we have keys
-                        console.warn(
-                            "[Recording] Key pre-check failed:",
-                            keyResult.message,
-                            "- will try anyway",
+
+                    if (!keyResult.success || !keyResult.key) {
+                        // ALL keys failed - BLOCK recording
+                        status = "Cannot start: All API keys failed";
+                        showToast(
+                            `Recording blocked: ${keyResult.message}. Check your API keys in Settings.`,
+                            "error",
                         );
-                        // Use the first available key as fallback
-                        const fallbackKey =
-                            keyState.keys.find((k) => !k.isDisabled) ||
-                            keyState.keys[0];
-                        if (fallbackKey) {
-                            apiKey = fallbackKey.key;
+                        setTimeout(() => {
+                            status = "Ready";
+                        }, 5000);
+                        return;
+                    }
+
+                    // Key test succeeded — check if it was a real success or a fallback
+                    const testResult = await keyManager.testConnection(
+                        keyResult.key.key,
+                    );
+                    if (!testResult.success) {
+                        // The "fast" check returned a fallback key that doesn't actually work.
+                        // Check if the error is quota/rate limit (hard block) vs timeout (allow)
+                        const isHardFail =
+                            testResult.statusCode === 429 ||
+                            testResult.statusCode === 403 ||
+                            (testResult.message &&
+                                (testResult.message
+                                    .toLowerCase()
+                                    .includes("quota") ||
+                                    testResult.message
+                                        .toLowerCase()
+                                        .includes("resource_exhausted") ||
+                                    testResult.message
+                                        .toLowerCase()
+                                        .includes("rate limit")));
+
+                        if (isHardFail) {
+                            status =
+                                "Cannot start: API quota/rate limit reached";
                             showToast(
-                                `Pre-check issue: ${keyResult.message} - trying anyway`,
-                                "warning",
+                                `Recording blocked: ${testResult.message}. Wait or add new API keys in Settings.`,
+                                "error",
                             );
-                        } else {
-                            status = "No API keys available";
                             setTimeout(() => {
                                 status = "Ready";
-                            }, 3000);
+                            }, 5000);
                             return;
                         }
-                    } else {
-                        isGeminiConnected = true;
-                        status = keyResult.message;
-                        apiKey = keyResult.key!.key;
-                        console.log(
-                            "[Recording] Ready with key:",
-                            keyResult.key?.name,
+                        // Soft fail (timeout, network) — warn but allow
+                        showToast(
+                            `API test inconclusive: ${testResult.message}. Recording will start anyway.`,
+                            "warning",
                         );
                     }
+
+                    isGeminiConnected = true;
+                    status = keyResult.message;
+                    apiKey = keyResult.key.key;
+                    console.log(
+                        "[Recording] Ready with key:",
+                        keyResult.key?.name,
+                    );
 
                     // Ensure Whisper is initialized before recording
                     try {
@@ -813,9 +841,11 @@ Return ONLY valid JSON, no markdown, no explanation.`;
                             modelSize: "base",
                         });
                         await invoke("set_whisper_language", {
-                            language: "en",
+                            language: "auto",
                         });
-                        console.log("[Recording] Whisper initialized");
+                        console.log(
+                            "[Recording] Whisper initialized with auto language detection",
+                        );
                     } catch (e) {
                         console.log(
                             "[Recording] Whisper already initialized or init skipped:",
@@ -832,9 +862,26 @@ Return ONLY valid JSON, no markdown, no explanation.`;
                         console.log(
                             "[Recording] Key synced and audio loop started",
                         );
-                    } catch (e) {
+                    } catch (e: any) {
+                        const errMsg = e?.message || String(e);
+                        // If the backend connection also fails with quota/rate errors, block
+                        const isQuotaError =
+                            errMsg.toLowerCase().includes("quota") ||
+                            errMsg.toLowerCase().includes("rate limit") ||
+                            errMsg.toLowerCase().includes("resource_exhausted");
+                        if (isQuotaError) {
+                            status = "Cannot start: API quota exhausted";
+                            showToast(
+                                `Backend reports: ${errMsg}. Wait or add new API keys.`,
+                                "error",
+                            );
+                            setTimeout(() => {
+                                status = "Ready";
+                            }, 5000);
+                            return;
+                        }
                         console.warn(
-                            "[Recording] Connection test had issues, proceeding anyway:",
+                            "[Recording] Connection test had issues, proceeding:",
                             e,
                         );
                     }
@@ -890,44 +937,63 @@ Return ONLY valid JSON, no markdown, no explanation.`;
         status = "Processing recording...";
 
         try {
-            // Step 1: Save recording (instant)
+            // ============================================================
+            // Step 1: Save recording
+            // ============================================================
             processingStep = 1;
             status = "Saving recording...";
-            await new Promise((r) => setTimeout(r, 300));
+            console.log("[PROCESSING] Step 1: Saving recording...");
+            await saveSession(true);
+            console.log("[PROCESSING] Step 1 complete.");
 
-            // Step 2: Transcription - wait for backend to finish processing remaining audio
+            // ============================================================
+            // Step 2: Transcription - wait for backend Whisper+Gemini
+            // to finish processing any remaining buffered audio.
+            // This is the REAL wait - the backend's smart_audio_loop
+            // needs time to flush remaining audio through Whisper.
+            // ============================================================
             processingStep = 2;
-            status = "Transcribing remaining audio...";
+            status = "Waiting for transcription to complete...";
+            console.log("[PROCESSING] Step 2: Waiting for transcription...");
 
             if (isGeminiConnected) {
-                // The backend smart_audio_loop will process remaining buffered audio
-                // after silence timeout (1.5s). Wait for that + processing time.
-                // Use event-driven wait: poll until no new transcripts arrive for 3 seconds
                 const transcriptCountBefore = transcripts.length;
                 let lastTranscriptCount = transcriptCountBefore;
                 let stableTime = 0;
                 const waitStart = Date.now();
-                const maxWait = Math.max(15000, duration * 1000); // Max wait = max(15s, recording duration)
+                // Short wait: max 10s or half the recording duration, hard cap 20s
+                const maxWait = Math.min(
+                    Math.max(8000, (duration * 1000) / 2),
+                    20000,
+                );
+                // Only need 2s of no new transcripts to consider it done
+                const stabilityThreshold = 2000;
 
-                while (stableTime < 3000 && Date.now() - waitStart < maxWait) {
-                    await new Promise((r) => setTimeout(r, 500));
+                while (
+                    stableTime < stabilityThreshold &&
+                    Date.now() - waitStart < maxWait
+                ) {
+                    await new Promise((r) => setTimeout(r, 300));
                     if (transcripts.length > lastTranscriptCount) {
                         lastTranscriptCount = transcripts.length;
                         stableTime = 0; // Reset - new transcript arrived
-                        status = `Transcribed ${transcripts.length - transcriptCountBefore} new segments...`;
+                        const newCount =
+                            transcripts.length - transcriptCountBefore;
+                        status = `Transcribing... (${newCount} segment${newCount > 1 ? "s" : ""} received)`;
                     } else {
-                        stableTime += 500;
+                        stableTime += 300;
                     }
                 }
 
                 lastRequestTime = new Date().toLocaleTimeString();
+                const newTranscripts =
+                    transcripts.length - transcriptCountBefore;
                 console.log(
-                    `[PROCESSING] Transcription complete. New transcripts: ${transcripts.length - transcriptCountBefore}`,
+                    `[PROCESSING] Step 2 complete. New transcripts: ${newTranscripts} (waited ${((Date.now() - waitStart) / 1000).toFixed(1)}s)`,
                 );
             } else {
-                // Simulate transcription if not connected
+                // Not connected - add a placeholder
                 await new Promise((r) => setTimeout(r, 1000));
-                // Add a placeholder transcript
                 const id = `rec_${Date.now()}`;
                 transcripts = [
                     ...transcripts,
@@ -946,15 +1012,72 @@ Return ONLY valid JSON, no markdown, no explanation.`;
                 ];
             }
 
-            // Step 3: Vocal Topography Analysis
-            processingStep = 3;
-            status = "Analyzing Vocal Topography...";
-            await new Promise((r) => setTimeout(r, 500));
+            // If no transcripts at all, skip remaining steps
+            if (transcripts.length === 0) {
+                processingStep = 7;
+                status = "No speech detected in recording.";
+                setTimeout(() => {
+                    isProcessing = false;
+                    processingStep = 0;
+                    status = "Ready";
+                }, 3000);
+                return;
+            }
 
+            // ============================================================
+            // Step 3: Vocal Topography Analysis
+            // Analyze tone distribution, speech patterns across transcripts
+            // ============================================================
+            processingStep = 3;
+            status = "Analyzing vocal topography...";
+            console.log("[PROCESSING] Step 3: Vocal Topography Analysis...");
+
+            // Compute tone/stress metrics from actual transcript data
+            let toneDistribution: Record<string, number> = {};
+            for (const t of transcripts) {
+                const tone = t.tone || "NEUTRAL";
+                toneDistribution[tone] = (toneDistribution[tone] || 0) + 1;
+            }
+            const totalTones = Object.values(toneDistribution).reduce(
+                (a, b) => a + b,
+                0,
+            );
+            if (totalTones > 0) {
+                const stressTones =
+                    (toneDistribution["URGENT"] || 0) +
+                    (toneDistribution["FRUSTRATED"] || 0);
+                stressLevel = stressTones / totalTones;
+                const positiveTones =
+                    (toneDistribution["POSITIVE"] || 0) +
+                    (toneDistribution["EXCITED"] || 0) +
+                    (toneDistribution["EMPATHETIC"] || 0);
+                engagementLevel = Math.min(
+                    1,
+                    (positiveTones + totalTones * 0.3) / totalTones,
+                );
+                const urgentCount = toneDistribution["URGENT"] || 0;
+                urgencyLevel = urgentCount / totalTones;
+                const avgConfidence =
+                    transcripts.reduce(
+                        (sum, t) => sum + (t.confidence || 0.5),
+                        0,
+                    ) / transcripts.length;
+                clarityLevel = avgConfidence;
+            }
+            console.log(
+                "[PROCESSING] Step 3 complete. Tone distribution:",
+                toneDistribution,
+            );
+            // Yield to UI so step 3 renders
+            await new Promise((r) => setTimeout(r, 100));
+
+            // ============================================================
             // Step 4: Knowledge Graph Building
+            // Build the graph from ALL transcripts (real data)
+            // ============================================================
             processingStep = 4;
-            status = "Building Knowledge Graph...";
-            await new Promise((r) => setTimeout(r, 500));
+            status = "Building knowledge graph...";
+            console.log("[PROCESSING] Step 4: Building Knowledge Graph...");
 
             // Ensure root Meeting node exists
             if (!graphNodes.find((n) => n.id === "Meeting")) {
@@ -969,6 +1092,7 @@ Return ONLY valid JSON, no markdown, no explanation.`;
             }
 
             // Build knowledge graph from all transcripts
+            let graphBuildCount = 0;
             for (const t of transcripts) {
                 // Add speaker nodes with connections
                 const speakerNode = t.speaker || "Speaker";
@@ -1015,7 +1139,6 @@ Return ONLY valid JSON, no markdown, no explanation.`;
                                     },
                                 ];
                             }
-                            // Connect speaker to category
                             graphEdges = [
                                 ...graphEdges,
                                 {
@@ -1105,35 +1228,68 @@ Return ONLY valid JSON, no markdown, no explanation.`;
                         },
                     ];
                 }
+
+                graphBuildCount++;
+                // Update status with progress for large transcript sets
+                if (transcripts.length > 5) {
+                    status = `Building knowledge graph... (${graphBuildCount}/${transcripts.length})`;
+                }
             }
 
+            console.log(
+                `[PROCESSING] Step 4 complete. Graph: ${graphNodes.length} nodes, ${graphEdges.length} edges`,
+            );
+            // Yield to UI so step 4 renders
+            await new Promise((r) => setTimeout(r, 100));
+
+            // ============================================================
             // Step 5: Intelligence Extraction (uses enabled filters)
+            // This does REAL extraction work via the intelligenceExtractor
+            // ============================================================
             processingStep = 5;
-            status = "Extracting Intelligence Insights...";
+            status = "Extracting intelligence insights...";
+            console.log("[PROCESSING] Step 5: Intelligence Extraction...");
 
             if (transcripts.length > 0) {
                 try {
-                    // Extract insights based on enabled filters
-                    await intelligenceExtractor.extractFromTranscript(
-                        transcripts.map((t) => ({
-                            ...t,
-                            speakerId: 1, // Will be enhanced with diarization
-                        })),
-                    );
+                    const freshInsights =
+                        await intelligenceExtractor.extractFromTranscript(
+                            transcripts.map((t) => ({
+                                ...t,
+                                speakerId: t.speakerId || 1,
+                            })),
+                        );
+                    if (freshInsights) {
+                        console.log(
+                            `[PROCESSING] Step 5 complete. Insights extracted successfully`,
+                        );
+                    }
                 } catch (e) {
                     console.error("Intelligence extraction failed:", e);
                 }
+            } else {
+                console.log("[PROCESSING] Step 5 skipped (no transcripts)");
             }
-            await new Promise((r) => setTimeout(r, 500));
+            // Yield to UI so step 5 renders
+            await new Promise((r) => setTimeout(r, 100));
 
-            // Step 6: Finalization
+            // ============================================================
+            // Step 6: Finalization - final save with all data
+            // ============================================================
             processingStep = 6;
-            status = "Finalizing Analysis...";
-            await new Promise((r) => setTimeout(r, 500));
+            status = "Saving final session data...";
+            console.log("[PROCESSING] Step 6: Finalization...");
+            await saveSession(true);
+            console.log("[PROCESSING] Step 6 complete. Session saved.");
+            // Yield to UI so step 6 renders
+            await new Promise((r) => setTimeout(r, 100));
 
+            // ============================================================
             // Step 7: Complete
+            // ============================================================
             processingStep = 7;
             status = "Processing complete!";
+            console.log("[PROCESSING] Step 7: Complete!");
 
             // Auto-scroll to transcript tab
             activeTab = "transcript";
@@ -1201,8 +1357,10 @@ Return ONLY valid JSON, no markdown, no explanation.`;
             if (isRunningInTauri) {
                 try {
                     await invoke("initialize_whisper", { modelSize: "base" });
-                    await invoke("set_whisper_language", { language: "en" }); // English for clear transcription
-                    console.log("[WHISPER] Initialized with English language");
+                    await invoke("set_whisper_language", { language: "auto" }); // Auto-detect: English + Urdu
+                    console.log(
+                        "[WHISPER] Initialized with auto language detection",
+                    );
                 } catch (e) {
                     console.warn("[WHISPER] Initialization failed:", e);
                 }
@@ -1860,7 +2018,7 @@ Return ONLY valid JSON, no markdown, no explanation.`;
         class="fixed top-0 left-0 right-0 z-[9999] bg-orange-600 text-white p-4 font-mono text-sm"
     >
         <div class="text-center">
-            <strong>⚠️ BROWSER MODE — Features Disabled</strong>
+            <strong>BROWSER MODE — Features Disabled</strong>
             <p class="mt-1 text-xs">
                 You're viewing this in a browser. Close this tab and use the <strong
                     >Cognivox desktop window</strong
@@ -3177,7 +3335,7 @@ Return ONLY valid JSON, no markdown, no explanation.`;
                                     onclick={() => setCaptureMode("system")}
                                     aria-label="Set System Audio Only"
                                 >
-                                    🔊 System
+                                    System
                                 </button>
                                 <button
                                     class="{captureMode === 'both'
@@ -3186,7 +3344,7 @@ Return ONLY valid JSON, no markdown, no explanation.`;
                                     onclick={() => setCaptureMode("both")}
                                     aria-label="Set Both Audio Sources"
                                 >
-                                    📻 Both
+                                    Both
                                 </button>
                             </div>
                         </div>
