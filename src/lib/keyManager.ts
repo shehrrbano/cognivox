@@ -273,9 +273,9 @@ class ApiKeyManager {
         }
 
         const isRateLimit = errorCode === 429 ||
-            (errorMessage?.toLowerCase().includes("rate limit"));
-        const isQuotaExhausted = errorMessage?.toLowerCase().includes("quota") ||
-            errorMessage?.toLowerCase().includes("resource_exhausted");
+            (errorMessage?.includes("RATE_LIMITED:"));
+        const isQuotaExhausted = errorMessage?.includes("RESOURCE_EXHAUSTED") ||
+            (errorCode === 403 && errorMessage?.toLowerCase().includes("quota"));
         const isServerError = errorCode >= 500 && errorCode < 600;
         // Don't treat 403 as auth error if it's actually quota exhaustion
         const isAuthError = (errorCode === 401) ||
@@ -456,81 +456,83 @@ class ApiKeyManager {
 
     /**
      * SMART: Find the next working key before recording starts.
-     * Skips rate-limited and quota-exhausted keys automatically.
-     * Uses fast 3-second timeout per key.
+     * Does NOT make API calls to avoid burning quota on pre-checks.
+     * Just picks the first key that isn't on cooldown.
+     * The real validation happens in the Rust backend on first actual use.
      */
     async getNextWorkingKeyFast(): Promise<{ success: boolean; key?: ApiKey; message: string }> {
-        // CRITICAL: Reset ALL cooldowns and disabled flags before checking
-        // This ensures fresh keys aren't blocked by stale state from previous sessions
-        this.resetAllCooldowns();
+        // Refresh key states to clear any expired cooldowns
+        this.refreshKeyStates();
 
-        const keys = this.state.keys.filter(k => !k.isDisabled);
+        const allKeys = this.state.keys;
 
-        if (keys.length === 0) {
+        if (allKeys.length === 0) {
             return { success: false, message: "No API keys configured" };
         }
 
-        console.log(`[KeyManager] Fast-checking ${keys.length} keys...`);
+        // Find keys that are available (not rate-limited, not disabled)
+        const availableKeys = allKeys.filter(k => !k.isDisabled && !this.isRateLimited(k));
 
-        let lastError = "";
-        for (let i = 0; i < keys.length; i++) {
-            const k = keys[i];
-            console.log(`[KeyManager] Trying key ${i + 1}/${keys.length}: ${k.name}`);
+        console.log(`[KeyManager] Available keys: ${availableKeys.length}/${allKeys.length}`);
 
-            const result = await this.testConnection(k.key);
+        if (availableKeys.length > 0) {
+            // Pick the best available key (prefer primary, then round-robin)
+            const primaryKey = availableKeys.find(k => k.isPrimary);
+            const selectedKey = primaryKey || availableKeys[0];
 
-            if (result.success) {
-                // Found working key - activate it
-                k.isActive = true;
-                this.state.keys.forEach(other => { if (other.id !== k.id) other.isActive = false; });
-                this.state.currentIndex = this.state.keys.findIndex(x => x.id === k.id);
+            // Activate it
+            selectedKey.isActive = true;
+            this.state.keys.forEach(other => { if (other.id !== selectedKey.id) other.isActive = false; });
+            this.state.currentIndex = this.state.keys.findIndex(x => x.id === selectedKey.id);
+            this.saveState();
+            this.notifyListeners();
+
+            console.log(`[KeyManager] Selected key: ${selectedKey.name} (no pre-test, saves quota)`);
+            return { success: true, key: selectedKey, message: `Using ${selectedKey.name}` };
+        }
+
+        // All keys are on cooldown - check if any cooldowns are about to expire
+        const soonestExpiry = allKeys
+            .filter(k => !k.isDisabled)
+            .map(k => k.rateLimitedUntil || k.cooldownUntil || Infinity)
+            .reduce((min, v) => Math.min(min, v ?? Infinity), Infinity);
+
+        const waitMs = soonestExpiry - Date.now();
+
+        if (waitMs > 0 && waitMs <= 30000) {
+            // A key will be available within 30 seconds - wait for it
+            console.log(`[KeyManager] Waiting ${(waitMs / 1000).toFixed(0)}s for key cooldown to expire...`);
+            await new Promise(resolve => setTimeout(resolve, waitMs + 500));
+            this.refreshKeyStates();
+
+            const nowAvailable = this.state.keys.filter(k => !k.isDisabled && !this.isRateLimited(k));
+            if (nowAvailable.length > 0) {
+                const key = nowAvailable[0];
+                key.isActive = true;
+                this.state.keys.forEach(other => { if (other.id !== key.id) other.isActive = false; });
+                this.state.currentIndex = this.state.keys.findIndex(x => x.id === key.id);
                 this.saveState();
                 this.notifyListeners();
-
-                console.log(`[KeyManager] Found working key: ${k.name}`);
-                return { success: true, key: k, message: `Connected via ${k.name}` };
-            }
-
-            lastError = result.message;
-
-            // Only mark truly rate-limited keys (429), not other errors
-            if (result.statusCode === 429) {
-                k.rateLimited = true;
-                k.rateLimitedUntil = Date.now() + RATE_LIMIT_COOLDOWN_MS;
-                console.log(`[KeyManager] ${k.name} rate-limited (429), trying next...`);
-            } else if (result.statusCode === 403 && (result.message.toLowerCase().includes('quota') || result.message.toLowerCase().includes('resource_exhausted'))) {
-                // Only mark as quota-exhausted if the error message explicitly says so
-                k.cooldownUntil = Date.now() + QUOTA_EXHAUSTED_COOLDOWN_MS;
-                console.log(`[KeyManager] ${k.name} quota exhausted, cooldown ${QUOTA_EXHAUSTED_COOLDOWN_MS / 1000}s`);
-            } else {
-                // For timeouts, network errors, or unknown errors: DON'T penalize the key
-                console.log(`[KeyManager] ${k.name} test failed (${result.message}), not penalizing key`);
+                console.log(`[KeyManager] Key ${key.name} now available after cooldown`);
+                return { success: true, key, message: `Using ${key.name} (after cooldown)` };
             }
         }
 
-        // If ALL tests failed with hard errors (rate limit / quota), do NOT return success
-        // Only allow fallback for soft errors (timeouts, network issues)
-        const hasHardFail = keys.some(k =>
-            k.rateLimited || (k.cooldownUntil && k.cooldownUntil > Date.now())
-        );
-        const allHardFail = keys.every(k =>
-            k.rateLimited || (k.cooldownUntil && k.cooldownUntil > Date.now()) || k.isDisabled
-        );
-
-        if (allHardFail) {
-            console.error(`[KeyManager] All keys have hard failures (rate limit or quota exhausted)`);
-            return { success: false, message: `All API keys are rate-limited or quota-exhausted. ${lastError}` };
+        // If ALL keys are genuinely disabled (not just on cooldown), reset them
+        // This handles stale state from previous sessions
+        const onlyDisabled = allKeys.every(k => k.isDisabled);
+        if (onlyDisabled) {
+            console.log(`[KeyManager] All keys disabled - resetting stale state`);
+            this.resetAllCooldowns();
+            const resetKey = this.state.keys[0];
+            resetKey.isActive = true;
+            this.saveState();
+            this.notifyListeners();
+            return { success: true, key: resetKey, message: `Using ${resetKey.name} (reset stale state)` };
         }
 
-        // Soft failures (timeout, network) - use fallback key with warning
-        const fallbackKey = keys.find(k => !k.rateLimited && !(k.cooldownUntil && k.cooldownUntil > Date.now())) || keys[0];
-        console.warn(`[KeyManager] Using fallback key: ${fallbackKey.name} (soft failure)`);
-        fallbackKey.isActive = true;
-        this.state.keys.forEach(other => { if (other.id !== fallbackKey.id) other.isActive = false; });
-        this.state.currentIndex = this.state.keys.findIndex(x => x.id === fallbackKey.id);
-        this.saveState();
-        this.notifyListeners();
-        return { success: true, key: fallbackKey, message: `Using ${fallbackKey.name} (test inconclusive: ${lastError})` };
+        // All keys genuinely rate-limited with long cooldowns
+        return { success: false, message: `All API keys are on cooldown. Next available in ${Math.ceil(waitMs / 1000)}s.` };
     }
 
     /**

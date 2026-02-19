@@ -833,73 +833,42 @@ Return ONLY valid JSON, no markdown, no explanation.`;
                         );
                     }
 
-                    // CRITICAL: Push working key to Rust backend AND start audio loop!
-                    // Try the selected key first, then rotate through others if it fails
-                    let backendConnected = false;
-                    const allKeys = keyManager
-                        .getState()
-                        .keys.filter((k: any) => !k.isDisabled);
-
-                    // Build ordered list: selected key first, then the rest
-                    const keysToTry = [
-                        keyResult.key!,
-                        ...allKeys.filter(
-                            (k: any) => k.id !== keyResult.key!.id,
-                        ),
-                    ];
-
-                    for (const tryKey of keysToTry) {
-                        try {
-                            await invoke("test_gemini_connection", {
-                                key: tryKey.key,
-                                model: selectedModel,
-                            });
-                            console.log(
-                                `[Recording] Connected with key: ${tryKey.name}`,
-                            );
-                            apiKey = tryKey.key;
-                            backendConnected = true;
-                            break;
-                        } catch (e: any) {
-                            const errMsg = e?.message || String(e);
-                            console.warn(
-                                `[Recording] Key ${tryKey.name} failed: ${errMsg}, trying next...`,
-                            );
-                            // If it's not a quota/rate error, proceed anyway (audio loop is started)
-                            const isQuotaError =
-                                errMsg.toLowerCase().includes("quota") ||
-                                errMsg.toLowerCase().includes("rate limit") ||
-                                errMsg
-                                    .toLowerCase()
-                                    .includes("resource_exhausted") ||
-                                errMsg
-                                    .toLowerCase()
-                                    .includes("api unavailable");
-                            if (!isQuotaError) {
-                                // Soft failure (timeout, network) - audio loop is already running, proceed
-                                console.log(
-                                    "[Recording] Soft failure, audio loop running - proceeding",
-                                );
-                                backendConnected = true;
-                                break;
-                            }
-                            // Hard failure - try next key
-                        }
-                    }
-
-                    if (!backendConnected) {
-                        // ALL keys failed with hard errors
-                        isGeminiConnected = false;
-                        status =
-                            "Cannot start: All API keys quota/rate limited";
-                        showToast(
-                            "All API keys are rate-limited or quota-exhausted. Wait for cooldown or add new keys.",
-                            "error",
+                    // Push working key to Rust backend AND start audio loop
+                    // Only try the selected key - no loop to avoid burning quota
+                    try {
+                        await invoke("test_gemini_connection", {
+                            key: keyResult.key!.key,
+                            model: selectedModel,
+                        });
+                        console.log(
+                            `[Recording] Connected with key: ${keyResult.key!.name}`,
                         );
-                        setTimeout(() => {
-                            status = "Ready";
-                        }, 5000);
-                        return;
+                        apiKey = keyResult.key!.key;
+                    } catch (e: any) {
+                        const errMsg = e?.message || String(e);
+                        console.warn(
+                            `[Recording] Backend test warning: ${errMsg}`,
+                        );
+                        // The audio loop is started regardless of test result.
+                        // Don't block recording - the loop will retry on actual speech.
+                        // Only block if we have zero valid keys at all.
+                        apiKey = keyResult.key!.key;
+
+                        // Try to silently rotate to next key for the backend
+                        const nextKey = keyManager.rotateToNextKey();
+                        if (nextKey) {
+                            try {
+                                await invoke("update_gemini_key", {
+                                    key: nextKey.key,
+                                });
+                                apiKey = nextKey.key;
+                                console.log(
+                                    `[Recording] Rotated to ${nextKey.name} after initial test failure`,
+                                );
+                            } catch (_) {
+                                /* ignore */
+                            }
+                        }
                     }
                 }
 

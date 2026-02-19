@@ -201,15 +201,19 @@ async fn call_gemini_with_text(
     let status = response.status();
     let text = response.text().await.map_err(|e| format!("Read: {}", e))?;
     
-    // Check for rate limiting
-    let is_rate_limited = status.as_u16() == 429 
-        || RATE_LIMIT_CODES.iter().any(|code| text.contains(code));
-    
-    if is_rate_limited {
-        // Exponential backoff
-        *backoff = (*backoff * 2).max(INITIAL_BACKOFF_SECS).min(MAX_BACKOFF_SECS);
-        println!("[GEMINI] ⚠️ Rate limited! Backoff now: {}s", backoff);
-        return Err(format!("Rate limited. Waiting {}s before retry.", backoff));
+    // Only check for rate limiting on error responses (4xx/5xx)
+    // NEVER check success (2xx) responses for rate limit strings -
+    // they can appear in normal AI-generated text!
+    if !status.is_success() {
+        let is_rate_limited = status.as_u16() == 429 
+            || (status.as_u16() == 403 && RATE_LIMIT_CODES.iter().any(|code| text.contains(code)));
+        
+        if is_rate_limited {
+            // Exponential backoff
+            *backoff = (*backoff * 2).max(INITIAL_BACKOFF_SECS).min(MAX_BACKOFF_SECS);
+            println!("[GEMINI] ⚠️ Rate limited (HTTP {})! Backoff now: {}s", status.as_u16(), backoff);
+            return Err(format!("RATE_LIMITED:{}. Waiting {}s before retry.", status.as_u16(), backoff));
+        }
     }
     
     // Success - reset backoff
@@ -332,19 +336,21 @@ pub async fn test_gemini_connection(
         }
     };
     
-    // Return actual test result - do NOT fake success when the API is unavailable
+    // Audio loop is ALWAYS started above regardless of test result.
+    // Be lenient with the test - the real API calls happen on actual speech.
+    // Only truly block if the key is fundamentally invalid (401).
     match test_result {
         Ok(()) => Ok(format!("Connected to {}", m)),
         Err(e) => {
-            // Check if this is a hard failure (quota/rate limit) vs soft failure (timeout/network)
-            let is_hard_fail = e.contains("Rate limited") || e.contains("Quota exhausted");
-            if is_hard_fail {
-                // Do NOT mark as connected - API is genuinely unavailable
+            let is_auth_fail = e.contains("401") || e.contains("API_KEY_INVALID");
+            if is_auth_fail {
                 *state.is_connected.lock().unwrap() = false;
-                Err(format!("API unavailable: {}", e))
+                Err(format!("Invalid API key: {}", e))
             } else {
-                // Soft failure (timeout, transient network) - allow with warning
+                // Rate limits, quota, timeouts, network issues - still allow recording
+                // Audio loop is running and will retry with backoff on real speech
                 *state.is_connected.lock().unwrap() = true;
+                println!("[GEMINI] Test warning: {} - proceeding anyway (audio loop active)", e);
                 Ok(format!("Connected to {} (warning: {})", m, e))
             }
         }
@@ -393,10 +399,13 @@ pub async fn process_transcript_with_gemini(
         Err(e) => {
             println!("[GEMINI] ✗ Error: {}", e);
             let _ = app.emit("cognivox:status", format!("Intelligence extraction error: {}", e));
-            let _ = app.emit("cognivox:api_error", serde_json::json!({
-                "code": if e.contains("429") { 429 } else { 500 },
-                "message": e
-            }));
+            // Only emit api_error for actual rate limits to trigger key rotation
+            if e.contains("RATE_LIMITED:") || e.contains("429") {
+                let _ = app.emit("cognivox:api_error", serde_json::json!({
+                    "code": 429,
+                    "message": e
+                }));
+            }
             Err(e)
         }
     }
@@ -752,12 +761,15 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle) {
                             
                             let _ = app.emit("cognivox:status", format!("Gemini error: {}. Transcript saved.", e));
                             
-                            // Emit error for frontend rotation
-                            let code = if e.contains("429") || e.contains("Rate limit") { 429 } else { 500 };
-                            let _ = app.emit("cognivox:api_error", serde_json::json!({
-                                "code": code,
-                                "message": e
-                            }));
+                            // Emit error for frontend rotation - only for REAL rate limits
+                            let is_rate_limit = e.contains("RATE_LIMITED:") || e.contains("429");
+                            if is_rate_limit {
+                                let _ = app.emit("cognivox:api_error", serde_json::json!({
+                                    "code": 429,
+                                    "message": e
+                                }));
+                            }
+                            // For non-rate-limit errors, don't trigger key rotation
 
                             sleep(Duration::from_secs(2)).await;
                             let _ = app.emit("cognivox:status", "Listening for speech...");
