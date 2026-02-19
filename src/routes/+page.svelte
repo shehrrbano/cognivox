@@ -181,19 +181,36 @@
 
     // Listen for backend API errors
     async function setupBackendEventListeners() {
-        const unlisten = await listen("cognivox:api_error", (event: any) => {
-            const { code, message } = event.payload;
-            console.warn(`[BACKEND] API Error: ${code} - ${message}`);
+        const unlisten = await listen(
+            "cognivox:api_error",
+            async (event: any) => {
+                const { code, message } = event.payload;
+                console.warn(`[BACKEND] API Error: ${code} - ${message}`);
 
-            // Trigger rotation in key manager
-            const result = keyManager.handleError(code, message);
+                // Trigger rotation in key manager
+                const result = keyManager.handleError(code, message);
 
-            if (result.switched) {
-                showToast(result.message, "warning");
-            } else {
-                showToast("Service disrupted: All keys exhausted", "error");
-            }
-        });
+                if (result.switched && result.newKey) {
+                    // CRITICAL: Push the new key to the Rust backend so the audio loop uses it
+                    try {
+                        await invoke("update_gemini_key", {
+                            key: result.newKey.key,
+                        });
+                        console.log(
+                            `[BACKEND] Rotated key to: ${result.newKey.name}`,
+                        );
+                    } catch (e) {
+                        console.error(
+                            `[BACKEND] Failed to push rotated key:`,
+                            e,
+                        );
+                    }
+                    showToast(result.message, "warning");
+                } else {
+                    showToast("Service disrupted: All keys exhausted", "error");
+                }
+            },
+        );
 
         return unlisten;
     }
@@ -787,45 +804,8 @@ Return ONLY valid JSON, no markdown, no explanation.`;
                         return;
                     }
 
-                    // Key test succeeded — check if it was a real success or a fallback
-                    const testResult = await keyManager.testConnection(
-                        keyResult.key.key,
-                    );
-                    if (!testResult.success) {
-                        // The "fast" check returned a fallback key that doesn't actually work.
-                        // Check if the error is quota/rate limit (hard block) vs timeout (allow)
-                        const isHardFail =
-                            testResult.statusCode === 429 ||
-                            testResult.statusCode === 403 ||
-                            (testResult.message &&
-                                (testResult.message
-                                    .toLowerCase()
-                                    .includes("quota") ||
-                                    testResult.message
-                                        .toLowerCase()
-                                        .includes("resource_exhausted") ||
-                                    testResult.message
-                                        .toLowerCase()
-                                        .includes("rate limit")));
-
-                        if (isHardFail) {
-                            status =
-                                "Cannot start: API quota/rate limit reached";
-                            showToast(
-                                `Recording blocked: ${testResult.message}. Wait or add new API keys in Settings.`,
-                                "error",
-                            );
-                            setTimeout(() => {
-                                status = "Ready";
-                            }, 5000);
-                            return;
-                        }
-                        // Soft fail (timeout, network) — warn but allow
-                        showToast(
-                            `API test inconclusive: ${testResult.message}. Recording will start anyway.`,
-                            "warning",
-                        );
-                    }
+                    // getNextWorkingKeyFast() already tested the key via models.list
+                    // No need to test again - the Rust backend will do the real test
 
                     isGeminiConnected = true;
                     status = keyResult.message;
@@ -854,41 +834,72 @@ Return ONLY valid JSON, no markdown, no explanation.`;
                     }
 
                     // CRITICAL: Push working key to Rust backend AND start audio loop!
-                    try {
-                        await invoke("test_gemini_connection", {
-                            key: keyResult.key!.key,
-                            model: selectedModel,
-                        });
-                        console.log(
-                            "[Recording] Key synced and audio loop started",
-                        );
-                    } catch (e: any) {
-                        const errMsg = e?.message || String(e);
-                        // Backend now returns Err for hard failures (quota/rate limit)
-                        const isQuotaError =
-                            errMsg.toLowerCase().includes("quota") ||
-                            errMsg.toLowerCase().includes("rate limit") ||
-                            errMsg
-                                .toLowerCase()
-                                .includes("resource_exhausted") ||
-                            errMsg.toLowerCase().includes("api unavailable");
-                        if (isQuotaError) {
-                            isGeminiConnected = false;
-                            status =
-                                "Cannot start: API quota/rate limit reached";
-                            showToast(
-                                `API check failed: ${errMsg}. Wait for cooldown or add new API keys in Settings.`,
-                                "error",
+                    // Try the selected key first, then rotate through others if it fails
+                    let backendConnected = false;
+                    const allKeys = keyManager
+                        .getState()
+                        .keys.filter((k: any) => !k.isDisabled);
+
+                    // Build ordered list: selected key first, then the rest
+                    const keysToTry = [
+                        keyResult.key!,
+                        ...allKeys.filter(
+                            (k: any) => k.id !== keyResult.key!.id,
+                        ),
+                    ];
+
+                    for (const tryKey of keysToTry) {
+                        try {
+                            await invoke("test_gemini_connection", {
+                                key: tryKey.key,
+                                model: selectedModel,
+                            });
+                            console.log(
+                                `[Recording] Connected with key: ${tryKey.name}`,
                             );
-                            setTimeout(() => {
-                                status = "Ready";
-                            }, 5000);
-                            return;
+                            apiKey = tryKey.key;
+                            backendConnected = true;
+                            break;
+                        } catch (e: any) {
+                            const errMsg = e?.message || String(e);
+                            console.warn(
+                                `[Recording] Key ${tryKey.name} failed: ${errMsg}, trying next...`,
+                            );
+                            // If it's not a quota/rate error, proceed anyway (audio loop is started)
+                            const isQuotaError =
+                                errMsg.toLowerCase().includes("quota") ||
+                                errMsg.toLowerCase().includes("rate limit") ||
+                                errMsg
+                                    .toLowerCase()
+                                    .includes("resource_exhausted") ||
+                                errMsg
+                                    .toLowerCase()
+                                    .includes("api unavailable");
+                            if (!isQuotaError) {
+                                // Soft failure (timeout, network) - audio loop is already running, proceed
+                                console.log(
+                                    "[Recording] Soft failure, audio loop running - proceeding",
+                                );
+                                backendConnected = true;
+                                break;
+                            }
+                            // Hard failure - try next key
                         }
-                        console.warn(
-                            "[Recording] Connection test had issues, proceeding:",
-                            e,
+                    }
+
+                    if (!backendConnected) {
+                        // ALL keys failed with hard errors
+                        isGeminiConnected = false;
+                        status =
+                            "Cannot start: All API keys quota/rate limited";
+                        showToast(
+                            "All API keys are rate-limited or quota-exhausted. Wait for cooldown or add new keys.",
+                            "error",
                         );
+                        setTimeout(() => {
+                            status = "Ready";
+                        }, 5000);
+                        return;
                     }
                 }
 
@@ -1536,17 +1547,7 @@ Return ONLY valid JSON, no markdown, no explanation.`;
                         const rawIntel = payload?.intelligence || "";
                         let transcriptText = payload?.transcript || "";
                         // Use backend speaker tag (from audio diarization) as primary source
-                        let speaker = payload?.speaker || "Speaker";
-                        let tone = "NEUTRAL";
-                        let confidence = 0.9;
-                        let categories: string[] = ["INFO"];
-                        let entities: Array<{ name: string; type: string }> =
-                            [];
-                        let graphEdgesFromGemini: Array<{
-                            from: string;
-                            to: string;
-                            relation: string;
-                        }> = [];
+                        let backendSpeaker = payload?.speaker || "";
 
                         // Update debug state
                         debugLastTranscript =
@@ -1561,58 +1562,73 @@ Return ONLY valid JSON, no markdown, no explanation.`;
                             rawIntel.substring(0, 200),
                         );
 
-                        // Parse Gemini intelligence JSON if available
+                        // Parse Gemini intelligence JSON - supports both single object and array of speaker segments
+                        interface ParsedSegment {
+                            transcript: string;
+                            speaker: string;
+                            tone: string;
+                            confidence: number;
+                            category: string[];
+                            entities: Array<{ name: string; type: string }>;
+                            graph_edges: Array<{
+                                from: string;
+                                to: string;
+                                relation: string;
+                            }>;
+                        }
+
+                        let segments: ParsedSegment[] = [];
+
                         try {
-                            const jsonMatch = rawIntel.match(/\{[\s\S]*\}/);
-                            if (jsonMatch) {
-                                const cleanJson = jsonMatch[0];
-                                console.log(
-                                    "[GEMINI] Extracted JSON:",
-                                    cleanJson.substring(0, 200),
-                                );
-                                const parsed = JSON.parse(cleanJson);
+                            // Try parsing as JSON array first (new multi-speaker format)
+                            const arrayMatch = rawIntel.match(/\[[\s\S]*\]/);
+                            const objMatch = rawIntel.match(/\{[\s\S]*\}/);
 
-                                // Only override transcript if parsed has it AND it's not empty
-                                if (
-                                    parsed.transcript &&
-                                    parsed.transcript.trim().length > 0
-                                ) {
-                                    transcriptText = parsed.transcript;
+                            if (arrayMatch) {
+                                try {
+                                    const parsed = JSON.parse(arrayMatch[0]);
+                                    if (Array.isArray(parsed)) {
+                                        segments = parsed.map((p: any) => ({
+                                            transcript:
+                                                p.transcript || transcriptText,
+                                            speaker:
+                                                p.speaker ||
+                                                backendSpeaker ||
+                                                "Speaker",
+                                            tone: p.tone || "NEUTRAL",
+                                            confidence: p.confidence || 0.85,
+                                            category: p.category || ["INFO"],
+                                            entities: p.entities || [],
+                                            graph_edges: p.graph_edges || [],
+                                        }));
+                                        console.log(
+                                            `[GEMINI] Parsed ${segments.length} speaker segments from array`,
+                                        );
+                                    }
+                                } catch {
+                                    // Array parse failed, try single object
                                 }
-                                // Speaker: prefer backend diarization (payload.speaker),
-                                // only use Gemini's if backend didn't provide one
-                                if (!payload?.speaker && parsed.speaker) {
-                                    speaker = parsed.speaker;
-                                }
-                                tone = parsed.tone || tone;
-                                confidence = parsed.confidence || confidence;
-                                categories = parsed.category || categories;
+                            }
 
-                                // Extract entities for knowledge graph
-                                if (
-                                    parsed.entities &&
-                                    Array.isArray(parsed.entities)
-                                ) {
-                                    entities = parsed.entities;
-                                }
-                                // Extract graph edges from Gemini
-                                if (
-                                    parsed.graph_edges &&
-                                    Array.isArray(parsed.graph_edges)
-                                ) {
-                                    graphEdgesFromGemini = parsed.graph_edges;
-                                }
-
-                                console.log(
-                                    "[GEMINI] Parsed successfully - speaker:",
-                                    speaker,
-                                    "tone:",
-                                    tone,
-                                    "entities:",
-                                    entities.length,
-                                    "graph_edges:",
-                                    graphEdgesFromGemini.length,
-                                );
+                            // Fallback: try single object format
+                            if (segments.length === 0 && objMatch) {
+                                const parsed = JSON.parse(objMatch[0]);
+                                const speaker =
+                                    backendSpeaker && backendSpeaker !== "auto"
+                                        ? backendSpeaker
+                                        : parsed.speaker || "Speaker";
+                                segments = [
+                                    {
+                                        transcript:
+                                            parsed.transcript || transcriptText,
+                                        speaker,
+                                        tone: parsed.tone || "NEUTRAL",
+                                        confidence: parsed.confidence || 0.85,
+                                        category: parsed.category || ["INFO"],
+                                        entities: parsed.entities || [],
+                                        graph_edges: parsed.graph_edges || [],
+                                    },
+                                ];
                             }
                         } catch (e) {
                             console.log(
@@ -1621,240 +1637,264 @@ Return ONLY valid JSON, no markdown, no explanation.`;
                             );
                         }
 
-                        // ALWAYS show transcript if we have one - don't skip
-                        if (
-                            !transcriptText ||
-                            transcriptText.trim().length === 0
-                        ) {
-                            console.warn(
-                                "[GEMINI] WARNING: Empty transcript received!",
-                            );
-                            return;
+                        // If no segments parsed, create one from raw transcript
+                        if (segments.length === 0) {
+                            const speaker =
+                                backendSpeaker && backendSpeaker !== "auto"
+                                    ? backendSpeaker
+                                    : "Speaker";
+                            segments = [
+                                {
+                                    transcript: transcriptText,
+                                    speaker,
+                                    tone: "NEUTRAL",
+                                    confidence: 0.7,
+                                    category: ["INFO"],
+                                    entities: [],
+                                    graph_edges: [],
+                                },
+                            ];
                         }
 
-                        console.log(
-                            "[GEMINI] *** ADDING TRANSCRIPT TO UI ***:",
-                            transcriptText.substring(0, 80),
-                        );
-
+                        // Process each speaker segment
                         const startTime = performance.now();
                         isTyping = true;
-                        partialText = transcriptText;
 
-                        // Remove any partial transcripts (they were just previews)
+                        // Remove any partial transcripts
                         transcripts = transcripts.filter((t) => !t.isPartial);
 
-                        const newTranscript = {
-                            id: `t_${Date.now()}`,
-                            timestamp: new Date().toLocaleTimeString([], {
-                                hour: "2-digit",
-                                minute: "2-digit",
-                            }),
-                            speaker: speaker,
-                            speakerId:
-                                speaker.includes("1") || speaker === "You"
-                                    ? 1
-                                    : 0,
-                            text: transcriptText,
-                            tone: tone,
-                            category: categories,
-                            confidence: confidence,
-                            isPartial: false,
-                        };
+                        for (const seg of segments) {
+                            if (
+                                !seg.transcript ||
+                                seg.transcript.trim().length === 0
+                            )
+                                continue;
 
-                        transcripts = [...transcripts, newTranscript];
-                        console.log(
-                            "[GEMINI] Total transcripts now:",
-                            transcripts.length,
-                            "Latest tone:",
-                            tone,
-                        );
-                        latencyMs = Math.round(performance.now() - startTime);
+                            console.log(
+                                `[GEMINI] Adding segment: speaker=${seg.speaker}, tone=${seg.tone}, text="${seg.transcript.substring(0, 60)}..."`,
+                            );
 
-                        // ======================================
-                        // BUILD PROPER KNOWLEDGE GRAPH
-                        // ======================================
+                            const newTranscript = {
+                                id: `t_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
+                                timestamp: new Date().toLocaleTimeString([], {
+                                    hour: "2-digit",
+                                    minute: "2-digit",
+                                }),
+                                speaker: seg.speaker,
+                                speakerId:
+                                    seg.speaker.includes("1") ||
+                                    seg.speaker === "You"
+                                        ? 1
+                                        : seg.speaker.includes("2")
+                                          ? 2
+                                          : seg.speaker.includes("3")
+                                            ? 3
+                                            : 0,
+                                text: seg.transcript,
+                                tone: seg.tone,
+                                category: seg.category,
+                                confidence: seg.confidence,
+                                isPartial: false,
+                            };
 
-                        // Ensure root "Meeting" node exists
-                        if (!graphNodes.find((n) => n.id === "Meeting")) {
-                            graphNodes = [
-                                ...graphNodes,
-                                {
-                                    id: "Meeting",
-                                    type: "Topic",
-                                    label: "Meeting",
-                                    weight: 3,
-                                },
-                            ];
-                        }
+                            transcripts = [...transcripts, newTranscript];
 
-                        // 1. Add speaker node and connect to Meeting
-                        const speakerNodeId = speaker || "Speaker";
-                        if (!graphNodes.find((n) => n.id === speakerNodeId)) {
-                            graphNodes = [
-                                ...graphNodes,
-                                {
-                                    id: speakerNodeId,
-                                    type: "Speaker",
-                                    label: speakerNodeId,
-                                    weight: 2,
-                                },
-                            ];
-                            graphEdges = [
-                                ...graphEdges,
-                                {
-                                    from: "Meeting",
-                                    to: speakerNodeId,
-                                    relation: "participant",
-                                },
-                            ];
-                        }
+                            // ======================================
+                            // BUILD KNOWLEDGE GRAPH FOR THIS SEGMENT
+                            // ======================================
 
-                        // 2. Add tone node and connect speaker to tone
-                        if (tone && tone !== "NEUTRAL") {
-                            const toneId = `tone_${tone}`;
-                            if (!graphNodes.find((n) => n.id === toneId)) {
+                            const segSpeaker = seg.speaker;
+                            const segTone = seg.tone;
+                            const segCategories = seg.category;
+                            const segEntities = seg.entities;
+                            const segGraphEdges = seg.graph_edges;
+
+                            // Ensure root "Meeting" node exists
+                            if (!graphNodes.find((n) => n.id === "Meeting")) {
                                 graphNodes = [
                                     ...graphNodes,
                                     {
-                                        id: toneId,
-                                        type: "Tone",
-                                        label: tone,
-                                        weight: 1.2,
+                                        id: "Meeting",
+                                        type: "Topic",
+                                        label: "Meeting",
+                                        weight: 3,
                                     },
                                 ];
                             }
-                            // Connect speaker to tone (not just Meeting to tone)
-                            graphEdges = [
-                                ...graphEdges,
-                                {
-                                    from: speakerNodeId,
-                                    to: toneId,
-                                    relation: "expressed",
-                                },
-                            ];
-                        }
 
-                        // 3. Add category nodes and connect speaker to categories
-                        if (categories && categories.length > 0) {
-                            for (const cat of categories) {
-                                if (cat !== "INFO") {
-                                    if (!graphNodes.find((n) => n.id === cat)) {
-                                        graphNodes = [
-                                            ...graphNodes,
-                                            {
-                                                id: cat,
-                                                type: "Category",
-                                                label: cat,
-                                                weight: 1.5,
-                                            },
-                                        ];
-                                        // Connect category to Meeting
-                                        graphEdges = [
-                                            ...graphEdges,
-                                            {
-                                                from: "Meeting",
-                                                to: cat,
-                                                relation: "contains",
-                                            },
-                                        ];
-                                    }
-                                    // Connect speaker to category
-                                    graphEdges = [
-                                        ...graphEdges,
-                                        {
-                                            from: speakerNodeId,
-                                            to: cat,
-                                            relation: "raised",
-                                        },
-                                    ];
-                                }
+                            // 1. Add speaker node and connect to Meeting
+                            const speakerNodeId = segSpeaker || "Speaker";
+                            if (
+                                !graphNodes.find((n) => n.id === speakerNodeId)
+                            ) {
+                                graphNodes = [
+                                    ...graphNodes,
+                                    {
+                                        id: speakerNodeId,
+                                        type: "Speaker",
+                                        label: speakerNodeId,
+                                        weight: 2,
+                                    },
+                                ];
+                                graphEdges = [
+                                    ...graphEdges,
+                                    {
+                                        from: "Meeting",
+                                        to: speakerNodeId,
+                                        relation: "participant",
+                                    },
+                                ];
                             }
-                        }
 
-                        // 4. Add entity nodes from Gemini extraction
-                        if (entities.length > 0) {
-                            for (const entity of entities) {
-                                const entityId = entity.name.trim();
-                                if (!entityId || entityId.length === 0)
-                                    continue;
-
-                                if (
-                                    !graphNodes.find((n) => n.id === entityId)
-                                ) {
+                            // 2. Add tone node and connect speaker to tone
+                            if (segTone && segTone !== "NEUTRAL") {
+                                const toneId = `tone_${segTone}`;
+                                if (!graphNodes.find((n) => n.id === toneId)) {
                                     graphNodes = [
                                         ...graphNodes,
                                         {
-                                            id: entityId,
-                                            type: entity.type || "Entity",
-                                            label: entityId,
-                                            weight: 1.3,
-                                        },
-                                    ];
-                                    // Connect entity to Meeting
-                                    graphEdges = [
-                                        ...graphEdges,
-                                        {
-                                            from: "Meeting",
-                                            to: entityId,
-                                            relation: "mentions",
+                                            id: toneId,
+                                            type: "Tone",
+                                            label: segTone,
+                                            weight: 1.2,
                                         },
                                     ];
                                 }
-                                // Connect speaker to entity
                                 graphEdges = [
                                     ...graphEdges,
                                     {
                                         from: speakerNodeId,
-                                        to: entityId,
-                                        relation: "mentioned",
+                                        to: toneId,
+                                        relation: "expressed",
                                     },
                                 ];
                             }
-                        }
 
-                        // 5. Add Gemini-extracted graph edges (proper relationships)
-                        if (graphEdgesFromGemini.length > 0) {
-                            for (const edge of graphEdgesFromGemini) {
-                                const fromId = edge.from?.trim();
-                                const toId = edge.to?.trim();
-                                const relation = edge.relation?.trim();
-                                if (!fromId || !toId || !relation) continue;
-
-                                // Ensure both nodes exist
-                                if (!graphNodes.find((n) => n.id === fromId)) {
-                                    graphNodes = [
-                                        ...graphNodes,
-                                        {
-                                            id: fromId,
-                                            type: "Entity",
-                                            label: fromId,
-                                            weight: 1.0,
-                                        },
-                                    ];
+                            // 3. Add category nodes and connect speaker to categories
+                            if (segCategories && segCategories.length > 0) {
+                                for (const cat of segCategories) {
+                                    if (cat !== "INFO") {
+                                        if (
+                                            !graphNodes.find(
+                                                (n) => n.id === cat,
+                                            )
+                                        ) {
+                                            graphNodes = [
+                                                ...graphNodes,
+                                                {
+                                                    id: cat,
+                                                    type: "Category",
+                                                    label: cat,
+                                                    weight: 1.5,
+                                                },
+                                            ];
+                                            graphEdges = [
+                                                ...graphEdges,
+                                                {
+                                                    from: "Meeting",
+                                                    to: cat,
+                                                    relation: "contains",
+                                                },
+                                            ];
+                                        }
+                                        graphEdges = [
+                                            ...graphEdges,
+                                            {
+                                                from: speakerNodeId,
+                                                to: cat,
+                                                relation: "raised",
+                                            },
+                                        ];
+                                    }
                                 }
-                                if (!graphNodes.find((n) => n.id === toId)) {
-                                    graphNodes = [
-                                        ...graphNodes,
-                                        {
-                                            id: toId,
-                                            type: "Entity",
-                                            label: toId,
-                                            weight: 1.0,
-                                        },
-                                    ];
-                                }
-                                // Add the relationship edge
-                                graphEdges = [
-                                    ...graphEdges,
-                                    {
-                                        from: fromId,
-                                        to: toId,
-                                        relation: relation,
-                                    },
-                                ];
                             }
-                        }
+
+                            // 4. Add entity nodes from Gemini extraction
+                            if (segEntities.length > 0) {
+                                for (const entity of segEntities) {
+                                    const entityId = entity.name.trim();
+                                    if (!entityId || entityId.length === 0)
+                                        continue;
+
+                                    if (
+                                        !graphNodes.find(
+                                            (n) => n.id === entityId,
+                                        )
+                                    ) {
+                                        graphNodes = [
+                                            ...graphNodes,
+                                            {
+                                                id: entityId,
+                                                type: entity.type || "Entity",
+                                                label: entityId,
+                                                weight: 1.3,
+                                            },
+                                        ];
+                                        graphEdges = [
+                                            ...graphEdges,
+                                            {
+                                                from: "Meeting",
+                                                to: entityId,
+                                                relation: "mentions",
+                                            },
+                                        ];
+                                    }
+                                    graphEdges = [
+                                        ...graphEdges,
+                                        {
+                                            from: speakerNodeId,
+                                            to: entityId,
+                                            relation: "mentioned",
+                                        },
+                                    ];
+                                }
+                            }
+
+                            // 5. Add Gemini-extracted graph edges
+                            if (segGraphEdges.length > 0) {
+                                for (const edge of segGraphEdges) {
+                                    const fromId = edge.from?.trim();
+                                    const toId = edge.to?.trim();
+                                    const relation = edge.relation?.trim();
+                                    if (!fromId || !toId || !relation) continue;
+
+                                    if (
+                                        !graphNodes.find((n) => n.id === fromId)
+                                    ) {
+                                        graphNodes = [
+                                            ...graphNodes,
+                                            {
+                                                id: fromId,
+                                                type: "Entity",
+                                                label: fromId,
+                                                weight: 1.0,
+                                            },
+                                        ];
+                                    }
+                                    if (
+                                        !graphNodes.find((n) => n.id === toId)
+                                    ) {
+                                        graphNodes = [
+                                            ...graphNodes,
+                                            {
+                                                id: toId,
+                                                type: "Entity",
+                                                label: toId,
+                                                weight: 1.0,
+                                            },
+                                        ];
+                                    }
+                                    graphEdges = [
+                                        ...graphEdges,
+                                        {
+                                            from: fromId,
+                                            to: toId,
+                                            relation: relation,
+                                        },
+                                    ];
+                                }
+                            }
+                        } // end for (const seg of segments)
 
                         console.log(
                             "[GRAPH] Updated: ",
@@ -1863,6 +1903,8 @@ Return ONLY valid JSON, no markdown, no explanation.`;
                             graphEdges.length,
                             "edges",
                         );
+
+                        latencyMs = Math.round(performance.now() - startTime);
 
                         // --- LOCAL INTELLIGENCE EXTRACTION ---
                         try {

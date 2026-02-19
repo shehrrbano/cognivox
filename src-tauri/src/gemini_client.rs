@@ -50,22 +50,45 @@ impl Default for GeminiState {
 
 const COGNIVOX_INTELLIGENCE_PROMPT: &str = r#"You are a PASSIVE MEETING INTELLIGENCE ENGINE analyzing transcribed speech.
 
-INPUT: Transcribed text from a meeting with speaker tag ("You" = microphone user, "Speaker 2" = other participant).
+INPUT: Transcribed text from a meeting segment. It may have a speaker tag like "[You]:" or "[Speaker 2]:" OR it may be untagged (single-mic capture with multiple speakers talking).
 The conversation may be in English, Urdu (Roman Urdu), or a mix of both languages (code-switching).
-OUTPUT: JSON intelligence extraction.
 
-FORMAT:
-{"transcript":"original text","speaker":"<keep the speaker tag from input exactly as given>","tone":"NEUTRAL","category":["TASK"],"confidence":0.85,"summary":"Brief summary if applicable","entities":[{"name":"entity name","type":"PERSON|PROJECT|TOPIC|LOCATION|DATE|ORG"}],"graph_edges":[{"from":"entity or speaker","to":"entity or speaker","relation":"verb or relationship"}]}
+CRITICAL TASK 1 - SPEAKER DIARIZATION:
+If the input has a speaker tag like "[You]:" or "[Speaker 2]:", keep that tag.
+If the input is from a SINGLE MICROPHONE capturing MULTIPLE speakers, you MUST analyze the text for speaker changes. Look for:
+- Conversational turn-taking (question followed by answer)
+- Shifts in perspective or opinion ("I think..." then "No, I believe...")
+- Different speaking styles, vocabulary, or language preferences
+- Greetings/acknowledgments indicating a new speaker ("Ok", "Right", "Haan", "Achha")
+- Topic pivots that suggest a different person responding
+When you detect multiple speakers, split the transcript and assign "Speaker 1", "Speaker 2", etc.
+Output an ARRAY of JSON objects, one per speaker segment.
+
+CRITICAL TASK 2 - TONE DETECTION:
+Do NOT default to NEUTRAL. Carefully analyze the actual emotional content:
+- Look at word choice, exclamation marks, question patterns, emphasis words
+- "I really need this done ASAP!" = URGENT, not NEUTRAL
+- "That's amazing! Great work!" = EXCITED or POSITIVE, not NEUTRAL
+- "I don't know... maybe we could..." = HESITANT, not NEUTRAL  
+- "This keeps failing and nobody fixes it" = FRUSTRATED, not NEUTRAL
+- "Yaar ye kaam hogaya!" = EXCITED/POSITIVE
+- "Mujhe bohot tension ho rahi hai" = FRUSTRATED/NEGATIVE
+- Laughter indicators or enthusiastic speech = EXCITED
+- Concerned or worried statements = NEGATIVE or HESITANT
+Only use NEUTRAL when speech is truly flat/informational with no emotional indicators.
+
+OUTPUT FORMAT (JSON array - one entry per detected speaker segment):
+[{"transcript":"speaker's text","speaker":"Speaker 1 or You or Speaker 2","tone":"<actual detected tone>","category":["TASK"],"confidence":0.85,"summary":"Brief summary","entities":[{"name":"entity name","type":"PERSON|PROJECT|TOPIC|LOCATION|DATE|ORG"}],"graph_edges":[{"from":"entity or speaker","to":"entity or speaker","relation":"verb or relationship"}]}]
+
+If only one speaker is detected, still return an array with one element.
 
 RULES:
-- JSON only, no markdown
-- CRITICAL: Keep the speaker tag exactly as provided in the input (e.g. "You" or "Speaker 2"). Do NOT reassign or change the speaker.
-- If the text is in Urdu or Roman Urdu, still analyze it and extract intelligence. Write the summary in the same language as the input.
-- tone: NEUTRAL|URGENT|FRUSTRATED|EXCITED|POSITIVE|NEGATIVE|HESITANT|DOMINANT|EMPATHETIC
+- JSON array only, no markdown, no explanation
+- tone: NEUTRAL|URGENT|FRUSTRATED|EXCITED|POSITIVE|NEGATIVE|HESITANT|DOMINANT|EMPATHETIC (pick the BEST match, avoid NEUTRAL unless truly emotionless)
 - category: TASK|DECISION|DEADLINE|QUERY|ACTION_ITEM|RISK|SENTIMENT|URGENCY|INTERRUPTION|AGREEMENT|DISAGREEMENT|OFF_TOPIC|EMOTION_SHIFT|DOMINANCE_SHIFT|EMPATHY_GAP|TOPIC_DRIFT
 - confidence: 0.0-1.0
 - entities: Extract ALL people, projects, topics, organizations, locations, dates mentioned
-- graph_edges: Create relationships between entities. E.g. {"from":"John","to":"Project X","relation":"works on"}, {"from":"You","to":"deadline","relation":"mentioned"}
+- graph_edges: Create relationships between entities
 - Always include at least one graph_edge connecting the speaker to the main topic
 - For low-confidence or unclear: lower confidence value, not error"#;
 
@@ -264,18 +287,34 @@ pub async fn test_gemini_connection(
     {
         Ok(r) => {
             let status = r.status();
-            let _t = r.text().await.unwrap_or_default();
+            let body = r.text().await.unwrap_or_default();
             
-             if status.as_u16() == 429 {
+            if status.as_u16() == 429 {
                 println!("[GEMINI] Rate limited (429) - audio loop still running");
                 let _ = app.emit("cognivox:status", "Rate limited - will retry on speech");
                 Err("Rate limited".to_string())
             } else if status.as_u16() == 403 {
-                println!("[GEMINI] Quota exhausted (403) - audio loop still running");
-                let _ = app.emit("cognivox:status", "Quota exhausted - will retry on speech");
-                Err("Quota exhausted".to_string())
+                // IMPORTANT: Not all 403s are quota exhaustion!
+                // Parse body to check if it's truly RESOURCE_EXHAUSTED vs permission denied
+                let body_lower = body.to_lowercase();
+                let is_quota = body_lower.contains("resource_exhausted")
+                    || body_lower.contains("quota")
+                    || body_lower.contains("rate_limit")
+                    || body_lower.contains("ratelimitexceeded");
+                
+                if is_quota {
+                    println!("[GEMINI] Quota exhausted (403) - body: {}", &body[..body.len().min(200)]);
+                    let _ = app.emit("cognivox:status", "Quota exhausted - will retry on speech");
+                    Err("Quota exhausted".to_string())
+                } else {
+                    // Permission denied, model not accessible, etc. - NOT a quota issue
+                    println!("[GEMINI] 403 but NOT quota (permission/model issue) - body: {}", &body[..body.len().min(200)]);
+                    let _ = app.emit("cognivox:status", "API permission issue - proceeding anyway");
+                    // Treat as soft failure - the audio loop is running and will try on real speech
+                    Err(format!("Permission issue (403): {}", &body[..body.len().min(100)]))
+                }
             } else if !status.is_success() {
-                println!("[GEMINI] HTTP error: {} - audio loop still running", status);
+                println!("[GEMINI] HTTP error: {} - audio loop still running. Body: {}", status, &body[..body.len().min(200)]);
                 let _ = app.emit("cognivox:status", format!("HTTP {} - will retry", status));
                 Err(format!("HTTP {}", status))
             } else {
@@ -376,7 +415,7 @@ pub fn update_gemini_key(state: tauri::State<'_, GeminiState>, key: String) -> R
 async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle) {
     println!("[WHISPER->GEMINI] Audio processing loop started");
     println!("[WHISPER->GEMINI] Pipeline: Audio -> Whisper STT -> Gemini Intelligence");
-    println!("[WHISPER->GEMINI] Speaker diarization: Mic=You, System=Speaker 2");
+    println!("[WHISPER->GEMINI] Speaker diarization: per-chunk source tracking + Gemini analysis");
     
     let _ = app.emit("cognivox:status", "Listening for speech...");
     
@@ -386,18 +425,16 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle) {
     let mut last_speech: Option<Instant> = None;
     
     // Use Arc<Mutex<bool>> so we can share processing state with the spawned task
-    // This way the main loop keeps collecting audio even while processing
     let processing = Arc::new(StdMutex::new(false));
     
     // Pending audio: audio collected during processing that we must not lose
     let pending_buffer: Arc<StdMutex<Vec<f32>>> = Arc::new(StdMutex::new(Vec::new()));
     let pending_speaking: Arc<StdMutex<bool>> = Arc::new(StdMutex::new(false));
+    let pending_source_timeline: Arc<StdMutex<Vec<(usize, AudioSource)>>> = Arc::new(StdMutex::new(Vec::new()));
     
-    // Speaker diarization: track energy from each source
-    let mut mic_energy: f64 = 0.0;
-    let mut system_energy: f64 = 0.0;
-    let mut mic_sample_count: u64 = 0;
-    let mut system_sample_count: u64 = 0;
+    // Speaker diarization: track which source contributed each timeslice
+    // Each entry = (sample_count_in_this_chunk, source)
+    let mut source_timeline: Vec<(usize, AudioSource)> = Vec::new();
     
     // Rate limiting state
     let backoff = Arc::new(StdMutex::new(0u64));
@@ -423,39 +460,31 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle) {
         // ALWAYS collect audio from rx, even while processing
         // CRITICAL: NO PACKET LOSS - collect ALL audio regardless of processing state
         let mut new: Vec<f32> = Vec::new();
+        let mut new_source_chunks: Vec<(usize, AudioSource)> = Vec::new();
         while let Ok(tagged) = rx.try_recv() {
-            let source_rms = rms(&tagged.samples) as f64;
-            match tagged.source {
-                AudioSource::Microphone => {
-                    mic_energy += source_rms;
-                    mic_sample_count += 1;
-                }
-                AudioSource::System => {
-                    system_energy += source_rms;
-                    system_sample_count += 1;
-                }
-            }
+            let chunk_len = tagged.samples.len();
+            // Track which source each chunk of samples came from
+            new_source_chunks.push((chunk_len, tagged.source));
             new.extend(tagged.samples);
         }
         
         // If processing, store ALL audio in pending buffer so NOTHING is lost
-        // CRITICAL: Do NOT skip any audio based on level - save everything
         if is_processing && !new.is_empty() {
             let level = rms(&new);
-            // Save ALL audio to pending buffer regardless of level
             if let Ok(mut pb) = pending_buffer.lock() {
                 pb.extend(&new);
             }
-            // Track speaking state
+            if let Ok(mut pst) = pending_source_timeline.lock() {
+                pst.extend(new_source_chunks);
+            }
             if level > SPEECH_THRESHOLD {
                 if let Ok(mut ps) = pending_speaking.lock() {
                     *ps = true;
                 }
             }
-            // Update counters
             _audio_received_count += 1;
             total_samples_received += new.len() as u64;
-            continue;  // Skip further processing, continue collecting
+            continue;
         }
         
         // Process new audio if available (but DON'T skip the processing check below)
@@ -481,22 +510,21 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle) {
                     let _ = app.emit("cognivox:status", "Speech detected...");
                 }
                 last_speech = Some(Instant::now());
-                buffer.extend(new);
+                buffer.extend(&new);
+                source_timeline.extend(new_source_chunks);
             } else if level > SILENCE_THRESHOLD {
-                // CRITICAL: Continue collecting audio if we're speaking OR if level is above silence
-                // This captures soft-spoken words and prevents packet loss at sentence boundaries
                 if speaking {
-                    buffer.extend(new);
+                    buffer.extend(&new);
+                    source_timeline.extend(new_source_chunks);
                     last_speech = Some(Instant::now());
                 } else {
-                    // Even if not actively speaking, buffer quiet audio in case speech starts
-                    // This prevents losing the start of softly spoken words
-                    buffer.extend(new);
+                    buffer.extend(&new);
+                    source_timeline.extend(new_source_chunks);
                 }
             } else {
-                // Complete silence - only extend buffer if we're actively speaking
                 if speaking {
-                    buffer.extend(new);
+                    buffer.extend(&new);
+                    source_timeline.extend(new_source_chunks);
                 }
             }
         }
@@ -522,46 +550,63 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle) {
                 *processing.lock().unwrap() = true;
                 request_count += 1;
                 
-                // Determine dominant speaker based on mic vs system energy
-                let avg_mic = if mic_sample_count > 0 { mic_energy / mic_sample_count as f64 } else { 0.0 };
-                let avg_system = if system_sample_count > 0 { system_energy / system_sample_count as f64 } else { 0.0 };
-                let dominant_speaker = if avg_mic >= avg_system { "You" } else { "Speaker 2" };
+                // Compute speaker tag from source timeline
+                // Count total samples from each source to determine dominant speaker
+                let mut mic_samples_total: usize = 0;
+                let mut sys_samples_total: usize = 0;
+                for &(count, ref source) in &source_timeline {
+                    match source {
+                        AudioSource::Microphone => mic_samples_total += count,
+                        AudioSource::System => sys_samples_total += count,
+                    }
+                }
+                
+                // If we have BOTH mic and system audio, determine if source-based diarization applies
+                // If ALL audio is from mic (no system/loopback), we'll let Gemini do text-based diarization
+                let has_system_audio = sys_samples_total > 0;
+                let has_mic_audio = mic_samples_total > 0;
+                
+                let speaker_tag = if has_system_audio && has_mic_audio {
+                    // Both sources: assign based on which was dominant
+                    if mic_samples_total >= sys_samples_total { "You" } else { "Speaker 2" }
+                } else if has_system_audio {
+                    "Speaker 2" // Only system audio
+                } else {
+                    // Only mic audio or mixed — tell Gemini to do text-based speaker detection
+                    "auto"
+                };
                 
                 println!("[AUDIO] ========================================");
                 println!("[AUDIO] >>> PROCESSING {:.1}s AUDIO (request #{}) <<<", duration, request_count);
-                println!("[DIARIZATION] Mic energy: {:.6}, System energy: {:.6} -> Speaker: {}", avg_mic, avg_system, dominant_speaker);
+                println!("[DIARIZATION] Mic samples: {}, System samples: {} -> Speaker: {}", mic_samples_total, sys_samples_total, speaker_tag);
                 println!("[AUDIO] ========================================");
                 let _ = app.emit("cognivox:status", format!("Whisper transcribing {:.1}s audio...", duration));
                 
-                // Keep MORE overlap samples for next chunk to avoid losing words at boundaries
-                // Use 1.5 seconds of overlap instead of 1.0 for better continuity
+                // Keep overlap samples for next chunk
                 let overlap_samples = ((OVERLAP_SECS * 1.5) * 16000.0) as usize;
                 let audio = buffer.clone();
                 
-                // CRITICAL: Keep last overlap_samples in buffer for perfect continuity
-                // This ensures no words are lost between chunks
                 if buffer.len() > overlap_samples {
                     let start = buffer.len() - overlap_samples;
                     buffer = buffer[start..].to_vec();
-                    // DON'T clear speaking state - maintain continuity
+                    // Keep only the timeline entries that correspond to the overlap
+                    // Approximate: keep last few entries
+                    let mut kept = 0usize;
+                    let mut keep_from_idx = source_timeline.len();
+                    for (i, &(count, _)) in source_timeline.iter().enumerate().rev() {
+                        kept += count;
+                        keep_from_idx = i;
+                        if kept >= overlap_samples { break; }
+                    }
+                    source_timeline = source_timeline[keep_from_idx..].to_vec();
                     println!("[AUDIO] Retained {:.2}s overlap for next chunk", overlap_samples as f32 / 16000.0);
                 } else {
-                    // If buffer is smaller than overlap, keep everything
-                    // Don't clear - this might be mid-sentence
                     println!("[AUDIO] Buffer smaller than overlap - keeping all {:.2}s", buffer.len() as f32 / 16000.0);
                 }
                 
-                // Update but don't reset speech timing - maintain continuity
-                speaking = false;  // Will restart on next audio
-                // Don't clear speech_start and last_speech yet - let them timeout naturally
+                speaking = false;
                 
-                // Reset energy counters for next segment
-                mic_energy = 0.0;
-                system_energy = 0.0;
-                mic_sample_count = 0;
-                system_sample_count = 0;
-                
-                let speaker_tag = dominant_speaker.to_string();
+                let speaker_tag = speaker_tag.to_string();
                 
                 // Spawn the processing as a separate task so the main loop continues collecting audio
                 let app_clone = app.clone();
@@ -674,7 +719,12 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle) {
                     }
                     
                     // Include speaker tag in the transcript text sent to Gemini
-                    let speaker_annotated_transcript = format!("[{}]: {}", speaker_tag, transcription);
+                    // When speaker is "auto", don't tag — let Gemini detect multiple speakers
+                    let speaker_annotated_transcript = if speaker_tag == "auto" {
+                        format!("[Single mic, multiple speakers possible]: {}", transcription)
+                    } else {
+                        format!("[{}]: {}", speaker_tag, transcription)
+                    };
                     
                     let mut bo = *backoff_clone.lock().unwrap();
                     let mut lr = *last_request_clone.lock().unwrap();
@@ -732,20 +782,23 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle) {
         }
         
         // After processing completes, merge any pending audio back into main buffer
-        // CRITICAL: This ensures NO audio is lost during processing
         if !*processing.lock().unwrap() {
             if let Ok(mut pb) = pending_buffer.lock() {
                 if !pb.is_empty() {
                     let pending_len = pb.len();
                     println!("[AUDIO] Reintegrating {:.2}s of pending audio", pending_len as f32 / 16000.0);
                     
-                    // PREPEND pending audio to buffer (it was collected while processing)
-                    // This maintains proper chronological order
                     let mut new_buffer = pb.drain(..).collect::<Vec<f32>>();
                     new_buffer.extend(&buffer);
                     buffer = new_buffer;
                     
-                    // Check if we should be in speaking state based on pending audio
+                    // Also merge pending source timeline
+                    if let Ok(mut pst) = pending_source_timeline.lock() {
+                        let mut new_timeline = pst.drain(..).collect::<Vec<_>>();
+                        new_timeline.extend(source_timeline.drain(..));
+                        source_timeline = new_timeline;
+                    }
+                    
                     if let Ok(mut ps) = pending_speaking.lock() {
                         if *ps {
                             speaking = true;
