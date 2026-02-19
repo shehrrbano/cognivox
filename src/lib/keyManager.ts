@@ -508,16 +508,29 @@ class ApiKeyManager {
             }
         }
 
-        // FALLBACK: If all tests failed but we have keys, return the first key anyway
-        // The Rust backend handles retries gracefully - don't block recording
-        const fallbackKey = keys[0];
-        console.warn(`[KeyManager] All key tests failed, using fallback: ${fallbackKey.name}`);
+        // If ALL tests failed with hard errors (rate limit / quota), do NOT return success
+        // Only allow fallback for soft errors (timeouts, network issues)
+        const hasHardFail = keys.some(k =>
+            k.rateLimited || (k.cooldownUntil && k.cooldownUntil > Date.now())
+        );
+        const allHardFail = keys.every(k =>
+            k.rateLimited || (k.cooldownUntil && k.cooldownUntil > Date.now()) || k.isDisabled
+        );
+
+        if (allHardFail) {
+            console.error(`[KeyManager] All keys have hard failures (rate limit or quota exhausted)`);
+            return { success: false, message: `All API keys are rate-limited or quota-exhausted. ${lastError}` };
+        }
+
+        // Soft failures (timeout, network) - use fallback key with warning
+        const fallbackKey = keys.find(k => !k.rateLimited && !(k.cooldownUntil && k.cooldownUntil > Date.now())) || keys[0];
+        console.warn(`[KeyManager] Using fallback key: ${fallbackKey.name} (soft failure)`);
         fallbackKey.isActive = true;
         this.state.keys.forEach(other => { if (other.id !== fallbackKey.id) other.isActive = false; });
         this.state.currentIndex = this.state.keys.findIndex(x => x.id === fallbackKey.id);
         this.saveState();
         this.notifyListeners();
-        return { success: true, key: fallbackKey, message: `Using ${fallbackKey.name} (test: ${lastError})` };
+        return { success: true, key: fallbackKey, message: `Using ${fallbackKey.name} (test inconclusive: ${lastError})` };
     }
 
     /**

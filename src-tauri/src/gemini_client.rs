@@ -16,7 +16,10 @@ const GEMINI_REST_URL: &str = "https://generativelanguage.googleapis.com/v1beta/
 const MIN_REQUEST_INTERVAL_SECS: u64 = 1;      // Minimum 1 second between text requests (faster than audio)
 const INITIAL_BACKOFF_SECS: u64 = 3;           // Start with 3 second backoff
 const MAX_BACKOFF_SECS: u64 = 60;              // Max 60 second backoff
-const RATE_LIMIT_CODES: [&str; 3] = ["429", "RESOURCE_EXHAUSTED", "rate"];
+// IMPORTANT: These strings are checked against the FULL response body.
+// Do NOT use short/generic words like "rate" - they match common English words
+// ("accurate", "generate", "moderate" etc.) causing false rate-limit errors!
+const RATE_LIMIT_CODES: [&str; 3] = ["RESOURCE_EXHAUSTED", "RATE_LIMIT_EXCEEDED", "rateLimitExceeded"];
 
 // AUDIO SEGMENTATION CONFIG (used before Whisper)
 const MIN_SPEECH_SECS: f32 = 0.4;              // Minimum 0.4s of speech (catch quick utterances)
@@ -290,14 +293,21 @@ pub async fn test_gemini_connection(
         }
     };
     
-    // Return success even if test failed - the audio loop is running
-    // and will handle rate limiting/retries internally
+    // Return actual test result - do NOT fake success when the API is unavailable
     match test_result {
         Ok(()) => Ok(format!("Connected to {}", m)),
         Err(e) => {
-            // Mark as connected anyway - the loop will handle errors gracefully
-            *state.is_connected.lock().unwrap() = true;
-            Ok(format!("Connected to {} (test: {})", m, e))
+            // Check if this is a hard failure (quota/rate limit) vs soft failure (timeout/network)
+            let is_hard_fail = e.contains("Rate limited") || e.contains("Quota exhausted");
+            if is_hard_fail {
+                // Do NOT mark as connected - API is genuinely unavailable
+                *state.is_connected.lock().unwrap() = false;
+                Err(format!("API unavailable: {}", e))
+            } else {
+                // Soft failure (timeout, transient network) - allow with warning
+                *state.is_connected.lock().unwrap() = true;
+                Ok(format!("Connected to {} (warning: {})", m, e))
+            }
         }
     }
 }
@@ -574,17 +584,17 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle) {
                         *processing_clone.lock().unwrap() = false;
                         return;
                     }
-                    let model_path = match whisper_state.model_path.lock().unwrap().clone() {
-                        Some(p) => p,
+                    let whisper_ctx = match whisper_state.whisper_ctx.lock().unwrap().clone() {
+                        Some(ctx) => ctx,
                         None => {
-                            println!("[WHISPER] ✗ Model path missing - CANNOT TRANSCRIBE");
-                            let _ = app.emit("cognivox:status", "Whisper model missing");
+                            println!("[WHISPER] ✗ Context not initialized - CANNOT TRANSCRIBE");
+                            let _ = app.emit("cognivox:status", "Whisper not initialized");
                             *processing_clone.lock().unwrap() = false;
                             return;
                         }
                     };
                     let language = whisper_state.language.lock().unwrap().clone();
-                    println!("[WHISPER] Using language: '{}', model: {:?}", language, model_path);
+                    println!("[WHISPER] Using language: '{}'", language);
                     
                     // Get recent context for better accuracy (last 2 transcriptions)
                     let context = {
@@ -603,8 +613,8 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle) {
                         }
                     };
                     
-                    // Transcribe with Whisper using context for better accuracy
-                    let transcription = match transcribe_audio_with_context(&model_path, &language, &audio, context).await {
+                    // Transcribe with Whisper using cached context (fast - no model reload!)
+                    let transcription = match transcribe_audio_with_context(whisper_ctx, language, audio, context).await {
                         Ok(result) => {
                             println!("[WHISPER] ========================================");
                             println!("[WHISPER] ✓ TRANSCRIPTION SUCCESS:");

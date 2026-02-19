@@ -1,4 +1,4 @@
-use std::sync::Mutex as StdMutex;
+use std::sync::{Mutex as StdMutex, Arc};
 use tauri::{AppHandle, Emitter};
 use whisper_rs::{WhisperContext, WhisperContextParameters, FullParams, SamplingStrategy};
 use std::path::PathBuf;
@@ -12,6 +12,7 @@ pub struct WhisperState {
     pub model_path: StdMutex<Option<PathBuf>>,
     pub language: StdMutex<String>,
     pub context_history: StdMutex<Vec<String>>, // Previous transcriptions for context
+    pub whisper_ctx: StdMutex<Option<Arc<WhisperContext>>>, // Cached context - avoids reloading model every time
 }
 
 impl Default for WhisperState {
@@ -21,6 +22,7 @@ impl Default for WhisperState {
             model_path: StdMutex::new(None),
             language: StdMutex::new("auto".to_string()), // Auto-detect: supports English + Urdu
             context_history: StdMutex::new(Vec::new()),
+            whisper_ctx: StdMutex::new(None),
         }
     }
 }
@@ -54,13 +56,14 @@ pub async fn initialize_whisper(
         .await
         .map_err(|e| format!("Failed to load model: {}", e))?;
     
-    // Verify model loads correctly
+    // Create WhisperContext and CACHE it for reuse (avoids reloading model every transcription)
     let path_str = model_path.to_str().ok_or("Invalid model path")?;
-    let _ctx = WhisperContext::new_with_params(
+    let ctx = WhisperContext::new_with_params(
         path_str,
         WhisperContextParameters::default(),
     ).map_err(|e| format!("Failed to load Whisper model: {:?}", e))?;
     
+    *state.whisper_ctx.lock().unwrap() = Some(Arc::new(ctx));
     *state.model_path.lock().unwrap() = Some(model_path.clone());
     *state.is_initialized.lock().unwrap() = true;
     
@@ -117,131 +120,119 @@ pub fn get_whisper_status(state: tauri::State<'_, WhisperState>) -> Result<Strin
 }
 
 // ============================================================================
-// Transcription (v0.13 API)
+// Transcription - Optimized with cached context + spawn_blocking
 // ============================================================================
 
 pub async fn transcribe_audio_with_context(
-    model_path: &PathBuf,
-    language: &str,
-    audio_samples: &[f32],
+    ctx: Arc<WhisperContext>,
+    language: String,
+    audio_samples: Vec<f32>,
     previous_context: Option<String>,
 ) -> Result<TranscriptionResult, String> {
     let duration_secs = audio_samples.len() as f32 / 16000.0;
     println!("[WHISPER] Transcribing {:.1}s of audio ({} samples)...", duration_secs, audio_samples.len());
     
-    let path_str = model_path.to_str().ok_or("Invalid model path")?;
-    
-    // Create context with default params (v0.13 API)
-    let ctx = WhisperContext::new_with_params(
-        path_str,
-        WhisperContextParameters::default(),
-    ).map_err(|e| format!("Failed to create Whisper context: {:?}", e))?;
-    
-    // Create state from context
-    let mut state = ctx.create_state()
-        .map_err(|e| format!("Failed to create Whisper state: {:?}", e))?;
-    
-    // Configure parameters - use LARGE beam search for MAXIMUM accuracy
-    // Beam size 10 provides much better accuracy than default (5)
-    let mut params = FullParams::new(SamplingStrategy::BeamSearch { beam_size: 8, patience: 1.5 });
-    
-    // Language handling: "auto" means let Whisper detect (supports English, Urdu, etc.)
-    if language == "auto" {
-        params.set_language(None); // None = auto-detect language
-        println!("[WHISPER] Language: auto-detect (English + Urdu + others)");
-    } else {
-        params.set_language(Some(language));
-        println!("[WHISPER] Language: fixed to '{}'", language);
-    }
-    params.set_translate(false);          // Keep original language, don't translate to English
-    params.set_print_special(false);
-    params.set_print_progress(false);
-    params.set_print_realtime(false);
-    params.set_print_timestamps(false);
-    params.set_single_segment(true);     // CRITICAL: Keep speech as one segment for better context
-    params.set_n_threads(6);              // More threads for faster processing
-    
-    // OPTIMIZE FOR PERFECT ACCURACY
-    params.set_temperature(0.2);          // Slight temperature for better natural language handling
-    params.set_temperature_inc(0.0);      // No temperature fallback - stay accurate
-    params.set_no_speech_thold(0.4);      // Lower threshold - capture more speech
-    params.set_entropy_thold(2.8);        // Higher entropy threshold - accept more varied output
-    params.set_logprob_thold(-1.0);       // Accept lower probability tokens for names/unique words
-    params.set_suppress_blank(true);      // Suppress blank outputs
-    
-    // CRITICAL: Context-aware prompt for consistency and proper name handling
-    // Supports both English and Urdu transcription
-    let base_prompt = "This is a professional conversation transcript. \
-                      The speakers may use English, Urdu, or a mix of both (code-switching). \
-                      Transcribe exactly as spoken in the original language. \
-                      For Urdu words spoken in conversation, write them in Roman Urdu (Latin script). \
-                      Preserve proper names like Anila, Sarah, John, Ahmed, Fatima etc. \
-                      Use proper punctuation and capitalization. Preserve all spoken words completely.";
-    
-    let full_prompt = if let Some(ref context) = previous_context {
-        // Include recent context for continuity and name consistency
-        // Truncate context to last 200 chars to avoid overwhelming the prompt
-        let context_snippet = if context.len() > 200 {
-            &context[context.len() - 200..]
+    // Run CPU-intensive transcription in a blocking thread pool
+    // This prevents blocking the async runtime (which was causing delays)
+    tokio::task::spawn_blocking(move || {
+        let start_time = std::time::Instant::now();
+        
+        // Create inference state from the CACHED context (fast - no model reload!)
+        let mut state = ctx.create_state()
+            .map_err(|e| format!("Failed to create Whisper state: {:?}", e))?;
+        
+        // Use Greedy decoding for FAST transcription
+        // (BeamSearch beam_size=8 was causing 10-30x slowdown)
+        let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+        
+        // Language handling
+        if language == "auto" {
+            params.set_language(None);
         } else {
-            context.as_str()
+            params.set_language(Some(&language));
+        }
+        params.set_translate(false);
+        params.set_print_special(false);
+        params.set_print_progress(false);
+        params.set_print_realtime(false);
+        params.set_print_timestamps(false);
+        params.set_single_segment(false);    // Allow multiple segments
+        params.set_n_threads(4);              // 4 threads - balanced
+        
+        // Fast + accurate settings
+        params.set_temperature(0.0);
+        params.set_temperature_inc(0.2);
+        params.set_no_speech_thold(0.5);
+        params.set_entropy_thold(2.4);
+        params.set_logprob_thold(-1.0);
+        params.set_suppress_blank(true);
+        
+        // Concise prompt (shorter = faster tokenization)
+        let base_prompt = "Transcribe exactly as spoken. Preserve names and punctuation.";
+        
+        let full_prompt = if let Some(ref context) = previous_context {
+            let context_snippet = if context.len() > 150 {
+                &context[context.len() - 150..]
+            } else {
+                context.as_str()
+            };
+            format!("{} Previous: {}", base_prompt, context_snippet)
+        } else {
+            base_prompt.to_string()
         };
-        format!("{} Previous: {}", base_prompt, context_snippet)
-    } else {
-        base_prompt.to_string()
-    };
-    
-    if previous_context.is_some() {
-        println!("[WHISPER] Using context: {}", 
-                 if full_prompt.len() > 100 { &full_prompt[..100] } else { &full_prompt });
-    }
-    
-    params.set_initial_prompt(&full_prompt);
-    
-    // Run transcription
-    state.full(params, audio_samples)
-        .map_err(|e| format!("Transcription failed: {:?}", e))?;
-    
-    // Collect results - ensure we get ALL segments with NO loss
-    let num_segments = state.full_n_segments()
-        .map_err(|e| format!("Failed to get segments: {:?}", e))?;
-    
-    let mut full_result = String::new();
-    let mut segment_count = 0;
-    for i in 0..num_segments {
-        if let Ok(seg) = state.full_get_segment_text(i) {
-            let trimmed = seg.trim();
-            if !trimmed.is_empty() {
-                if !full_result.is_empty() && !full_result.ends_with(' ') {
-                    full_result.push(' ');
+        
+        params.set_initial_prompt(&full_prompt);
+        
+        // Run transcription
+        state.full(params, &audio_samples)
+            .map_err(|e| format!("Transcription failed: {:?}", e))?;
+        
+        // Collect results
+        let num_segments = state.full_n_segments()
+            .map_err(|e| format!("Failed to get segments: {:?}", e))?;
+        
+        let mut full_result = String::new();
+        let mut segment_count = 0;
+        for i in 0..num_segments {
+            if let Ok(seg) = state.full_get_segment_text(i) {
+                let trimmed = seg.trim();
+                if !trimmed.is_empty() {
+                    if !full_result.is_empty() && !full_result.ends_with(' ') {
+                        full_result.push(' ');
+                    }
+                    full_result.push_str(trimmed);
+                    segment_count += 1;
                 }
-                full_result.push_str(trimmed);
-                segment_count += 1;
             }
         }
-    }
-    
-    println!("[WHISPER] Processed {} segments from {:.1}s audio", segment_count, duration_secs);
-    
-    let confidence = 0.85;
-    
-    println!("[WHISPER] ✓ Transcription: '{}' (confidence: {:.2})", 
-             if full_result.len() > 80 { &full_result[..80] } else { &full_result },
-             confidence);
-    
-    Ok(TranscriptionResult {
-        text: full_result.trim().to_string(),
-        language: language.to_string(),
-        confidence,
+        
+        let elapsed = start_time.elapsed();
+        println!("[WHISPER] Processed {} segments from {:.1}s audio in {:.1}s (speedup: {:.1}x)", 
+                 segment_count, duration_secs, elapsed.as_secs_f32(),
+                 duration_secs / elapsed.as_secs_f32().max(0.001));
+        
+        let confidence = 0.85;
+        
+        println!("[WHISPER] ✓ Transcription: '{}' (confidence: {:.2})", 
+                 if full_result.len() > 80 { &full_result[..80] } else { &full_result },
+                 confidence);
+        
+        Ok(TranscriptionResult {
+            text: full_result.trim().to_string(),
+            language: language.to_string(),
+            confidence,
+        })
     })
+    .await
+    .map_err(|e| format!("Transcription task join error: {}", e))?
 }
 
 pub async fn transcribe_audio(
-    model_path: &PathBuf,
-    language: &str,
-    audio_samples: &[f32],
+    ctx: Arc<WhisperContext>,
+    language: String,
+    audio_samples: Vec<f32>,
 ) -> Result<TranscriptionResult, String> {
-    transcribe_audio_with_context(model_path, language, audio_samples, None).await
+    transcribe_audio_with_context(ctx, language, audio_samples, None).await
 }
 
 // ============================================================================
@@ -259,14 +250,14 @@ pub async fn transcribe_audio_chunk(
         return Err("Whisper not initialized".to_string());
     }
     
-    let model_path = state.model_path.lock().unwrap().clone()
-        .ok_or("Model path not set")?;
+    let whisper_ctx = state.whisper_ctx.lock().unwrap().clone()
+        .ok_or("Whisper context not initialized")?;
     
     let language = state.language.lock().unwrap().clone();
     
     let _ = app.emit("cognivox:status", "Transcribing with Whisper...");
     
-    match transcribe_audio(&model_path, &language, &audio_data).await {
+    match transcribe_audio(whisper_ctx, language, audio_data).await {
         Ok(result) => {
             let _ = app.emit("cognivox:whisper_transcription", serde_json::json!({
                 "text": result.text,

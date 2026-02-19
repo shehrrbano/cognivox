@@ -864,15 +864,20 @@ Return ONLY valid JSON, no markdown, no explanation.`;
                         );
                     } catch (e: any) {
                         const errMsg = e?.message || String(e);
-                        // If the backend connection also fails with quota/rate errors, block
+                        // Backend now returns Err for hard failures (quota/rate limit)
                         const isQuotaError =
                             errMsg.toLowerCase().includes("quota") ||
                             errMsg.toLowerCase().includes("rate limit") ||
-                            errMsg.toLowerCase().includes("resource_exhausted");
+                            errMsg
+                                .toLowerCase()
+                                .includes("resource_exhausted") ||
+                            errMsg.toLowerCase().includes("api unavailable");
                         if (isQuotaError) {
-                            status = "Cannot start: API quota exhausted";
+                            isGeminiConnected = false;
+                            status =
+                                "Cannot start: API quota/rate limit reached";
                             showToast(
-                                `Backend reports: ${errMsg}. Wait or add new API keys.`,
+                                `API check failed: ${errMsg}. Wait for cooldown or add new API keys in Settings.`,
                                 "error",
                             );
                             setTimeout(() => {
