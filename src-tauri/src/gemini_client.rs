@@ -54,15 +54,20 @@ INPUT: Transcribed text from a meeting segment. It may have a speaker tag like "
 The conversation may be in English, Urdu (Roman Urdu), or a mix of both languages (code-switching).
 
 CRITICAL TASK 1 - SPEAKER DIARIZATION:
-If the input has a speaker tag like "[You]:" or "[Speaker 2]:", keep that tag.
-If the input is from a SINGLE MICROPHONE capturing MULTIPLE speakers, you MUST analyze the text for speaker changes. Look for:
-- Conversational turn-taking (question followed by answer)
-- Shifts in perspective or opinion ("I think..." then "No, I believe...")
-- Different speaking styles, vocabulary, or language preferences
-- Greetings/acknowledgments indicating a new speaker ("Ok", "Right", "Haan", "Achha")
-- Topic pivots that suggest a different person responding
-When you detect multiple speakers, split the transcript and assign "Speaker 1", "Speaker 2", etc.
-Output an ARRAY of JSON objects, one per speaker segment.
+If the input has a speaker tag like "[You]:" or "[Speaker 2]:", keep that tag as-is. Do NOT split into multiple speakers.
+If the input says "[Single mic]:", this is a SINGLE SPEAKER. Output exactly ONE JSON object with speaker set to "Speaker 1". Do NOT split into multiple speakers.
+If the input says "[Single mic, multiple speakers detected]:", carefully analyze the text for CLEAR and OBVIOUS speaker changes. Only split into multiple speakers if there is STRONG evidence such as:
+- Explicit conversational exchange (e.g., a question directly answered by someone else)
+- Clear contradicting viewpoints in direct dialogue form
+- Obvious greeting/farewell patterns indicating turn-taking ("Hello" -> "Hi, how are you?")
+Do NOT split based on:
+- Topic changes within what could be one person's monologue
+- Hedging or self-correction ("I think... well actually...")
+- Pauses, filler words, or "Ok", "Right" by themselves
+- Different sub-topics covered by the same speaker
+When genuinely confident multiple speakers are present, split the transcript and assign "Speaker 1", "Speaker 2", etc.
+When in doubt, keep it as ONE speaker ("Speaker 1").
+Output an ARRAY of JSON objects, one per speaker segment. If only one speaker, return a single-element array.
 
 CRITICAL TASK 2 - TONE DETECTION:
 Do NOT default to NEUTRAL. Carefully analyze the actual emotional content:
@@ -80,7 +85,7 @@ Only use NEUTRAL when speech is truly flat/informational with no emotional indic
 OUTPUT FORMAT (JSON array - one entry per detected speaker segment):
 [{"transcript":"speaker's text","speaker":"Speaker 1 or You or Speaker 2","tone":"<actual detected tone>","category":["TASK"],"confidence":0.85,"summary":"Brief summary","entities":[{"name":"entity name","type":"PERSON|PROJECT|TOPIC|LOCATION|DATE|ORG"}],"graph_edges":[{"from":"entity or speaker","to":"entity or speaker","relation":"verb or relationship"}]}]
 
-If only one speaker is detected, still return an array with one element.
+IMPORTANT: Default to ONE speaker unless you have strong evidence of multiple speakers. Most audio segments come from a single person. Return an array with one element for single-speaker input.
 
 RULES:
 - JSON array only, no markdown, no explanation
@@ -570,20 +575,36 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle) {
                     }
                 }
                 
-                // If we have BOTH mic and system audio, determine if source-based diarization applies
-                // If ALL audio is from mic (no system/loopback), we'll let Gemini do text-based diarization
-                let has_system_audio = sys_samples_total > 0;
-                let has_mic_audio = mic_samples_total > 0;
+                // Speaker detection with minimum thresholds to avoid false positives
+                // WASAPI loopback can pick up echo/system sounds even with one speaker.
+                // We require system audio to be at least 10% of total to count as a second source.
+                let total_samples = mic_samples_total + sys_samples_total;
+                let sys_ratio = if total_samples > 0 { sys_samples_total as f32 / total_samples as f32 } else { 0.0 };
+                let mic_ratio = if total_samples > 0 { mic_samples_total as f32 / total_samples as f32 } else { 0.0 };
                 
-                let speaker_tag = if has_system_audio && has_mic_audio {
-                    // Both sources: assign based on which was dominant
+                // Minimum 10% of total audio to be considered a real source (not just echo/noise)
+                const SOURCE_SIGNIFICANCE_THRESHOLD: f32 = 0.10;
+                // Minimum absolute samples (~0.5s at 16kHz) to consider a source significant
+                const MIN_SIGNIFICANT_SAMPLES: usize = 8000;
+                
+                let has_significant_system = sys_ratio >= SOURCE_SIGNIFICANCE_THRESHOLD 
+                    && sys_samples_total >= MIN_SIGNIFICANT_SAMPLES;
+                let has_significant_mic = mic_ratio >= SOURCE_SIGNIFICANCE_THRESHOLD
+                    && mic_samples_total >= MIN_SIGNIFICANT_SAMPLES;
+                
+                let speaker_tag = if has_significant_system && has_significant_mic {
+                    // Both sources have significant audio: genuine two-source scenario
                     if mic_samples_total >= sys_samples_total { "You" } else { "Speaker 2" }
-                } else if has_system_audio {
-                    "Speaker 2" // Only system audio
+                } else if has_significant_system && !has_significant_mic {
+                    "Speaker 2" // Only meaningful system audio
                 } else {
-                    // Only mic audio or mixed — tell Gemini to do text-based speaker detection
+                    // Only mic audio (or system audio is just echo/noise)
+                    // Single-source: let Gemini analyze but with conservative single-speaker bias
                     "auto"
                 };
+                
+                println!("[DIARIZATION] Sys ratio: {:.1}%, Mic ratio: {:.1}%, Significant sys: {}, Significant mic: {}",
+                    sys_ratio * 100.0, mic_ratio * 100.0, has_significant_system, has_significant_mic);
                 
                 println!("[AUDIO] ========================================");
                 println!("[AUDIO] >>> PROCESSING {:.1}s AUDIO (request #{}) <<<", duration, request_count);
@@ -728,9 +749,9 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle) {
                     }
                     
                     // Include speaker tag in the transcript text sent to Gemini
-                    // When speaker is "auto", don't tag — let Gemini detect multiple speakers
+                    // When speaker is "auto", single mic mode — bias toward single speaker
                     let speaker_annotated_transcript = if speaker_tag == "auto" {
-                        format!("[Single mic, multiple speakers possible]: {}", transcription)
+                        format!("[Single mic]: {}", transcription)
                     } else {
                         format!("[{}]: {}", speaker_tag, transcription)
                     };

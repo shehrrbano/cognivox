@@ -1,5 +1,6 @@
 mod audio_capture;
 mod gemini_client;
+mod google_auth;
 mod whisper_client;
 mod processing_engine;
 mod session_manager;
@@ -21,6 +22,9 @@ fn greet(name: &str) -> String {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Load .env file from the project root (secrets are kept out of source code)
+    dotenvy::from_path(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.env"))).ok();
+
     let (audio_tx, audio_rx) = unbounded::<TaggedAudio>();
 
     let audio_state = AudioState {
@@ -130,7 +134,8 @@ pub fn run() {
             session_manager::delete_session,
             session_manager::export_session,
             session_manager::generate_session_summary,
-            session_manager::get_session_summary
+            session_manager::get_session_summary,
+            google_auth::start_google_oauth
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -140,7 +140,7 @@ class IntelligenceExtractor {
         }
 
         // Always include speakers
-        enabledFilters.push('- "speakers": array of {id, name, turns} for each speaker detected (use "Speaker 1", "Speaker 2", etc.)');
+        enabledFilters.push('- "speakers": array of {id, name, turns} for each speaker detected (use "Speaker 1", "Speaker 2", etc. Only include multiple speakers if there is clear evidence of different people speaking)');
 
         return `Analyze this meeting transcript and extract structured insights.
 

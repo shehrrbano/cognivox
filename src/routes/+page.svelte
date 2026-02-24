@@ -18,6 +18,8 @@
         intelligenceExtractor,
         type ExtractedInsights,
     } from "$lib/intelligenceExtractor";
+    import { FirestoreSessionManager } from "$lib/firestoreSessionManager";
+    import { getCurrentUser, initFirebase, waitForAuth } from "$lib/firebase";
 
     // --- STATE ---
     let devices: string[] = [];
@@ -376,16 +378,29 @@
     let extractError: string | null = null;
     let localInsights: any[] = []; // Renamed to avoid collision
 
-    // --- SESSION MANAGEMENT ---
+    // --- SESSION MANAGEMENT (Firebase Cloud Only) ---
+
     async function loadInitialData() {
         try {
-            // Use the already-set isRunningInTauri from onMount detection
-            // Do NOT re-check here — onMount uses __TAURI_INTERNALS__ which is correct for Tauri v2
             if (!isRunningInTauri) return;
 
-            const result = (await invoke("list_sessions")) as string;
-            pastSessions = JSON.parse(result);
-            console.log(`[RESTORE] Found ${pastSessions.length} past sessions`);
+            // Ensure Firebase is initialized and auth is restored
+            initFirebase();
+            const user = await waitForAuth();
+            if (!user) {
+                console.log(
+                    "[RESTORE] Not signed in to Google — no cloud sessions to load",
+                );
+                pastSessions = [];
+                return;
+            }
+
+            // Load all sessions from Google Cloud Firestore
+            const cloudSessions = await FirestoreSessionManager.listSessions();
+            pastSessions = cloudSessions;
+            console.log(
+                `[RESTORE] Found ${pastSessions.length} cloud sessions`,
+            );
 
             if (pastSessions.length > 0 && transcripts.length === 0) {
                 const latest = pastSessions[0];
@@ -395,7 +410,11 @@
                 handleSessionLoad(latest);
             }
         } catch (error) {
-            console.error("[RESTORE] Failed to load initial data:", error);
+            console.error(
+                "[RESTORE] Failed to load sessions from Firebase:",
+                error,
+            );
+            pastSessions = [];
         }
     }
 
@@ -403,12 +422,30 @@
         if (!session) return;
 
         console.log(`[RESTORE] Restoring session: ${session.id}`);
-        // Ensure we don't restore partial transcripts as final
-        currentSession = JSON.parse(JSON.stringify(session));
+
+        // Always fetch the full session from Firestore to ensure complete data
+        let fullSession = session;
+        try {
+            if (FirestoreSessionManager.isAvailable()) {
+                fullSession = await FirestoreSessionManager.loadSession(
+                    session.id,
+                );
+                console.log(
+                    `[RESTORE] Fetched full session from Firestore: ${fullSession.id}`,
+                );
+            }
+        } catch (e) {
+            console.warn(
+                "[RESTORE] Could not fetch from Firestore, using cached data:",
+                e,
+            );
+        }
+
+        currentSession = JSON.parse(JSON.stringify(fullSession));
 
         // Restore transcripts
-        if (session.transcripts) {
-            transcripts = session.transcripts.map((t: any) => ({
+        if (fullSession.transcripts && fullSession.transcripts.length > 0) {
+            transcripts = fullSession.transcripts.map((t: any) => ({
                 id: crypto.randomUUID(),
                 timestamp: t.timestamp,
                 speaker: t.speaker_id || "Speaker",
@@ -418,56 +455,68 @@
                 category: t.category,
                 confidence: t.confidence,
             }));
+            console.log(`[RESTORE] Loaded ${transcripts.length} transcripts`);
+        } else {
+            transcripts = [];
+            console.log("[RESTORE] No transcripts in this session");
         }
 
         // Restore Graph
-        if (session.graph_nodes) {
-            graphNodes = session.graph_nodes.map((n: any) => ({
+        if (fullSession.graph_nodes && fullSession.graph_nodes.length > 0) {
+            graphNodes = fullSession.graph_nodes.map((n: any) => ({
                 id: n.id,
                 type: n.node_type || "Entity",
                 label: n.id,
                 weight: 1,
             }));
+            console.log(`[RESTORE] Loaded ${graphNodes.length} graph nodes`);
+        } else {
+            graphNodes = [];
         }
-        if (session.graph_edges) {
-            graphEdges = session.graph_edges.map((e: any) => ({
+        if (fullSession.graph_edges && fullSession.graph_edges.length > 0) {
+            graphEdges = fullSession.graph_edges.map((e: any) => ({
                 from: e.from,
                 to: e.to,
                 relation: e.relation,
             }));
+            console.log(`[RESTORE] Loaded ${graphEdges.length} graph edges`);
+        } else {
+            graphEdges = [];
         }
 
         // Restore Insights if available
-        if (session.insights) {
+        if (fullSession.insights) {
             extractedSummary = {
-                topics: session.insights.topics || [],
-                decisions: session.insights.decisions || [],
-                actionItems: session.insights.action_items || [],
-                keyPoints: session.insights.key_points || [],
+                topics: fullSession.insights.topics || [],
+                decisions: fullSession.insights.decisions || [],
+                actionItems: fullSession.insights.action_items || [],
+                keyPoints: fullSession.insights.key_points || [],
             };
             showSummaryPanel = true;
-        } else if (session.summary) {
+        } else if (fullSession.summary) {
             // Legacy fallback
             extractedSummary = {
                 topics: [],
-                decisions: session.summary.key_decisions || [],
-                actionItems: (session.summary.action_items || []).map(
+                decisions: fullSession.summary.key_decisions || [],
+                actionItems: (fullSession.summary.action_items || []).map(
                     (ai: any) => `${ai.description} (${ai.priority})`,
                 ),
                 keyPoints: [],
             };
             showSummaryPanel = true;
+        } else {
+            extractedSummary = null;
         }
 
         // Restore Psychosomatic if available
-        if (session.psychosomatic) {
-            stressLevel = session.psychosomatic.stress || 0;
-            engagementLevel = session.psychosomatic.engagement || 0;
-            urgencyLevel = session.psychosomatic.urgency || 0;
-            clarityLevel = session.psychosomatic.clarity || 0;
+        if (fullSession.psychosomatic) {
+            stressLevel = fullSession.psychosomatic.stress || 0;
+            engagementLevel = fullSession.psychosomatic.engagement || 0;
+            urgencyLevel = fullSession.psychosomatic.urgency || 0;
+            clarityLevel = fullSession.psychosomatic.clarity || 0;
         }
 
-        status = `Restored: ${session.metadata.title || "Session"}`;
+        status = `Restored: ${fullSession.metadata?.title || "Session"}`;
     }
 
     async function handleSessionDelete(sessionId: string, event: MouseEvent) {
@@ -477,16 +526,21 @@
         );
         if (!confirmed) return;
         try {
-            await invoke("delete_session", { sessionId });
-            const result = (await invoke("list_sessions")) as string;
-            pastSessions = JSON.parse(result);
+            if (!FirestoreSessionManager.isAvailable()) {
+                status = "Sign in to Google to manage sessions";
+                return;
+            }
+            await FirestoreSessionManager.deleteSession(sessionId);
+            const cloudSessions = await FirestoreSessionManager.listSessions();
+            pastSessions = cloudSessions;
             if (currentSession?.id === sessionId) {
                 currentSession = null;
                 transcripts = [];
                 graphNodes = [];
                 graphEdges = [];
+                extractedSummary = null;
             }
-            status = "Session deleted";
+            status = "Session deleted from cloud";
         } catch (error) {
             console.error("[SESSION] Delete failed:", error);
             status = "Failed to delete session";
@@ -495,21 +549,27 @@
 
     async function saveSession(isFinal = false) {
         if (!isRunningInTauri || (!isRecording && !isFinal)) return;
+        if (!FirestoreSessionManager.isAvailable()) {
+            console.warn("[PERSISTENCE] Not signed in — cannot save to cloud");
+            return;
+        }
 
         try {
             console.log(
-                `[PERSISTENCE] Saving session ${isFinal ? "(Final)" : "(Auto)"}...`,
+                `[PERSISTENCE] Saving session to Firebase ${isFinal ? "(Final)" : "(Auto)"}...`,
             );
-            const sessionJson = JSON.stringify(currentSession);
-            await invoke("save_session", { sessionJson });
+
+            await FirestoreSessionManager.saveSession(currentSession);
+            console.log("[PERSISTENCE] Saved to Google Cloud Firestore");
 
             if (isFinal) {
-                // Refresh list
-                const result = (await invoke("list_sessions")) as string;
-                pastSessions = JSON.parse(result);
+                const cloudSessions =
+                    await FirestoreSessionManager.listSessions();
+                pastSessions = cloudSessions;
             }
         } catch (error) {
-            console.error("[PERSISTENCE] Save failed:", error);
+            console.error("[PERSISTENCE] Firebase save failed:", error);
+            status = "Failed to save session to cloud";
         }
     }
 
@@ -1652,13 +1712,14 @@ Return ONLY valid JSON, no markdown, no explanation.`;
                                 speaker: seg.speaker,
                                 speakerId:
                                     seg.speaker.includes("1") ||
-                                    seg.speaker === "You"
+                                    seg.speaker === "You" ||
+                                    seg.speaker === "Speaker"
                                         ? 1
                                         : seg.speaker.includes("2")
                                           ? 2
                                           : seg.speaker.includes("3")
                                             ? 3
-                                            : 0,
+                                            : 1,
                                 text: seg.transcript,
                                 tone: seg.tone,
                                 category: seg.category,

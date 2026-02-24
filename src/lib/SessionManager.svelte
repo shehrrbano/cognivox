@@ -1,6 +1,17 @@
 <script lang="ts">
     import { invoke } from "@tauri-apps/api/core";
     import { save } from "@tauri-apps/plugin-dialog";
+    import { onMount, onDestroy } from "svelte";
+    import {
+        initFirebase,
+        signInWithGoogle,
+        signOut,
+        getCurrentUser,
+        onAuthChange,
+        isFirebaseConfigured,
+    } from "./firebase";
+    import { FirestoreSessionManager } from "./firestoreSessionManager";
+    import type { User } from "firebase/auth";
 
     export let currentSession: any = null;
     export let onSessionLoad: (session: any) => void = () => {};
@@ -17,52 +28,153 @@
     let isGeneratingSummary = false;
     let sessionSummary: any = null;
 
-    async function loadSessions() {
+    // ===== CLOUD STORAGE STATE =====
+    let firebaseUser: User | null = null;
+    let isSigningIn = false;
+    let cloudStatus: "connected" | "disconnected" | "syncing" | "error" =
+        "disconnected";
+    let cloudError: string | null = null;
+    let unsubAuth: (() => void) | null = null;
+
+    onMount(() => {
+        // Initialize Firebase
+        if (isFirebaseConfigured()) {
+            try {
+                initFirebase();
+                unsubAuth = onAuthChange((user) => {
+                    firebaseUser = user;
+                    cloudStatus = user ? "connected" : "disconnected";
+                    if (user) {
+                        console.log("[Cloud] Authenticated as:", user.email);
+                    }
+                    if (!user) {
+                        cloudError =
+                            "Sign in with Google to access cloud sessions";
+                    } else {
+                        cloudError = null;
+                    }
+                });
+            } catch (e) {
+                console.warn("[Cloud] Firebase init failed:", e);
+                cloudError = "Firebase initialization failed";
+            }
+        } else {
+            console.warn("[Cloud] Firebase not configured");
+            cloudError = "Firebase not configured";
+        }
+    });
+
+    onDestroy(() => {
+        if (unsubAuth) unsubAuth();
+    });
+
+    // ===== GOOGLE SIGN-IN =====
+    async function handleSignIn() {
+        isSigningIn = true;
+        cloudError = null;
         try {
-            const result = await invoke("list_sessions");
-            sessions = JSON.parse(result as string);
+            firebaseUser = await signInWithGoogle();
+            cloudStatus = "connected";
+        } catch (error: any) {
+            console.error("[Cloud] Sign-in failed:", error);
+            // Tauri invoke errors are plain strings, Firebase errors have .message
+            const msg =
+                typeof error === "string"
+                    ? error
+                    : error?.message || error?.code || JSON.stringify(error);
+            cloudError = msg || "Sign-in failed (unknown error)";
+            cloudStatus = "error";
+        } finally {
+            isSigningIn = false;
+        }
+    }
+
+    async function handleSignOut() {
+        try {
+            await signOut();
+            firebaseUser = null;
+            cloudStatus = "disconnected";
         } catch (error) {
-            console.error("Failed to load sessions:", error);
+            console.error("[Cloud] Sign-out failed:", error);
+        }
+    }
+
+    // ===== SESSION OPERATIONS (Firebase Cloud Only) =====
+
+    async function loadSessions() {
+        if (!FirestoreSessionManager.isAvailable()) {
+            sessions = [];
+            cloudError = "Sign in with Google to view sessions";
+            return;
+        }
+        try {
+            cloudStatus = "syncing";
+            const cloudSessions = await FirestoreSessionManager.listSessions();
+            sessions = cloudSessions;
+            cloudStatus = "connected";
+        } catch (error) {
+            console.error("Failed to load sessions from Firebase:", error);
+            cloudStatus = "error";
+            cloudError = "Failed to load sessions from cloud";
         }
     }
 
     async function saveCurrentSession() {
         if (!currentSession) return;
+        if (!FirestoreSessionManager.isAvailable()) {
+            cloudError = "Sign in with Google to save sessions";
+            return;
+        }
 
         isSaving = true;
+        cloudError = null;
         try {
             currentSession.metadata.title = sessionTitle;
-            const sessionJson = JSON.stringify(currentSession);
-            const filepath = await invoke("save_session", { sessionJson });
-            console.log("Session saved:", filepath);
+            cloudStatus = "syncing";
+            await FirestoreSessionManager.saveSession(currentSession);
+            cloudStatus = "connected";
+            console.log("[Cloud] Session saved to Google Firestore");
             showSaveDialog = false;
             await loadSessions();
-        } catch (error) {
+        } catch (error: any) {
             console.error("Failed to save session:", error);
+            cloudError = error.message || "Save failed";
+            cloudStatus = "error";
         } finally {
             isSaving = false;
         }
     }
 
     async function loadSession(sessionId: string) {
+        if (!FirestoreSessionManager.isAvailable()) {
+            cloudError = "Sign in with Google to load sessions";
+            return;
+        }
         try {
-            const result = await invoke("load_session", { sessionId });
-            const session = JSON.parse(result as string);
+            cloudStatus = "syncing";
+            const session =
+                await FirestoreSessionManager.loadSession(sessionId);
+            cloudStatus = "connected";
             onSessionLoad(session);
             showLoadDialog = false;
         } catch (error) {
             console.error("Failed to load session:", error);
+            cloudStatus = "error";
         }
     }
 
     async function deleteSession(sessionId: string) {
         if (!confirm("Are you sure you want to delete this session?")) return;
+        if (!FirestoreSessionManager.isAvailable()) return;
 
         try {
-            await invoke("delete_session", { sessionId });
+            cloudStatus = "syncing";
+            await FirestoreSessionManager.deleteSession(sessionId);
+            cloudStatus = "connected";
             await loadSessions();
         } catch (error) {
             console.error("Failed to delete session:", error);
+            cloudStatus = "error";
         }
     }
 
@@ -107,6 +219,20 @@
         }
     }
 
+    // Sync current session to cloud (manual trigger)
+    async function syncToCloud() {
+        if (!currentSession || !FirestoreSessionManager.isAvailable()) return;
+        cloudStatus = "syncing";
+        cloudError = null;
+        try {
+            await FirestoreSessionManager.syncToCloud(currentSession);
+            cloudStatus = "connected";
+        } catch (error: any) {
+            cloudError = error.message || "Sync failed";
+            cloudStatus = "error";
+        }
+    }
+
     async function generateSummary() {
         if (!currentSession) return;
 
@@ -131,6 +257,131 @@
     $: if (showLoadDialog) loadSessions();
 </script>
 
+<!-- ===== GOOGLE CLOUD STATUS BAR ===== -->
+<div
+    class="mb-3 p-2 rounded-lg border transition-all duration-300 {cloudStatus ===
+    'connected'
+        ? 'bg-green-500/5 border-green-500/20'
+        : cloudStatus === 'syncing'
+          ? 'bg-yellow-500/5 border-yellow-500/20'
+          : cloudStatus === 'error'
+            ? 'bg-red-500/5 border-red-500/20'
+            : 'bg-slate-500/5 border-slate-500/20'}"
+>
+    <div class="flex items-center justify-between">
+        <div class="flex items-center gap-2">
+            <!-- Google Cloud Icon -->
+            <svg
+                xmlns="http://www.w3.org/2000/svg"
+                width="14"
+                height="14"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                class={cloudStatus === "connected"
+                    ? "text-green-400"
+                    : cloudStatus === "syncing"
+                      ? "text-yellow-400 animate-spin"
+                      : cloudStatus === "error"
+                        ? "text-red-400"
+                        : "text-slate-500"}
+            >
+                <path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"
+                ></path>
+            </svg>
+            <span
+                class="text-xs {cloudStatus === 'connected'
+                    ? 'text-green-400'
+                    : cloudStatus === 'syncing'
+                      ? 'text-yellow-400'
+                      : cloudStatus === 'error'
+                        ? 'text-red-400'
+                        : 'text-slate-500'}"
+            >
+                {#if cloudStatus === "connected"}
+                    Google Cloud Connected
+                {:else if cloudStatus === "syncing"}
+                    Syncing...
+                {:else if cloudStatus === "error"}
+                    Cloud Error
+                {:else}
+                    Cloud Offline
+                {/if}
+            </span>
+        </div>
+        <div class="flex items-center gap-2">
+            {#if firebaseUser}
+                <span
+                    class="text-xs text-slate-400 truncate max-w-[120px]"
+                    title={firebaseUser.email || ""}
+                >
+                    {firebaseUser.email}
+                </span>
+                <button
+                    class="text-xs px-2 py-0.5 rounded bg-slate-700 hover:bg-slate-600 text-slate-300 transition-colors"
+                    onclick={handleSignOut}
+                >
+                    Sign Out
+                </button>
+            {:else}
+                <button
+                    class="text-xs px-2 py-1 rounded bg-blue-600 hover:bg-blue-500 text-white transition-colors flex items-center gap-1"
+                    onclick={handleSignIn}
+                    disabled={isSigningIn}
+                >
+                    <!-- Google G icon -->
+                    <svg
+                        xmlns="http://www.w3.org/2000/svg"
+                        width="12"
+                        height="12"
+                        viewBox="0 0 24 24"
+                        fill="currentColor"
+                    >
+                        <path
+                            d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z"
+                        />
+                        <path
+                            d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"
+                        />
+                        <path
+                            d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"
+                        />
+                        <path
+                            d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"
+                        />
+                    </svg>
+                    {isSigningIn ? "Signing in..." : "Sign in with Google"}
+                </button>
+            {/if}
+        </div>
+    </div>
+    {#if cloudError}
+        <p class="text-xs text-red-400 mt-1">{cloudError}</p>
+    {/if}
+
+    <!-- Firebase Cloud Storage Indicator -->
+    {#if firebaseUser}
+        <div class="flex items-center gap-2 mt-2">
+            <span class="text-xs text-slate-500">Storage:</span>
+            <span
+                class="text-xs px-2 py-0.5 rounded bg-blue-500/20 text-blue-400 border border-blue-500/30"
+            >
+                Google Cloud Firestore
+            </span>
+            {#if currentSession}
+                <button
+                    class="text-xs px-2 py-0.5 rounded bg-green-500/20 text-green-400 border border-green-500/30 hover:bg-green-500/30 transition-colors ml-auto"
+                    onclick={syncToCloud}
+                >
+                    Sync Now
+                </button>
+            {/if}
+        </div>
+    {/if}
+</div>
+
+<!-- ===== ACTION BUTTONS ===== -->
 <div class="grid grid-cols-4 gap-2">
     <button
         class="flex flex-col items-center gap-1 p-2 rounded-lg transition-all duration-300 hover:bg-cyan-500/10 text-cyan-400 hover:text-cyan-300"
@@ -221,6 +472,29 @@
         <div class="glass-card p-6 max-w-md w-full mx-4">
             <h3 class="text-lg font-bold text-slate-100 mb-4">Save Session</h3>
 
+            <!-- Storage indicator -->
+            <div
+                class="flex items-center gap-2 mb-3 p-2 rounded-lg bg-blue-500/10 border border-blue-500/20"
+            >
+                <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    width="14"
+                    height="14"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    class="text-blue-400"
+                >
+                    <path
+                        d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"
+                    ></path>
+                </svg>
+                <span class="text-xs text-blue-400"
+                    >Saving to Google Cloud Firestore</span
+                >
+            </div>
+
             <label
                 for="session-title"
                 class="text-xs text-slate-400 block mb-2"
@@ -241,7 +515,7 @@
                     onclick={saveCurrentSession}
                     disabled={isSaving}
                 >
-                    {isSaving ? "Saving..." : "Save"}
+                    {isSaving ? "Saving..." : "Save to Cloud"}
                 </button>
                 <button
                     class="btn-secondary flex-1"
@@ -262,7 +536,14 @@
         <div
             class="glass-card p-6 max-w-2xl w-full mx-4 max-h-[80vh] overflow-y-auto"
         >
-            <h3 class="text-lg font-bold text-slate-100 mb-4">Load Session</h3>
+            <div class="flex items-center justify-between mb-4">
+                <h3 class="text-lg font-bold text-slate-100">Load Session</h3>
+                <span
+                    class="text-xs px-2 py-1 rounded bg-blue-500/20 text-blue-400"
+                >
+                    Google Cloud
+                </span>
+            </div>
 
             {#if sessions.length === 0}
                 <p class="text-sm text-slate-500 text-center py-8">
