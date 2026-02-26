@@ -576,6 +576,18 @@
             `[CACHE] Saved session ${currentSession.id} to cache (${snapshot.transcripts?.length || 0} transcripts, ${snapshot.graph_nodes?.length || 0} nodes)`,
         );
 
+        // Also persist to disk so data survives cache clears / app restart
+        if (isRunningInTauri && transcripts.length > 0) {
+            try {
+                invoke("save_session", {
+                    sessionJson: JSON.stringify(snapshot),
+                });
+                // Fire-and-forget — don't await to keep switching fast
+            } catch (e) {
+                console.warn("[CACHE] Disk persist failed:", e);
+            }
+        }
+
         // Update pastSessions (replace if exists, add if not)
         const idx = pastSessions.findIndex(
             (s: any) => s.id === currentSession.id,
@@ -595,9 +607,23 @@
     async function restoreSessionData(fullSession: any) {
         if (!fullSession) return;
 
-        // If not in cache, try loading full data from disk/cloud
+        // Try multiple sources in order: cache → disk → cloud → fallback
         let session = sessionCache.get(fullSession.id);
-        if (!session) {
+
+        // If cache version has 0 transcripts but metadata says there should be more,
+        // the cache might be stale (e.g., from a premature save before processing completed).
+        // Force reload from disk in that case.
+        const cacheTranscripts = session?.transcripts?.length || 0;
+        const expectedTranscripts = session?.metadata?.total_transcripts || 0;
+        const cacheIsStale =
+            session && cacheTranscripts === 0 && expectedTranscripts > 0;
+
+        if (!session || cacheIsStale) {
+            if (cacheIsStale) {
+                console.log(
+                    `[RESTORE] Cache stale for ${fullSession.id}: 0 transcripts but metadata says ${expectedTranscripts}. Reloading from disk.`,
+                );
+            }
             try {
                 const localJson = (await invoke("load_session", {
                     sessionId: fullSession.id,
@@ -608,7 +634,25 @@
                     JSON.parse(JSON.stringify(session)),
                 );
             } catch {
-                session = fullSession;
+                // Disk load failed — try cloud if available
+                if (FirestoreSessionManager.isAvailable()) {
+                    try {
+                        session = await FirestoreSessionManager.loadSession(
+                            fullSession.id,
+                        );
+                        sessionCache.set(
+                            fullSession.id,
+                            JSON.parse(JSON.stringify(session)),
+                        );
+                        console.log(
+                            `[RESTORE] Loaded session ${fullSession.id} from cloud`,
+                        );
+                    } catch {
+                        session = session || fullSession; // keep stale cache or use provided object
+                    }
+                } else {
+                    session = session || fullSession;
+                }
             }
         }
 
@@ -1086,9 +1130,6 @@ Return ONLY valid JSON, no markdown, no explanation.`;
                     autoSaveInterval = null;
                 }
 
-                // Final save
-                await saveSession(true);
-
                 const vadStats = vadManager.getStats();
                 console.log(
                     `[VAD] Session stats: ${(vadStats.totalSpeechTime / 1000).toFixed(1)}s speech, ${vadStats.chunksSent} chunks, ${(vadStats.speechRatio * 100).toFixed(0)}% speech ratio`,
@@ -1104,12 +1145,27 @@ Return ONLY valid JSON, no markdown, no explanation.`;
 
                 // Only process if we recorded for at least 1 second
                 if (duration >= 1) {
-                    await runProcessingFlow(duration);
+                    try {
+                        await runProcessingFlow(duration);
+                    } catch (procError) {
+                        console.error(
+                            "[RECORDING] Processing flow error:",
+                            procError,
+                        );
+                    }
                 } else {
                     status = "Recording too short (min 1 second)";
                     setTimeout(() => {
                         status = "Ready";
                     }, 2000);
+                }
+
+                // SAFETY NET: Always do a final save + cache refresh after all processing.
+                // This ensures transcripts that arrived during runProcessingFlow are persisted,
+                // even if the processing flow threw an error.
+                if (transcripts.length > 0 || graphNodes.length > 0) {
+                    await saveSession(true);
+                    console.log("[RECORDING] Safety-net final save complete");
                 }
             } else {
                 // === START RECORDING ===
@@ -1365,10 +1421,12 @@ Return ONLY valid JSON, no markdown, no explanation.`;
                 ];
             }
 
-            // If no transcripts at all, skip remaining steps
+            // If no transcripts at all, still save and skip remaining steps
             if (transcripts.length === 0) {
                 processingStep = 7;
                 status = "No speech detected in recording.";
+                // Save even with 0 transcripts so disk stays consistent
+                await saveSession(true);
                 setTimeout(() => {
                     isProcessing = false;
                     processingStep = 0;
