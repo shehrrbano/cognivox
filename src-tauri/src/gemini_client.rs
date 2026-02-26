@@ -1,10 +1,19 @@
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, Mutex as StdMutex, MutexGuard, atomic::{AtomicBool, Ordering}};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::time::{Duration, interval, Instant, sleep};
 use crossbeam_channel::Receiver;
 use crate::whisper_client::{WhisperState, transcribe_audio_with_context};
-use crate::audio_capture::{TaggedAudio, AudioSource};
+use crate::audio_capture::{TaggedAudio, AudioSource, AudioState};
+
+/// Lock a StdMutex, recovering from poison (a spawned task panicked while holding it).
+/// This prevents the audio loop from dying when a child task crashes.
+fn poison_lock<T>(mutex: &StdMutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|e| {
+        println!("[AUDIO] ⚠ Recovered from poisoned mutex");
+        e.into_inner()
+    })
+}
 
 // ============================================================================
 // GEMINI CLIENT - Text-Only Intelligence Extraction (Post-Whisper)
@@ -36,6 +45,9 @@ pub struct GeminiState {
     pub is_connected: StdMutex<bool>,
     pub selected_model: StdMutex<String>,
     pub reset_signal: StdMutex<bool>,
+    /// Tracks whether the audio processing loop is alive.
+    /// Set to true when loop starts, false when it exits (including on panic via drop guard).
+    pub loop_alive: Arc<AtomicBool>,
 }
 
 impl Default for GeminiState {
@@ -46,6 +58,7 @@ impl Default for GeminiState {
             is_connected: StdMutex::new(false),
             selected_model: StdMutex::new("gemini-2.0-flash".to_string()),
             reset_signal: StdMutex::new(false),
+            loop_alive: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -261,10 +274,10 @@ pub async fn test_gemini_connection(
     key: String,
     model: Option<String>,
 ) -> Result<String, String> {
-    *state.api_key.lock().unwrap() = Some(key.clone());
+    *poison_lock(&state.api_key) = Some(key.clone());
     
-    let m = model.unwrap_or_else(|| state.selected_model.lock().unwrap().clone());
-    *state.selected_model.lock().unwrap() = m.clone();
+    let m = model.unwrap_or_else(|| poison_lock(&state.selected_model).clone());
+    *poison_lock(&state.selected_model) = m.clone();
     
     println!("========================================");
     println!("[GEMINI] Model: {}", m);
@@ -276,15 +289,32 @@ pub async fn test_gemini_connection(
     
     // ALWAYS start audio processing loop first (before test), so it's ready
     // even if the connection test fails due to rate limiting etc.
-    let audio_rx = state.audio_rx.lock().unwrap().take();
+    let loop_is_alive = state.loop_alive.load(Ordering::SeqCst);
+    let audio_rx = poison_lock(&state.audio_rx).take();
+    
     if let Some(rx) = audio_rx {
+        // First time — rx was available, spawn the loop
         println!("[GEMINI] Starting audio processing loop...");
         let app_clone = app.clone();
+        let alive_flag = state.loop_alive.clone();
         tokio::spawn(async move {
-            smart_audio_loop(rx, app_clone).await;
+            smart_audio_loop(rx, app_clone, alive_flag).await;
         });
+    } else if !loop_is_alive {
+        // rx was already taken BUT the loop is DEAD — respawn with a new channel
+        println!("[GEMINI] ⚠ Audio loop DIED — respawning with new channel...");
+        let (new_tx, new_rx) = crossbeam_channel::unbounded::<TaggedAudio>();
+        // Replace the sender in AudioState so new capture threads use it
+        let audio_state = app.state::<AudioState>();
+        *poison_lock(&audio_state.audio_tx) = Some(new_tx);
+        let app_clone = app.clone();
+        let alive_flag = state.loop_alive.clone();
+        tokio::spawn(async move {
+            smart_audio_loop(new_rx, app_clone, alive_flag).await;
+        });
+        println!("[GEMINI] ✓ Audio loop respawned with fresh channel");
     } else {
-        println!("[GEMINI] Audio loop already running (rx already taken)");
+        println!("[GEMINI] Audio loop already running");
     }
     
     // Quick test
@@ -331,7 +361,7 @@ pub async fn test_gemini_connection(
             } else {
                 // Success - connected
                 println!("[GEMINI] Connection test passed");
-                *state.is_connected.lock().unwrap() = true;
+                *poison_lock(&state.is_connected) = true;
                 let _ = app.emit("cognivox:status", "Connected ✓");
                 Ok(())
             }
@@ -351,12 +381,12 @@ pub async fn test_gemini_connection(
         Err(e) => {
             let is_auth_fail = e.contains("401") || e.contains("API_KEY_INVALID");
             if is_auth_fail {
-                *state.is_connected.lock().unwrap() = false;
+                *poison_lock(&state.is_connected) = false;
                 Err(format!("Invalid API key: {}", e))
             } else {
                 // Rate limits, quota, timeouts, network issues - still allow recording
                 // Audio loop is running and will retry with backoff on real speech
-                *state.is_connected.lock().unwrap() = true;
+                *poison_lock(&state.is_connected) = true;
                 println!("[GEMINI] Test warning: {} - proceeding anyway (audio loop active)", e);
                 Ok(format!("Connected to {} (warning: {})", m, e))
             }
@@ -375,10 +405,10 @@ pub async fn process_transcript_with_gemini(
     transcript: String,
     speaker: Option<String>,
 ) -> Result<String, String> {
-    let key = state.api_key.lock().unwrap().clone()
+    let key = poison_lock(&state.api_key).clone()
         .ok_or("No API key configured")?;
     
-    let model = state.selected_model.lock().unwrap().clone();
+    let model = poison_lock(&state.selected_model).clone();
     
     println!("[GEMINI] Processing Whisper transcript: '{}'", 
              if transcript.len() > 100 { &transcript[..100] } else { &transcript });
@@ -420,13 +450,13 @@ pub async fn process_transcript_with_gemini(
 
 #[tauri::command]
 pub fn update_gemini_key(state: tauri::State<'_, GeminiState>, key: String) -> Result<(), String> {
-    *state.api_key.lock().unwrap() = Some(key);
+    *poison_lock(&state.api_key) = Some(key);
     Ok(())
 }
 
 #[tauri::command]
 pub fn reset_audio_loop(state: tauri::State<'_, GeminiState>) -> Result<String, String> {
-    *state.reset_signal.lock().unwrap() = true;
+    *poison_lock(&state.reset_signal) = true;
     println!("[GEMINI] Audio loop reset signal sent");
     Ok("Reset signal sent".to_string())
 }
@@ -435,7 +465,20 @@ pub fn reset_audio_loop(state: tauri::State<'_, GeminiState>) -> Result<String, 
 // Smart Audio Loop: Audio -> Whisper -> Gemini
 // ============================================================================
 
-async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle) {
+/// Drop guard that sets loop_alive to false when the loop exits for ANY reason (including panic).
+struct LoopAliveGuard(Arc<AtomicBool>);
+impl Drop for LoopAliveGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+        println!("[AUDIO] ⚠ smart_audio_loop EXITED — loop_alive set to false");
+    }
+}
+
+async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle, alive_flag: Arc<AtomicBool>) {
+    // Mark loop as alive and install drop guard so it's marked dead on ANY exit
+    alive_flag.store(true, Ordering::SeqCst);
+    let _guard = LoopAliveGuard(alive_flag);
+    
     println!("[WHISPER->GEMINI] Audio processing loop started");
     println!("[WHISPER->GEMINI] Pipeline: Audio -> Whisper STT -> Gemini Intelligence");
     println!("[WHISPER->GEMINI] Speaker diarization: per-chunk source tracking + Gemini analysis");
@@ -485,7 +528,7 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle) {
         // === CHECK FOR RESET SIGNAL (new session starting) ===
         {
             let state = app.state::<GeminiState>();
-            let mut reset = state.reset_signal.lock().unwrap();
+            let mut reset = poison_lock(&state.reset_signal);
             if *reset {
                 *reset = false;
                 buffer.clear();
@@ -493,19 +536,19 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle) {
                 speaking = false;
                 speech_start = None;
                 last_speech = None;
-                *processing.lock().unwrap() = false;
+                *poison_lock(&processing) = false;
                 processing_started_at = None;
-                pending_buffer.lock().unwrap().clear();
-                pending_source_timeline.lock().unwrap().clear();
-                *pending_speaking.lock().unwrap() = false;
+                poison_lock(&pending_buffer).clear();
+                poison_lock(&pending_source_timeline).clear();
+                *poison_lock(&pending_speaking) = false;
                 total_samples_received = 0;
                 _audio_received_count = 0;
                 request_count = 0;
                 // Reset rate-limiting state so new session starts fresh
-                *backoff.lock().unwrap() = 0;
-                *last_request.lock().unwrap() = Instant::now() - Duration::from_secs(MIN_REQUEST_INTERVAL_SECS);
+                *poison_lock(&backoff) = 0;
+                *poison_lock(&last_request) = Instant::now() - Duration::from_secs(MIN_REQUEST_INTERVAL_SECS);
                 // Bump generation so any in-flight tasks from old session won't overwrite our fresh state
-                *session_generation.lock().unwrap() += 1;
+                *poison_lock(&session_generation) += 1;
                 println!("[AUDIO] *** RESET: Backoff reset to 0, generation bumped ***");
                 // Drain stale audio from channel
                 while rx.try_recv().is_ok() {}
@@ -516,22 +559,22 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle) {
         }
         
         // === SAFETY: Timeout stuck processing flag ===
-        if *processing.lock().unwrap() {
+        if *poison_lock(&processing) {
             if let Some(started) = processing_started_at {
                 if started.elapsed() > Duration::from_secs(PROCESSING_TIMEOUT_SECS) {
                     println!("[AUDIO] ⚠ PROCESSING TIMEOUT after {}s — force resetting", PROCESSING_TIMEOUT_SECS);
-                    *processing.lock().unwrap() = false;
+                    *poison_lock(&processing) = false;
                     processing_started_at = None;
-                    pending_buffer.lock().unwrap().clear();
-                    pending_source_timeline.lock().unwrap().clear();
-                    *pending_speaking.lock().unwrap() = false;
+                    poison_lock(&pending_buffer).clear();
+                    poison_lock(&pending_source_timeline).clear();
+                    *poison_lock(&pending_speaking) = false;
                 }
             }
         } else {
             processing_started_at = None;
         }
         
-        let is_processing = *processing.lock().unwrap();
+        let is_processing = *poison_lock(&processing);
         
         // ALWAYS collect audio from rx, even while processing
         // CRITICAL: NO PACKET LOSS - collect ALL audio regardless of processing state
@@ -623,7 +666,7 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle) {
             let duration = buffer.len() as f32 / 16000.0;
             
             if duration >= MIN_SPEECH_SECS {
-                *processing.lock().unwrap() = true;
+                *poison_lock(&processing) = true;
                 processing_started_at = Some(Instant::now());
                 request_count += 1;
                 
@@ -709,7 +752,7 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle) {
                 let _pending_buf_clone = pending_buffer.clone();
                 let _pending_speak_clone = pending_speaking.clone();
                 let generation_clone = session_generation.clone();
-                let spawn_generation = *session_generation.lock().unwrap();
+                let spawn_generation = *poison_lock(&session_generation);
                 
                 // Spawn processing as async task so main loop keeps collecting audio
                 tokio::spawn(async move {
@@ -717,28 +760,28 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle) {
                     
                     // Get Whisper state
                     let whisper_state = app.state::<WhisperState>();
-                    let is_init = *whisper_state.is_initialized.lock().unwrap();
+                    let is_init = *poison_lock(&whisper_state.is_initialized);
                     if !is_init {
                         println!("[WHISPER] ✗ Not initialized - CANNOT TRANSCRIBE");
                         let _ = app.emit("cognivox:status", "Whisper not initialized");
-                        *processing_clone.lock().unwrap() = false;
+                        *poison_lock(&processing_clone) = false;
                         return;
                     }
-                    let whisper_ctx = match whisper_state.whisper_ctx.lock().unwrap().clone() {
+                    let whisper_ctx = match poison_lock(&whisper_state.whisper_ctx).clone() {
                         Some(ctx) => ctx,
                         None => {
                             println!("[WHISPER] ✗ Context not initialized - CANNOT TRANSCRIBE");
                             let _ = app.emit("cognivox:status", "Whisper not initialized");
-                            *processing_clone.lock().unwrap() = false;
+                            *poison_lock(&processing_clone) = false;
                             return;
                         }
                     };
-                    let language = whisper_state.language.lock().unwrap().clone();
+                    let language = poison_lock(&whisper_state.language).clone();
                     println!("[WHISPER] Using language: '{}'", language);
                     
                     // Get recent context for better accuracy (last 2 transcriptions)
                     let context = {
-                        let history = whisper_state.context_history.lock().unwrap();
+                        let history = poison_lock(&whisper_state.context_history);
                         if history.is_empty() {
                             None
                         } else {
@@ -763,7 +806,7 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle) {
                             println!("[WHISPER] ========================================");
                             
                             // Update context history for next transcription
-                            let mut history = whisper_state.context_history.lock().unwrap();
+                            let mut history = poison_lock(&whisper_state.context_history);
                             history.push(result.text.clone());
                             // Keep only last 5 transcriptions for context
                             if history.len() > 5 {
@@ -783,7 +826,7 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle) {
                         Err(e) => {
                             println!("[WHISPER] ✗ TRANSCRIPTION FAILED: {}", e);
                             let _ = app.emit("cognivox:status", format!("Whisper error: {}", e));
-                            *processing_clone.lock().unwrap() = false;
+                            *poison_lock(&processing_clone) = false;
                             return;
                         }
                     };
@@ -791,7 +834,7 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle) {
                     if transcription.trim().is_empty() {
                         println!("[WHISPER] Empty transcription result, skipping Gemini");
                         let _ = app.emit("cognivox:status", "Listening for speech...");
-                        *processing_clone.lock().unwrap() = false;
+                        *poison_lock(&processing_clone) = false;
                         return;
                     }
                     
@@ -800,8 +843,8 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle) {
                     // Get current key and model from state
                     let (key, model) = {
                         let state = app.state::<GeminiState>();
-                        let k: String = state.api_key.lock().unwrap().clone().unwrap_or_default();
-                        let m = state.selected_model.lock().unwrap().clone();
+                        let k: String = poison_lock(&state.api_key).clone().unwrap_or_default();
+                        let m = poison_lock(&state.selected_model).clone();
                         (k, m)
                     };
 
@@ -809,7 +852,7 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle) {
                         println!("[GEMINI] ✗ Error: No API key configured");
                         let _ = app.emit("cognivox:status", "Error: No API key");
                         let _ = app.emit("cognivox:api_error", serde_json::json!({"code": 401, "message": "No API key configured"}));
-                        *processing_clone.lock().unwrap() = false;
+                        *poison_lock(&processing_clone) = false;
                         return;
                     }
                     
@@ -821,8 +864,8 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle) {
                         format!("[{}]: {}", speaker_tag, transcription)
                     };
                     
-                    let mut bo = *backoff_clone.lock().unwrap();
-                    let mut lr = *last_request_clone.lock().unwrap();
+                    let mut bo = *poison_lock(&backoff_clone);
+                    let mut lr = *poison_lock(&last_request_clone);
                     
                     match call_gemini_with_text(&key, &model, &speaker_annotated_transcript, &mut bo, &mut lr).await {
                         Ok(response) => {
@@ -864,16 +907,16 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle) {
                     
                     // Save backoff/last_request back ONLY if session hasn't been reset
                     // (prevents stale tasks from overwriting fresh state)
-                    let current_gen = *generation_clone.lock().unwrap();
+                    let current_gen = *poison_lock(&generation_clone);
                     if current_gen == spawn_generation {
-                        *backoff_clone.lock().unwrap() = bo;
-                        *last_request_clone.lock().unwrap() = lr;
+                        *poison_lock(&backoff_clone) = bo;
+                        *poison_lock(&last_request_clone) = lr;
                     } else {
                         println!("[GEMINI] Stale task (gen {} vs {}), discarding backoff write-back", spawn_generation, current_gen);
                     }
                     
                     // Mark processing complete
-                    *processing_clone.lock().unwrap() = false;
+                    *poison_lock(&processing_clone) = false;
                 });
                 
             } else {
@@ -886,31 +929,33 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle) {
         }
         
         // After processing completes, merge any pending audio back into main buffer
-        if !*processing.lock().unwrap() {
-            if let Ok(mut pb) = pending_buffer.lock() {
-                if !pb.is_empty() {
-                    let pending_len = pb.len();
-                    println!("[AUDIO] Reintegrating {:.2}s of pending audio", pending_len as f32 / 16000.0);
-                    
-                    let mut new_buffer = pb.drain(..).collect::<Vec<f32>>();
-                    new_buffer.extend(&buffer);
-                    buffer = new_buffer;
-                    
-                    // Also merge pending source timeline
-                    if let Ok(mut pst) = pending_source_timeline.lock() {
-                        let mut new_timeline = pst.drain(..).collect::<Vec<_>>();
-                        new_timeline.extend(source_timeline.drain(..));
-                        source_timeline = new_timeline;
-                    }
-                    
-                    if let Ok(mut ps) = pending_speaking.lock() {
-                        if *ps {
-                            speaking = true;
-                            speech_start = Some(Instant::now());
-                            last_speech = Some(Instant::now());
-                            *ps = false;
-                            println!("[AUDIO] Resumed speaking state from pending audio");
-                        }
+        if !*poison_lock(&processing) {
+            let mut pb = poison_lock(&pending_buffer);
+            if !pb.is_empty() {
+                let pending_len = pb.len();
+                println!("[AUDIO] Reintegrating {:.2}s of pending audio", pending_len as f32 / 16000.0);
+                
+                let mut new_buffer = pb.drain(..).collect::<Vec<f32>>();
+                new_buffer.extend(&buffer);
+                buffer = new_buffer;
+                drop(pb);
+                
+                // Also merge pending source timeline
+                {
+                    let mut pst = poison_lock(&pending_source_timeline);
+                    let mut new_timeline = pst.drain(..).collect::<Vec<_>>();
+                    new_timeline.extend(source_timeline.drain(..));
+                    source_timeline = new_timeline;
+                }
+                
+                {
+                    let mut ps = poison_lock(&pending_speaking);
+                    if *ps {
+                        speaking = true;
+                        speech_start = Some(Instant::now());
+                        last_speech = Some(Instant::now());
+                        *ps = false;
+                        println!("[AUDIO] Resumed speaking state from pending audio");
                     }
                 }
             }
@@ -929,7 +974,7 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle) {
 
 #[tauri::command]
 pub fn set_gemini_model(state: tauri::State<'_, GeminiState>, model: String) -> Result<String, String> {
-    *state.selected_model.lock().unwrap() = model.clone();
+    *poison_lock(&state.selected_model) = model.clone();
     Ok(format!("Model: {}", model))
 }
 

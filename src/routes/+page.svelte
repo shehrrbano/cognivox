@@ -1375,8 +1375,9 @@ Return ONLY valid JSON, no markdown, no explanation.`;
                     Math.max(8000, (duration * 1000) / 2),
                     20000,
                 );
-                // Only need 2s of no new transcripts to consider it done
-                const stabilityThreshold = 2000;
+                // Need 4s of no new transcripts to consider it done
+                // (must exceed backend's 2.5s silence timeout + Whisper processing latency)
+                const stabilityThreshold = 4000;
 
                 while (
                     stableTime < stabilityThreshold &&
