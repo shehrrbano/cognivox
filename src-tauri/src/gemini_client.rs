@@ -35,6 +35,7 @@ pub struct GeminiState {
     pub api_key: StdMutex<Option<String>>,
     pub is_connected: StdMutex<bool>,
     pub selected_model: StdMutex<String>,
+    pub reset_signal: StdMutex<bool>,
 }
 
 impl Default for GeminiState {
@@ -44,6 +45,7 @@ impl Default for GeminiState {
             api_key: StdMutex::new(None),
             is_connected: StdMutex::new(false),
             selected_model: StdMutex::new("gemini-2.0-flash".to_string()),
+            reset_signal: StdMutex::new(false),
         }
     }
 }
@@ -422,6 +424,13 @@ pub fn update_gemini_key(state: tauri::State<'_, GeminiState>, key: String) -> R
     Ok(())
 }
 
+#[tauri::command]
+pub fn reset_audio_loop(state: tauri::State<'_, GeminiState>) -> Result<String, String> {
+    *state.reset_signal.lock().unwrap() = true;
+    println!("[GEMINI] Audio loop reset signal sent");
+    Ok("Reset signal sent".to_string())
+}
+
 // ============================================================================
 // Smart Audio Loop: Audio -> Whisper -> Gemini
 // ============================================================================
@@ -454,11 +463,15 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle) {
     let backoff = Arc::new(StdMutex::new(0u64));
     let last_request = Arc::new(StdMutex::new(Instant::now() - Duration::from_secs(MIN_REQUEST_INTERVAL_SECS)));
     let mut request_count = 0u32;
+    // Session generation: incremented on reset so stale spawned tasks don't overwrite fresh state
+    let session_generation = Arc::new(StdMutex::new(0u64));
     let mut _audio_received_count = 0u64;
     let mut last_level_log = Instant::now();
     
     let mut tick = interval(Duration::from_millis(50)); // More frequent polling
     let mut total_samples_received: u64 = 0;
+    let mut processing_started_at: Option<Instant> = None;
+    const PROCESSING_TIMEOUT_SECS: u64 = 45; // Force-reset processing after 45s
     
     println!("[AUDIO] ========================================");
     println!("[AUDIO] Speech threshold: {}, Silence threshold: {}", SPEECH_THRESHOLD, SILENCE_THRESHOLD);
@@ -468,6 +481,55 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle) {
     
     loop {
         tick.tick().await;
+        
+        // === CHECK FOR RESET SIGNAL (new session starting) ===
+        {
+            let state = app.state::<GeminiState>();
+            let mut reset = state.reset_signal.lock().unwrap();
+            if *reset {
+                *reset = false;
+                buffer.clear();
+                source_timeline.clear();
+                speaking = false;
+                speech_start = None;
+                last_speech = None;
+                *processing.lock().unwrap() = false;
+                processing_started_at = None;
+                pending_buffer.lock().unwrap().clear();
+                pending_source_timeline.lock().unwrap().clear();
+                *pending_speaking.lock().unwrap() = false;
+                total_samples_received = 0;
+                _audio_received_count = 0;
+                request_count = 0;
+                // Reset rate-limiting state so new session starts fresh
+                *backoff.lock().unwrap() = 0;
+                *last_request.lock().unwrap() = Instant::now() - Duration::from_secs(MIN_REQUEST_INTERVAL_SECS);
+                // Bump generation so any in-flight tasks from old session won't overwrite our fresh state
+                *session_generation.lock().unwrap() += 1;
+                println!("[AUDIO] *** RESET: Backoff reset to 0, generation bumped ***");
+                // Drain stale audio from channel
+                while rx.try_recv().is_ok() {}
+                println!("[AUDIO] *** RESET: Cleared all state for new session ***");
+                let _ = app.emit("cognivox:status", "Listening for speech...");
+                continue;
+            }
+        }
+        
+        // === SAFETY: Timeout stuck processing flag ===
+        if *processing.lock().unwrap() {
+            if let Some(started) = processing_started_at {
+                if started.elapsed() > Duration::from_secs(PROCESSING_TIMEOUT_SECS) {
+                    println!("[AUDIO] ⚠ PROCESSING TIMEOUT after {}s — force resetting", PROCESSING_TIMEOUT_SECS);
+                    *processing.lock().unwrap() = false;
+                    processing_started_at = None;
+                    pending_buffer.lock().unwrap().clear();
+                    pending_source_timeline.lock().unwrap().clear();
+                    *pending_speaking.lock().unwrap() = false;
+                }
+            }
+        } else {
+            processing_started_at = None;
+        }
         
         let is_processing = *processing.lock().unwrap();
         
@@ -531,15 +593,15 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle) {
                     buffer.extend(&new);
                     source_timeline.extend(new_source_chunks);
                     last_speech = Some(Instant::now());
-                } else {
-                    buffer.extend(&new);
-                    source_timeline.extend(new_source_chunks);
                 }
+                // When not speaking, don't buffer low-level noise — avoids stale data
             } else {
+                // Pure silence — only keep buffering if we're in an active speech segment
                 if speaking {
                     buffer.extend(&new);
                     source_timeline.extend(new_source_chunks);
                 }
+                // Don't buffer pure silence when not speaking — prevents stale data between sessions
             }
         }
         
@@ -562,6 +624,7 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle) {
             
             if duration >= MIN_SPEECH_SECS {
                 *processing.lock().unwrap() = true;
+                processing_started_at = Some(Instant::now());
                 request_count += 1;
                 
                 // Compute speaker tag from source timeline
@@ -645,6 +708,8 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle) {
                 let last_request_clone = last_request.clone();
                 let _pending_buf_clone = pending_buffer.clone();
                 let _pending_speak_clone = pending_speaking.clone();
+                let generation_clone = session_generation.clone();
+                let spawn_generation = *session_generation.lock().unwrap();
                 
                 // Spawn processing as async task so main loop keeps collecting audio
                 tokio::spawn(async move {
@@ -797,9 +862,15 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle) {
                         }
                     }
                     
-                    // Save backoff/last_request back
-                    *backoff_clone.lock().unwrap() = bo;
-                    *last_request_clone.lock().unwrap() = lr;
+                    // Save backoff/last_request back ONLY if session hasn't been reset
+                    // (prevents stale tasks from overwriting fresh state)
+                    let current_gen = *generation_clone.lock().unwrap();
+                    if current_gen == spawn_generation {
+                        *backoff_clone.lock().unwrap() = bo;
+                        *last_request_clone.lock().unwrap() = lr;
+                    } else {
+                        println!("[GEMINI] Stale task (gen {} vs {}), discarding backoff write-back", spawn_generation, current_gen);
+                    }
                     
                     // Mark processing complete
                     *processing_clone.lock().unwrap() = false;

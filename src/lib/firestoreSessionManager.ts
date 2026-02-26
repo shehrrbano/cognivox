@@ -16,6 +16,8 @@ import {
     query,
     where,
     serverTimestamp,
+    getDocFromServer,
+    getDocsFromServer,
 } from "firebase/firestore";
 import { getDb, getCurrentUser, isFirebaseConfigured } from "./firebase";
 
@@ -110,6 +112,44 @@ interface FirestoreSessionDoc extends SessionData {
 const SESSIONS_COLLECTION = "sessions";
 
 // ============================================================================
+// FIRESTORE DATA SANITIZER
+// ============================================================================
+// Firestore throws on `undefined` values. This recursively cleans objects
+// so they can be safely stored. It converts undefined → null, removes
+// functions, and ensures arrays contain no undefined entries.
+// ============================================================================
+
+function sanitizeForFirestore(obj: any): any {
+    if (obj === undefined) return null;
+    if (obj === null) return null;
+    if (typeof obj === "function") return null;
+    if (typeof obj === "symbol") return null;
+
+    // Firestore serverTimestamp() sentinel — pass through
+    if (obj && typeof obj === "object" && obj._methodName) return obj;
+
+    if (Array.isArray(obj)) {
+        return obj
+            .filter((item) => item !== undefined)
+            .map((item) => sanitizeForFirestore(item));
+    }
+
+    if (typeof obj === "object" && obj !== null) {
+        const cleaned: Record<string, any> = {};
+        for (const [key, value] of Object.entries(obj)) {
+            if (value === undefined) {
+                cleaned[key] = null; // Firestore supports null but not undefined
+            } else {
+                cleaned[key] = sanitizeForFirestore(value);
+            }
+        }
+        return cleaned;
+    }
+
+    return obj; // primitives: string, number, boolean
+}
+
+// ============================================================================
 // FIRESTORE SESSION MANAGER CLASS
 // ============================================================================
 
@@ -133,7 +173,9 @@ export class FirestoreSessionManager {
         const db = getDb();
         const docRef = doc(db, SESSIONS_COLLECTION, session.id);
 
-        const firestoreDoc: FirestoreSessionDoc = {
+        // Build the document, then sanitize to remove undefined values
+        // (Firestore throws on undefined, causing silent save failures)
+        const rawDoc = {
             ...session,
             updated_at: new Date().toISOString(),
             userEmail: user.email || "",
@@ -141,8 +183,14 @@ export class FirestoreSessionManager {
             cloudSyncedAt: serverTimestamp(),
         };
 
+        const firestoreDoc = sanitizeForFirestore(rawDoc);
+        // Re-attach serverTimestamp since sanitizer might not handle it
+        firestoreDoc.cloudSyncedAt = serverTimestamp();
+
+        console.log(`[Firestore] Saving session ${session.id}: ${session.transcripts?.length || 0} transcripts, ${session.graph_nodes?.length || 0} nodes, ${session.graph_edges?.length || 0} edges`);
+
         await setDoc(docRef, firestoreDoc);
-        console.log(`[Firestore] Session saved: ${session.id}`);
+        console.log(`[Firestore] Session saved successfully: ${session.id}`);
         return session.id;
     }
 
@@ -157,10 +205,11 @@ export class FirestoreSessionManager {
 
         const db = getDb();
         const docRef = doc(db, SESSIONS_COLLECTION, sessionId);
-        const docSnap = await getDoc(docRef);
+        // Force read from server to avoid stale cached data
+        const docSnap = await getDocFromServer(docRef);
 
         if (!docSnap.exists()) {
-            throw new Error(`Session not found: ${sessionId}`);
+            throw new Error(`Session not found in Firestore: ${sessionId}`);
         }
 
         const data = docSnap.data() as FirestoreSessionDoc;
@@ -170,7 +219,9 @@ export class FirestoreSessionManager {
             throw new Error("Access denied: This session belongs to another user.");
         }
 
-        return this.docToSession(data);
+        const session = this.docToSession(data);
+        console.log(`[Firestore] Loaded session ${sessionId} (from server): ${session.transcripts?.length || 0} transcripts, ${session.graph_nodes?.length || 0} nodes, ${session.graph_edges?.length || 0} edges, title="${session.metadata?.title}"`);
+        return session;
     }
 
     /**
@@ -190,7 +241,8 @@ export class FirestoreSessionManager {
             where("userId", "==", user.uid)
         );
 
-        const querySnapshot = await getDocs(q);
+        // Force read from server to avoid stale cached data
+        const querySnapshot = await getDocsFromServer(q);
         const sessions: SessionData[] = [];
 
         querySnapshot.forEach((docSnap) => {

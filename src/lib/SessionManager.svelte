@@ -99,41 +99,95 @@
         }
     }
 
-    // ===== SESSION OPERATIONS (Firebase Cloud Only) =====
+    // ===== SESSION OPERATIONS (Local-First + Cloud Sync) =====
 
     async function loadSessions() {
-        if (!FirestoreSessionManager.isAvailable()) {
-            sessions = [];
-            cloudError = "Sign in with Google to view sessions";
-            return;
-        }
+        cloudError = null;
+
+        // Use a Map to deduplicate by session id — newest updated_at wins
+        const sessionMap = new Map<string, any>();
+
+        // Step 1: Always load local sessions first
         try {
-            cloudStatus = "syncing";
-            const cloudSessions = await FirestoreSessionManager.listSessions();
-            sessions = cloudSessions;
-            cloudStatus = "connected";
-        } catch (error) {
-            console.error("Failed to load sessions from Firebase:", error);
-            cloudStatus = "error";
-            cloudError = "Failed to load sessions from cloud";
+            const localJson = (await invoke("list_sessions")) as string;
+            const localSessions = JSON.parse(localJson);
+            for (const s of localSessions) {
+                sessionMap.set(s.id, s);
+            }
+            console.log(
+                `[SessionMgr] Loaded ${localSessions.length} local sessions`,
+            );
+        } catch (e) {
+            console.warn("[SessionMgr] Failed to load local sessions:", e);
         }
+
+        // Step 2: Merge cloud sessions if signed in (deduplicate, newest wins)
+        if (FirestoreSessionManager.isAvailable()) {
+            try {
+                cloudStatus = "syncing";
+                const cloudSessions =
+                    await FirestoreSessionManager.listSessions();
+                for (const cs of cloudSessions) {
+                    const existing = sessionMap.get(cs.id);
+                    if (
+                        !existing ||
+                        new Date(cs.updated_at) > new Date(existing.updated_at)
+                    ) {
+                        sessionMap.set(cs.id, cs);
+                    }
+                }
+                cloudStatus = "connected";
+                console.log(
+                    `[SessionMgr] Merged cloud, total: ${sessionMap.size} sessions`,
+                );
+            } catch (error) {
+                console.warn(
+                    "[SessionMgr] Cloud load failed (using local):",
+                    error,
+                );
+                cloudStatus = "error";
+                cloudError = "Cloud load failed — showing local sessions";
+            }
+        } else if (sessionMap.size === 0) {
+            cloudError = "No sessions yet — record your first meeting!";
+        }
+
+        // Step 3: Build deduplicated array, sorted newest first
+        sessions = Array.from(sessionMap.values()).sort(
+            (a: any, b: any) =>
+                new Date(b.updated_at).getTime() -
+                new Date(a.updated_at).getTime(),
+        );
+        console.log(
+            `[SessionMgr] Final session list: ${sessions.length} sessions`,
+        );
     }
 
     async function saveCurrentSession() {
         if (!currentSession) return;
-        if (!FirestoreSessionManager.isAvailable()) {
-            cloudError = "Sign in with Google to save sessions";
-            return;
-        }
 
         isSaving = true;
         cloudError = null;
         try {
             currentSession.metadata.title = sessionTitle;
-            cloudStatus = "syncing";
-            await FirestoreSessionManager.saveSession(currentSession);
-            cloudStatus = "connected";
-            console.log("[Cloud] Session saved to Google Firestore");
+
+            // Always save locally first
+            try {
+                const sessionJson = JSON.stringify(currentSession);
+                await invoke("save_session", { sessionJson });
+                console.log("[SessionMgr] ✓ Saved to local disk");
+            } catch (localErr) {
+                console.error("[SessionMgr] Local save failed:", localErr);
+            }
+
+            // Sync to cloud if available
+            if (FirestoreSessionManager.isAvailable()) {
+                cloudStatus = "syncing";
+                await FirestoreSessionManager.saveSession(currentSession);
+                cloudStatus = "connected";
+                console.log("[SessionMgr] ✓ Synced to Google Firestore");
+            }
+
             showSaveDialog = false;
             await loadSessions();
         } catch (error: any) {
@@ -146,16 +200,11 @@
     }
 
     async function loadSession(sessionId: string) {
-        if (!FirestoreSessionManager.isAvailable()) {
-            cloudError = "Sign in with Google to load sessions";
-            return;
-        }
         try {
-            cloudStatus = "syncing";
-            const session =
-                await FirestoreSessionManager.loadSession(sessionId);
-            cloudStatus = "connected";
-            onSessionLoad(session);
+            // Find the session in the already-loaded list
+            const session = sessions.find((s) => s.id === sessionId);
+            // Pass to parent's handleSessionLoad which handles cache + local disk + Firestore
+            onSessionLoad(session || { id: sessionId });
             showLoadDialog = false;
         } catch (error) {
             console.error("Failed to load session:", error);
@@ -165,12 +214,27 @@
 
     async function deleteSession(sessionId: string) {
         if (!confirm("Are you sure you want to delete this session?")) return;
-        if (!FirestoreSessionManager.isAvailable()) return;
 
         try {
-            cloudStatus = "syncing";
-            await FirestoreSessionManager.deleteSession(sessionId);
-            cloudStatus = "connected";
+            // Delete from local disk
+            try {
+                await invoke("delete_session", { sessionId });
+                console.log("[SessionMgr] Deleted from local disk");
+            } catch (e) {
+                console.warn("[SessionMgr] Local delete failed:", e);
+            }
+
+            // Delete from cloud if available
+            if (FirestoreSessionManager.isAvailable()) {
+                try {
+                    cloudStatus = "syncing";
+                    await FirestoreSessionManager.deleteSession(sessionId);
+                    cloudStatus = "connected";
+                } catch (e) {
+                    console.warn("[SessionMgr] Cloud delete failed:", e);
+                }
+            }
+
             await loadSessions();
         } catch (error) {
             console.error("Failed to delete session:", error);

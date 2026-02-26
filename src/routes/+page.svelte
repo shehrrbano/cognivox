@@ -58,6 +58,9 @@
     let autoSaveInterval: ReturnType<typeof setInterval> | null = null;
     let pastSessions: any[] = [];
 
+    // === SESSION CACHE: Keeps full session data in memory for instant switching ===
+    let sessionCache: Map<string, any> = new Map();
+
     // Station 4: Latency Illusion
     let isTyping = false;
     let partialText = "";
@@ -378,145 +381,342 @@
     let extractError: string | null = null;
     let localInsights: any[] = []; // Renamed to avoid collision
 
-    // --- SESSION MANAGEMENT (Firebase Cloud Only) ---
+    // --- SESSION MANAGEMENT (Local-First + Cloud Sync) ---
+
+    /**
+     * SINGLE SOURCE OF TRUTH for pastSessions.
+     * Loads local sessions, merges cloud, deduplicates by id (newest wins),
+     * and updates the sessionCache.
+     */
+    async function refreshSessionList(): Promise<void> {
+        // Use a Map to deduplicate by session id — newest updated_at wins
+        const sessionMap = new Map<string, any>();
+
+        // Step 1: Load all local sessions
+        try {
+            const localJson = (await invoke("list_sessions")) as string;
+            const localSessions = JSON.parse(localJson);
+            for (const s of localSessions) {
+                sessionMap.set(s.id, s);
+            }
+            console.log(
+                `[SESSIONS] Loaded ${localSessions.length} local sessions`,
+            );
+        } catch (e) {
+            console.warn("[SESSIONS] Failed to load local sessions:", e);
+        }
+
+        // Step 2: Merge cloud sessions if signed in (cloud-only get synced to local)
+        if (FirestoreSessionManager.isAvailable()) {
+            try {
+                const cloudSessions =
+                    await FirestoreSessionManager.listSessions();
+                console.log(
+                    `[SESSIONS] Found ${cloudSessions.length} cloud sessions`,
+                );
+                for (const cs of cloudSessions) {
+                    const existing = sessionMap.get(cs.id);
+                    if (!existing) {
+                        // Cloud-only session — save to local for offline
+                        sessionMap.set(cs.id, cs);
+                        try {
+                            await invoke("save_session", {
+                                sessionJson: JSON.stringify(cs),
+                            });
+                            console.log(
+                                `[SESSIONS] Synced cloud→local: ${cs.metadata?.title}`,
+                            );
+                        } catch (syncErr) {
+                            console.warn(
+                                `[SESSIONS] Cloud→local sync failed:`,
+                                syncErr,
+                            );
+                        }
+                    } else if (
+                        new Date(cs.updated_at) > new Date(existing.updated_at)
+                    ) {
+                        // Cloud is newer — update
+                        sessionMap.set(cs.id, cs);
+                    }
+                }
+            } catch (e) {
+                console.warn(
+                    "[SESSIONS] Cloud load failed (using local only):",
+                    e,
+                );
+            }
+        }
+
+        // Step 3: Build deduplicated array, sorted newest first
+        const deduped = Array.from(sessionMap.values()).sort(
+            (a: any, b: any) =>
+                new Date(b.updated_at).getTime() -
+                new Date(a.updated_at).getTime(),
+        );
+
+        // Step 4: Update cache and pastSessions atomically
+        for (const s of deduped) {
+            sessionCache.set(s.id, JSON.parse(JSON.stringify(s)));
+        }
+        pastSessions = deduped;
+        console.log(
+            `[SESSIONS] pastSessions set: ${pastSessions.length} sessions (deduplicated)`,
+        );
+    }
 
     async function loadInitialData() {
         try {
             if (!isRunningInTauri) return;
 
-            // Ensure Firebase is initialized and auth is restored
-            initFirebase();
-            const user = await waitForAuth();
-            if (!user) {
-                console.log(
-                    "[RESTORE] Not signed in to Google — no cloud sessions to load",
+            // Initialize Firebase (wrapped so failures never block local data)
+            try {
+                initFirebase();
+                console.log("[RESTORE] Checking Firebase auth...");
+                const user = await waitForAuth();
+                if (user) {
+                    console.log(`[RESTORE] Authenticated as: ${user.email}`);
+                } else {
+                    console.log("[RESTORE] Not signed in — local only");
+                }
+            } catch (firebaseErr) {
+                console.warn(
+                    "[RESTORE] Firebase init failed (continuing with local):",
+                    firebaseErr,
                 );
-                pastSessions = [];
-                return;
             }
 
-            // Load all sessions from Google Cloud Firestore
-            const cloudSessions = await FirestoreSessionManager.listSessions();
-            pastSessions = cloudSessions;
-            console.log(
-                `[RESTORE] Found ${pastSessions.length} cloud sessions`,
-            );
+            // Load and deduplicate all sessions (local + cloud)
+            await refreshSessionList();
 
+            // Auto-load the latest session if we have no active transcripts
             if (pastSessions.length > 0 && transcripts.length === 0) {
                 const latest = pastSessions[0];
                 console.log(
-                    `[RESTORE] Auto-loading latest session: ${latest.metadata.title}`,
+                    `[RESTORE] Auto-loading latest session: ${latest.metadata?.title}`,
                 );
-                handleSessionLoad(latest);
+                // Directly restore the session without triggering saveCurrentSessionToCache
+                // for the empty initial session
+                await restoreSessionData(latest);
             }
-        } catch (error) {
-            console.error(
-                "[RESTORE] Failed to load sessions from Firebase:",
-                error,
-            );
-            pastSessions = [];
+        } catch (error: any) {
+            const errMsg =
+                typeof error === "string"
+                    ? error
+                    : error?.message || String(error);
+            console.error("[RESTORE] Failed to load sessions:", errMsg);
+            status = `Error loading sessions: ${errMsg}`;
         }
     }
 
-    async function handleSessionLoad(session: any) {
-        if (!session) return;
+    /**
+     * Capture the CURRENT session state (transcripts, graph, insights, etc.)
+     * into the sessionCache so it can be restored later without Firestore.
+     * GUARD: Does NOT add empty sessions (0 transcripts) to pastSessions.
+     */
+    function saveCurrentSessionToCache() {
+        if (!currentSession?.id) return;
 
-        console.log(`[RESTORE] Restoring session: ${session.id}`);
-
-        // Always fetch the full session from Firestore to ensure complete data
-        let fullSession = session;
-        try {
-            if (FirestoreSessionManager.isAvailable()) {
-                fullSession = await FirestoreSessionManager.loadSession(
-                    session.id,
-                );
-                console.log(
-                    `[RESTORE] Fetched full session from Firestore: ${fullSession.id}`,
-                );
-            }
-        } catch (e) {
-            console.warn(
-                "[RESTORE] Could not fetch from Firestore, using cached data:",
-                e,
+        // GUARD: Don't cache/persist sessions with no real data
+        const hasData = transcripts.length > 0 || graphNodes.length > 0;
+        if (!hasData) {
+            console.log(
+                `[CACHE] Skipping empty session ${currentSession.id} (no transcripts or nodes)`,
             );
+            return;
         }
 
-        currentSession = JSON.parse(JSON.stringify(fullSession));
+        // Build a full snapshot of the current session state
+        const snapshot = JSON.parse(JSON.stringify(currentSession));
+        // Explicitly sync live arrays into the snapshot (the $: block may not have run yet)
+        snapshot.transcripts = transcripts.map((t) => ({
+            timestamp: t.timestamp || "",
+            speaker_id: t.speaker || "Speaker",
+            text: t.text || "",
+            tone: t.tone || null,
+            category: t.category || null,
+            confidence: t.confidence || 0.5,
+        }));
+        snapshot.graph_nodes = graphNodes.map((n) => ({
+            id: n.id,
+            node_type: n.type || "Entity",
+            metadata: {},
+        }));
+        snapshot.graph_edges = graphEdges.map((e) => ({
+            from: e.from,
+            to: e.to,
+            relation: e.relation || "related",
+            weight: 1.0,
+        }));
+        snapshot.metadata.total_transcripts = transcripts.length;
+        snapshot.updated_at = new Date().toISOString();
+        snapshot.psychosomatic = {
+            stress: stressLevel || 0,
+            engagement: engagementLevel || 0,
+            urgency: urgencyLevel || 0,
+            clarity: clarityLevel || 0,
+        };
+        snapshot.insights = extractedSummary
+            ? {
+                  topics: extractedSummary.topics || [],
+                  decisions: extractedSummary.decisions || [],
+                  action_items: extractedSummary.actionItems || [],
+                  key_points: extractedSummary.keyPoints || [],
+              }
+            : null;
+
+        // Also store extractedMemories in the cache snapshot
+        snapshot._extractedMemories = extractedMemories
+            ? JSON.parse(JSON.stringify(extractedMemories))
+            : null;
+        snapshot._showSummaryPanel = showSummaryPanel;
+        snapshot._showMemoriesPanel = showMemoriesPanel;
+
+        sessionCache.set(currentSession.id, snapshot);
+        console.log(
+            `[CACHE] Saved session ${currentSession.id} to cache (${snapshot.transcripts?.length || 0} transcripts, ${snapshot.graph_nodes?.length || 0} nodes)`,
+        );
+
+        // Update pastSessions (replace if exists, add if not)
+        const idx = pastSessions.findIndex(
+            (s: any) => s.id === currentSession.id,
+        );
+        if (idx >= 0) {
+            pastSessions[idx] = snapshot;
+            pastSessions = [...pastSessions]; // trigger reactivity
+        } else {
+            pastSessions = [snapshot, ...pastSessions];
+        }
+    }
+
+    /**
+     * Core session data restore — populates UI state from a fully-loaded session object.
+     * Does NOT save previous session (caller is responsible for that).
+     */
+    async function restoreSessionData(fullSession: any) {
+        if (!fullSession) return;
+
+        // If not in cache, try loading full data from disk/cloud
+        let session = sessionCache.get(fullSession.id);
+        if (!session) {
+            try {
+                const localJson = (await invoke("load_session", {
+                    sessionId: fullSession.id,
+                })) as string;
+                session = JSON.parse(localJson);
+                sessionCache.set(
+                    fullSession.id,
+                    JSON.parse(JSON.stringify(session)),
+                );
+            } catch {
+                session = fullSession;
+            }
+        }
+
+        // Set as current
+        currentSession = JSON.parse(JSON.stringify(session));
 
         // Restore transcripts
-        if (fullSession.transcripts && fullSession.transcripts.length > 0) {
-            transcripts = fullSession.transcripts.map((t: any) => ({
-                id: crypto.randomUUID(),
-                timestamp: t.timestamp,
-                speaker: t.speaker_id || "Speaker",
-                speakerId: parseInt(t.speaker_id) || 0,
-                text: t.text,
-                tone: t.tone,
-                category: t.category,
-                confidence: t.confidence,
-            }));
-            console.log(`[RESTORE] Loaded ${transcripts.length} transcripts`);
-        } else {
-            transcripts = [];
-            console.log("[RESTORE] No transcripts in this session");
-        }
+        transcripts = (session.transcripts || []).map((t: any, i: number) => ({
+            id: t.id || `restored_${i}`,
+            timestamp: t.timestamp || "",
+            speaker: t.speaker_id || t.speaker || "Speaker",
+            speakerId: t.speakerId || 0,
+            text: t.text || "",
+            tone: t.tone || undefined,
+            category: t.category || undefined,
+            confidence: t.confidence || 0.5,
+            isPartial: false,
+        }));
 
-        // Restore Graph
-        if (fullSession.graph_nodes && fullSession.graph_nodes.length > 0) {
-            graphNodes = fullSession.graph_nodes.map((n: any) => ({
-                id: n.id,
-                type: n.node_type || "Entity",
-                label: n.id,
-                weight: 1,
-            }));
-            console.log(`[RESTORE] Loaded ${graphNodes.length} graph nodes`);
-        } else {
-            graphNodes = [];
-        }
-        if (fullSession.graph_edges && fullSession.graph_edges.length > 0) {
-            graphEdges = fullSession.graph_edges.map((e: any) => ({
-                from: e.from,
-                to: e.to,
-                relation: e.relation,
-            }));
-            console.log(`[RESTORE] Loaded ${graphEdges.length} graph edges`);
-        } else {
-            graphEdges = [];
-        }
+        // Restore graph
+        graphNodes = (session.graph_nodes || []).map((n: any) => ({
+            id: n.id,
+            type: n.node_type || n.type || "Entity",
+            label: n.label || n.id,
+            weight: n.weight || 1,
+        }));
+        graphEdges = (session.graph_edges || []).map((e: any) => ({
+            from: e.from,
+            to: e.to,
+            relation: e.relation || "related",
+        }));
 
-        // Restore Insights if available
-        if (fullSession.insights) {
+        // Restore insights
+        if (session.insights) {
             extractedSummary = {
-                topics: fullSession.insights.topics || [],
-                decisions: fullSession.insights.decisions || [],
-                actionItems: fullSession.insights.action_items || [],
-                keyPoints: fullSession.insights.key_points || [],
+                topics: session.insights.topics || [],
+                decisions: session.insights.decisions || [],
+                actionItems: session.insights.action_items || [],
+                keyPoints: session.insights.key_points || [],
             };
             showSummaryPanel = true;
-        } else if (fullSession.summary) {
-            // Legacy fallback
+        } else if (session.summary) {
             extractedSummary = {
                 topics: [],
-                decisions: fullSession.summary.key_decisions || [],
-                actionItems: (fullSession.summary.action_items || []).map(
-                    (ai: any) => `${ai.description} (${ai.priority})`,
+                decisions: session.summary.key_decisions || [],
+                actionItems: (session.summary.action_items || []).map(
+                    (a: any) => (typeof a === "string" ? a : a.description),
                 ),
-                keyPoints: [],
+                keyPoints: session.summary.next_steps || [],
             };
             showSummaryPanel = true;
         } else {
             extractedSummary = null;
         }
 
-        // Restore Psychosomatic if available
-        if (fullSession.psychosomatic) {
-            stressLevel = fullSession.psychosomatic.stress || 0;
-            engagementLevel = fullSession.psychosomatic.engagement || 0;
-            urgencyLevel = fullSession.psychosomatic.urgency || 0;
-            clarityLevel = fullSession.psychosomatic.clarity || 0;
+        // Restore psychosomatic
+        if (session.psychosomatic) {
+            stressLevel = session.psychosomatic.stress || 0;
+            engagementLevel = session.psychosomatic.engagement || 0;
+            urgencyLevel = session.psychosomatic.urgency || 0;
+            clarityLevel = session.psychosomatic.clarity || 0;
+        } else {
+            stressLevel = 0;
+            engagementLevel = 0.3;
+            urgencyLevel = 0;
+            clarityLevel = 0.4;
         }
 
-        status = `Restored: ${fullSession.metadata?.title || "Session"}`;
+        // Restore memories from cache
+        if (session._extractedMemories) {
+            extractedMemories = session._extractedMemories;
+            showMemoriesPanel = session._showMemoriesPanel || false;
+        } else {
+            extractedMemories = null;
+            showMemoriesPanel = false;
+        }
+        if (session._showSummaryPanel !== undefined) {
+            showSummaryPanel = session._showSummaryPanel;
+        }
+
+        activeTab = "transcript";
+        isCollapsed = false;
+        const title = session.metadata?.title || "Session";
+        status = `Restored: ${title} (${transcripts.length} transcripts, ${graphNodes.length} nodes)`;
+        console.log(`[RESTORE] === Session loaded: ${title} ===`);
+    }
+
+    async function handleSessionLoad(session: any) {
+        if (!session) return;
+
+        // Don't reload if it's the same session already displayed
+        if (currentSession?.id === session.id) {
+            console.log(
+                `[RESTORE] Session ${session.id} already active, skipping reload`,
+            );
+            activeTab = "transcript";
+            return;
+        }
+
+        console.log(`[RESTORE] === Loading session: ${session.id} ===`);
+
+        // *** SAVE current session to cache BEFORE switching ***
+        saveCurrentSessionToCache();
+
+        status = "Loading session...";
+
+        // Delegate to restoreSessionData which handles cache/disk/cloud fallback
+        await restoreSessionData(session);
     }
 
     async function handleSessionDelete(sessionId: string, event: MouseEvent) {
@@ -526,13 +726,27 @@
         );
         if (!confirmed) return;
         try {
-            if (!FirestoreSessionManager.isAvailable()) {
-                status = "Sign in to Google to manage sessions";
-                return;
+            // Always delete from local storage
+            try {
+                await invoke("delete_session", { sessionId });
+                console.log("[SESSION] Deleted from local storage");
+            } catch (e) {
+                console.warn("[SESSION] Local delete failed:", e);
             }
-            await FirestoreSessionManager.deleteSession(sessionId);
-            const cloudSessions = await FirestoreSessionManager.listSessions();
-            pastSessions = cloudSessions;
+
+            // Also delete from cloud if available
+            if (FirestoreSessionManager.isAvailable()) {
+                try {
+                    await FirestoreSessionManager.deleteSession(sessionId);
+                    console.log("[SESSION] Deleted from cloud");
+                } catch (e) {
+                    console.warn("[SESSION] Cloud delete failed:", e);
+                }
+            }
+
+            // Remove from local cache and rebuild session list from source of truth
+            sessionCache.delete(sessionId);
+
             if (currentSession?.id === sessionId) {
                 currentSession = null;
                 transcripts = [];
@@ -540,7 +754,10 @@
                 graphEdges = [];
                 extractedSummary = null;
             }
-            status = "Session deleted from cloud";
+
+            // Rebuild pastSessions from disk + cloud (guaranteed no ghost entries)
+            await refreshSessionList();
+            status = "Session deleted";
         } catch (error) {
             console.error("[SESSION] Delete failed:", error);
             status = "Failed to delete session";
@@ -549,27 +766,106 @@
 
     async function saveSession(isFinal = false) {
         if (!isRunningInTauri || (!isRecording && !isFinal)) return;
-        if (!FirestoreSessionManager.isAvailable()) {
-            console.warn("[PERSISTENCE] Not signed in — cannot save to cloud");
+        if (!currentSession) {
+            console.warn("[PERSISTENCE] No current session to save");
             return;
         }
 
         try {
+            // CRITICAL: Explicitly sync live state into currentSession BEFORE saving.
+            // The Svelte $: reactive block runs asynchronously and may not have
+            // updated currentSession yet when saveSession is called.
+            currentSession.transcripts = transcripts.map((t) => ({
+                timestamp: t.timestamp || "",
+                speaker_id: t.speaker || "Speaker",
+                text: t.text || "",
+                tone: t.tone || null,
+                category: t.category || null,
+                confidence: t.confidence || 0.5,
+            }));
+            currentSession.graph_nodes = graphNodes.map((n) => ({
+                id: n.id,
+                node_type: n.type || "Entity",
+                metadata: {},
+            }));
+            currentSession.graph_edges = graphEdges.map((e) => ({
+                from: e.from,
+                to: e.to,
+                relation: e.relation || "related",
+                weight: 1.0,
+            }));
+            currentSession.metadata.total_transcripts = transcripts.length;
+            currentSession.updated_at = new Date().toISOString();
+            currentSession.psychosomatic = {
+                stress: stressLevel || 0,
+                engagement: engagementLevel || 0,
+                urgency: urgencyLevel || 0,
+                clarity: clarityLevel || 0,
+            };
+            currentSession.insights = extractedSummary
+                ? {
+                      topics: extractedSummary.topics || [],
+                      decisions: extractedSummary.decisions || [],
+                      action_items: extractedSummary.actionItems || [],
+                      key_points: extractedSummary.keyPoints || [],
+                  }
+                : null;
+
+            const transcriptCount = currentSession.transcripts.length;
+            const nodeCount = currentSession.graph_nodes.length;
             console.log(
-                `[PERSISTENCE] Saving session to Firebase ${isFinal ? "(Final)" : "(Auto)"}...`,
+                `[PERSISTENCE] Saving ${isFinal ? "(Final)" : "(Auto)"}: ${transcriptCount} transcripts, ${nodeCount} nodes`,
             );
 
-            await FirestoreSessionManager.saveSession(currentSession);
-            console.log("[PERSISTENCE] Saved to Google Cloud Firestore");
+            // Always update local cache immediately (instant access)
+            saveCurrentSessionToCache();
+
+            // ====================================================
+            // LOCAL SAVE: Always save to local disk (works for ALL users)
+            // ====================================================
+            try {
+                const sessionJson = JSON.stringify(currentSession);
+                await invoke("save_session", { sessionJson });
+                console.log("[PERSISTENCE] ✓ Saved to local disk");
+            } catch (localErr: any) {
+                console.error("[PERSISTENCE] Local save failed:", localErr);
+            }
+
+            // ====================================================
+            // CLOUD SYNC: Optionally sync to Firebase if signed in
+            // ====================================================
+            if (FirestoreSessionManager.isAvailable()) {
+                try {
+                    await FirestoreSessionManager.saveSession(currentSession);
+                    console.log(
+                        "[PERSISTENCE] ✓ Synced to Google Cloud Firestore",
+                    );
+                } catch (cloudErr: any) {
+                    const cloudMsg =
+                        typeof cloudErr === "string"
+                            ? cloudErr
+                            : cloudErr?.message || String(cloudErr);
+                    console.warn(
+                        "[PERSISTENCE] Cloud sync failed (local save OK):",
+                        cloudMsg,
+                    );
+                }
+            } else {
+                console.log("[PERSISTENCE] Cloud sync skipped (not signed in)");
+            }
 
             if (isFinal) {
-                const cloudSessions =
-                    await FirestoreSessionManager.listSessions();
-                pastSessions = cloudSessions;
+                // Refresh session list with proper deduplication
+                await refreshSessionList();
+                status = `Session saved (${transcriptCount} transcripts)`;
             }
-        } catch (error) {
-            console.error("[PERSISTENCE] Firebase save failed:", error);
-            status = "Failed to save session to cloud";
+        } catch (error: any) {
+            const errMsg =
+                typeof error === "string"
+                    ? error
+                    : error?.message || String(error);
+            console.error("[PERSISTENCE] Save FAILED:", errMsg);
+            status = `⚠ Save failed: ${errMsg}`;
         }
     }
 
@@ -817,6 +1113,9 @@ Return ONLY valid JSON, no markdown, no explanation.`;
                 }
             } else {
                 // === START RECORDING ===
+                // Save current session to cache before starting a new one
+                saveCurrentSessionToCache();
+
                 // Reset for new session
                 transcripts = [];
                 graphNodes = [];
@@ -930,6 +1229,15 @@ Return ONLY valid JSON, no markdown, no explanation.`;
                             }
                         }
                     }
+                }
+
+                // Reset the audio processing loop state for the new session
+                // This clears stale buffers, stuck processing flags, and pending audio
+                try {
+                    await invoke("reset_audio_loop");
+                    console.log("[Recording] Audio loop reset for new session");
+                } catch (e) {
+                    console.warn("[Recording] Audio loop reset failed:", e);
                 }
 
                 await invoke("start_audio_capture");
@@ -2209,7 +2517,7 @@ Return ONLY valid JSON, no markdown, no explanation.`;
                 <span class="section-title">Recent Missions</span>
                 <button
                     class="text-[10px] text-cyan-400 uppercase tracking-widest hover:text-cyan-300"
-                    onclick={loadInitialData}>Refresh</button
+                    onclick={refreshSessionList}>Refresh</button
                 >
             </div>
 

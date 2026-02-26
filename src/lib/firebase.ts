@@ -10,7 +10,6 @@ import { initializeApp, type FirebaseApp } from "firebase/app";
 import {
     getFirestore,
     type Firestore,
-    enableIndexedDbPersistence,
 } from "firebase/firestore";
 import {
     getAuth,
@@ -77,18 +76,10 @@ export function initFirebase(): { app: FirebaseApp; db: Firestore; auth: Auth } 
     db = getFirestore(app);
     auth = getAuth(app);
 
-    // Enable offline persistence so the app works without internet
-    enableIndexedDbPersistence(db).catch((err) => {
-        if (err.code === "failed-precondition") {
-            console.warn(
-                "[Firebase] Multiple tabs open, persistence can only be enabled in one tab at a time."
-            );
-        } else if (err.code === "unimplemented") {
-            console.warn(
-                "[Firebase] The current browser does not support offline persistence."
-            );
-        }
-    });
+    // NOTE: IndexedDB persistence DISABLED.
+    // It was causing stale cached reads — sessions loaded with 0 transcripts
+    // because the cache had old data from before transcripts were saved.
+    // All reads now go directly to the Firestore server for fresh data.
 
     initialized = true;
     console.log("[Firebase] Initialized with project:", firebaseConfig.projectId);
