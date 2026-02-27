@@ -81,6 +81,11 @@ NEVER output Arabic/Nastaliq script in the transcript field. Always use Latin ch
 
 CRITICAL TASK 1 - SPEAKER DIARIZATION:
 If the input starts with "[IDENTIFIED: Speaker N]:" (e.g. "[IDENTIFIED: Speaker 1]:", "[IDENTIFIED: Speaker 2]:"), this speaker has been IDENTIFIED by voice biometric analysis (ECAPA-TDNN). You MUST use EXACTLY that speaker label (e.g. "Speaker 1", "Speaker 2") in your output. Do NOT rename, change, or reassign. Do NOT split into multiple speakers — this is a SINGLE identified voice.
+If the input starts with "[IDENTIFIED MULTI: Speaker N and Speaker M]:", TWO DISTINCT speakers have been identified by voice biometrics. The transcript contains speech from BOTH speakers. You MUST:
+- Split the transcript into segments belonging to each speaker
+- Use the EXACT labels provided (e.g. "Speaker 1" and "Speaker 2")
+- Return multiple JSON objects in the array, one per speaker segment
+- Look for conversational turn-taking, topic shifts, or response patterns to determine which parts belong to which speaker
 If the input has a tag like "[You]:" or "[Speaker 2]:" (without IDENTIFIED prefix), keep that tag as-is. Do NOT split into multiple speakers.
 If the input says "[Single mic]:", this is from a single microphone. Analyze the text carefully for speaker changes:
 - If the text contains conversational exchange (questions and answers, back-and-forth dialogue), split into "Speaker 1", "Speaker 2", etc.
@@ -741,6 +746,7 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle, alive_flag:
                 // Keep overlap samples for next chunk
                 let overlap_samples = ((OVERLAP_SECS * 1.5) * 16000.0) as usize;
                 let audio = buffer.clone();
+                let audio_source_timeline = source_timeline.clone(); // Capture BEFORE overlap trim
                 
                 if buffer.len() > overlap_samples {
                     let start = buffer.len() - overlap_samples;
@@ -779,7 +785,9 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle, alive_flag:
                     let app = app_clone;
                     
                     // === ECAPA-TDNN SPEAKER IDENTIFICATION ===
-                    // Override source-based speaker_tag with voice biometric identification
+                    // Split audio by source (Microphone vs System) and identify each separately.
+                    // This is critical: if both speakers' audio is in one buffer, a single embedding
+                    // would blend both voices, making differentiation impossible.
                     let speaker_tag = {
                         let sid_state = app.state::<SpeakerIdState>();
                         let is_sid_init = *poison_lock(&sid_state.is_initialized);
@@ -791,48 +799,145 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle, alive_flag:
                             let sid_threshold = *poison_lock(&sid_state.threshold);
                             
                             if let (Some(sess), Some(win), Some(fb)) = (sid_session, sid_window, sid_filterbank) {
-                                let audio_for_sid = audio.clone();
-                                
-                                // CPU-heavy: run embedding extraction in blocking thread
-                                match tokio::task::spawn_blocking(move || {
-                                    let mut sess_guard = sess.lock().unwrap();
-                                    extract_embedding(&mut sess_guard, &audio_for_sid, &win, &fb)
-                                }).await {
-                                    Ok(Ok(embedding)) => {
-                                        // Quick: match against known speakers
-                                        let mut speakers = poison_lock(&sid_state.speakers);
-                                        let mut next_num = poison_lock(&sid_state.next_speaker_num);
-                                        let result = identify_or_register_speaker(
-                                            &mut speakers, &embedding, sid_threshold, &mut next_num
-                                        );
-                                        
-                                        println!("[SPEAKER-ID] \u{2713} {} (confidence: {:.3}, new: {})", 
-                                                 result.speaker_label, result.confidence, result.is_new_speaker);
-                                        
-                                        // Persist profiles periodically
-                                        if result.is_new_speaker || speakers.values().map(|p| p.sample_count).sum::<u32>() % 5 == 0 {
-                                            let _ = save_profiles(&speakers);
+                                // Split the audio buffer into per-source segments using the source timeline
+                                let mut mic_audio: Vec<f32> = Vec::new();
+                                let mut sys_audio: Vec<f32> = Vec::new();
+                                let mut offset = 0usize;
+                                for &(count, ref source) in &audio_source_timeline {
+                                    let end = (offset + count).min(audio.len());
+                                    if offset < audio.len() {
+                                        match source {
+                                            AudioSource::Microphone => mic_audio.extend_from_slice(&audio[offset..end]),
+                                            AudioSource::System => sys_audio.extend_from_slice(&audio[offset..end]),
                                         }
-                                        drop(speakers);
-                                        drop(next_num);
-                                        
-                                        // Emit speaker identification event to frontend
-                                        let _ = app.emit("cognivox:speaker_identified", serde_json::json!({
-                                            "speaker_id": result.speaker_id,
-                                            "speaker_label": result.speaker_label,
-                                            "confidence": result.confidence,
-                                            "is_new": result.is_new_speaker,
-                                        }));
-                                        
-                                        result.speaker_label
                                     }
-                                    Ok(Err(e)) => {
-                                        println!("[SPEAKER-ID] Embedding error: {}, using source tag", e);
-                                        speaker_tag
+                                    offset = end;
+                                }
+                                
+                                let min_samples = 16000; // 1 second minimum for reliable embedding
+                                let has_mic = mic_audio.len() >= min_samples;
+                                let has_sys = sys_audio.len() >= min_samples;
+                                
+                                println!("[SPEAKER-ID] Split audio: mic={:.1}s ({} samples), sys={:.1}s ({} samples)", 
+                                    mic_audio.len() as f32 / 16000.0, mic_audio.len(),
+                                    sys_audio.len() as f32 / 16000.0, sys_audio.len());
+                                
+                                // Identify mic speaker
+                                let mic_result = if has_mic {
+                                    let sess_c = sess.clone();
+                                    let win_c = win.clone();
+                                    let fb_c = fb.clone();
+                                    match tokio::task::spawn_blocking(move || {
+                                        let mut sess_guard = sess_c.lock().unwrap();
+                                        extract_embedding(&mut sess_guard, &mic_audio, &win_c, &fb_c)
+                                    }).await {
+                                        Ok(Ok(emb)) => {
+                                            let mut speakers = poison_lock(&sid_state.speakers);
+                                            let mut next_num = poison_lock(&sid_state.next_speaker_num);
+                                            let result = identify_or_register_speaker(
+                                                &mut speakers, &emb, sid_threshold, &mut next_num
+                                            );
+                                            println!("[SPEAKER-ID] MIC → {} (confidence: {:.3}, new: {})", 
+                                                result.speaker_label, result.confidence, result.is_new_speaker);
+                                            if result.is_new_speaker || speakers.values().map(|p| p.sample_count).sum::<u32>() % 5 == 0 {
+                                                let _ = save_profiles(&speakers);
+                                            }
+                                            drop(speakers);
+                                            drop(next_num);
+                                            let _ = app.emit("cognivox:speaker_identified", serde_json::json!({
+                                                "speaker_id": result.speaker_id,
+                                                "speaker_label": result.speaker_label,
+                                                "confidence": result.confidence,
+                                                "is_new": result.is_new_speaker,
+                                                "source": "microphone",
+                                            }));
+                                            Some(result.speaker_label)
+                                        }
+                                        Ok(Err(e)) => { println!("[SPEAKER-ID] MIC embedding error: {}", e); None }
+                                        Err(e) => { println!("[SPEAKER-ID] MIC task error: {}", e); None }
                                     }
-                                    Err(e) => {
-                                        println!("[SPEAKER-ID] Task error: {}, using source tag", e);
-                                        speaker_tag
+                                } else { None };
+                                
+                                // Identify system speaker
+                                let sys_result = if has_sys {
+                                    let sess_c = sess.clone();
+                                    let win_c = win.clone();
+                                    let fb_c = fb.clone();
+                                    match tokio::task::spawn_blocking(move || {
+                                        let mut sess_guard = sess_c.lock().unwrap();
+                                        extract_embedding(&mut sess_guard, &sys_audio, &win_c, &fb_c)
+                                    }).await {
+                                        Ok(Ok(emb)) => {
+                                            let mut speakers = poison_lock(&sid_state.speakers);
+                                            let mut next_num = poison_lock(&sid_state.next_speaker_num);
+                                            let result = identify_or_register_speaker(
+                                                &mut speakers, &emb, sid_threshold, &mut next_num
+                                            );
+                                            println!("[SPEAKER-ID] SYS → {} (confidence: {:.3}, new: {})", 
+                                                result.speaker_label, result.confidence, result.is_new_speaker);
+                                            if result.is_new_speaker || speakers.values().map(|p| p.sample_count).sum::<u32>() % 5 == 0 {
+                                                let _ = save_profiles(&speakers);
+                                            }
+                                            drop(speakers);
+                                            drop(next_num);
+                                            let _ = app.emit("cognivox:speaker_identified", serde_json::json!({
+                                                "speaker_id": result.speaker_id,
+                                                "speaker_label": result.speaker_label,
+                                                "confidence": result.confidence,
+                                                "is_new": result.is_new_speaker,
+                                                "source": "system",
+                                            }));
+                                            Some(result.speaker_label)
+                                        }
+                                        Ok(Err(e)) => { println!("[SPEAKER-ID] SYS embedding error: {}", e); None }
+                                        Err(e) => { println!("[SPEAKER-ID] SYS task error: {}", e); None }
+                                    }
+                                } else { None };
+                                
+                                // Build speaker tag for Gemini based on identification results
+                                match (mic_result, sys_result) {
+                                    (Some(mic_label), Some(sys_label)) => {
+                                        if mic_label == sys_label {
+                                            // Same speaker on both sources (echo/feedback)
+                                            println!("[SPEAKER-ID] Both sources matched same speaker: {}", mic_label);
+                                            mic_label
+                                        } else {
+                                            // Different speakers identified!
+                                            println!("[SPEAKER-ID] ★ TWO SPEAKERS: mic={}, sys={}", mic_label, sys_label);
+                                            format!("{}+{}", mic_label, sys_label)
+                                        }
+                                    }
+                                    (Some(label), None) | (None, Some(label)) => label,
+                                    (None, None) => {
+                                        // Fallback: run ECAPA-TDNN on full audio as before
+                                        let audio_for_sid = audio.clone();
+                                        let sess_c = sess.clone();
+                                        let win_c = win.clone();
+                                        let fb_c = fb.clone();
+                                        match tokio::task::spawn_blocking(move || {
+                                            let mut sess_guard = sess_c.lock().unwrap();
+                                            extract_embedding(&mut sess_guard, &audio_for_sid, &win_c, &fb_c)
+                                        }).await {
+                                            Ok(Ok(emb)) => {
+                                                let mut speakers = poison_lock(&sid_state.speakers);
+                                                let mut next_num = poison_lock(&sid_state.next_speaker_num);
+                                                let result = identify_or_register_speaker(
+                                                    &mut speakers, &emb, sid_threshold, &mut next_num
+                                                );
+                                                println!("[SPEAKER-ID] FALLBACK → {} (confidence: {:.3})", result.speaker_label, result.confidence);
+                                                if result.is_new_speaker { let _ = save_profiles(&speakers); }
+                                                drop(speakers); drop(next_num);
+                                                let _ = app.emit("cognivox:speaker_identified", serde_json::json!({
+                                                    "speaker_id": result.speaker_id,
+                                                    "speaker_label": result.speaker_label,
+                                                    "confidence": result.confidence,
+                                                    "is_new": result.is_new_speaker,
+                                                }));
+                                                result.speaker_label
+                                            }
+                                            Ok(Err(e)) => { println!("[SPEAKER-ID] Fallback error: {}", e); speaker_tag }
+                                            Err(e) => { println!("[SPEAKER-ID] Fallback task error: {}", e); speaker_tag }
+                                        }
                                     }
                                 }
                             } else {
@@ -942,11 +1047,15 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle, alive_flag:
                     }
                     
                     // Include speaker tag in the transcript text sent to Gemini
-                    // When ECAPA-TDNN has identified the speaker (e.g. "Speaker 1"),
-                    // use a STRICT prefix so Gemini preserves the label exactly.
+                    // When ECAPA-TDNN has identified the speaker(s), use STRICT prefix
+                    let is_two_speakers = speaker_tag.contains('+');
                     let is_ecapa_identified = speaker_tag.starts_with("Speaker ") && speaker_tag != "Speaker";
-                    let speaker_annotated_transcript = if is_ecapa_identified {
-                        // ECAPA-TDNN identified this voice — tell Gemini authoritatively
+                    let speaker_annotated_transcript = if is_two_speakers {
+                        // Two distinct speakers identified by ECAPA-TDNN (e.g. "Speaker 1+Speaker 2")
+                        let parts: Vec<&str> = speaker_tag.split('+').collect();
+                        format!("[IDENTIFIED MULTI: {} and {}]: {}", parts[0], parts[1], transcription)
+                    } else if is_ecapa_identified {
+                        // Single ECAPA-TDNN identified voice
                         format!("[IDENTIFIED: {}]: {}", speaker_tag, transcription)
                     } else if speaker_tag == "auto" {
                         format!("[Single mic]: {}", transcription)

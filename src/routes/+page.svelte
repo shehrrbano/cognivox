@@ -2165,9 +2165,16 @@ Return ONLY valid JSON, no markdown, no explanation.`;
                         // Use backend speaker tag (from ECAPA-TDNN voice biometric) as PRIMARY source
                         // This is the authoritative speaker identity — Gemini's label is secondary
                         let backendSpeaker = payload?.speaker || "";
+                        // Check if ECAPA-TDNN identified speaker(s)
+                        const isTwoSpeakers = backendSpeaker.includes("+"); // e.g. "Speaker 1+Speaker 2"
                         const isEcapaIdentified =
-                            backendSpeaker.startsWith("Speaker ") &&
-                            backendSpeaker !== "Speaker";
+                            isTwoSpeakers ||
+                            (backendSpeaker.startsWith("Speaker ") &&
+                                backendSpeaker !== "Speaker");
+                        // For two-speaker tags, extract individual labels
+                        const ecapaSpeakers = isTwoSpeakers
+                            ? backendSpeaker.split("+")
+                            : [backendSpeaker];
 
                         // Update debug state
                         debugLastTranscript =
@@ -2213,7 +2220,27 @@ Return ONLY valid JSON, no markdown, no explanation.`;
                                             // ALWAYS use the backend label — it's voice-biometric,
                                             // more reliable than Gemini's text-based guess
                                             let speaker: string;
-                                            if (isEcapaIdentified) {
+                                            if (isTwoSpeakers) {
+                                                // Two speakers identified by ECAPA-TDNN —
+                                                // Let Gemini's per-segment speaker labels through,
+                                                // but validate they match one of the identified speakers
+                                                const geminiSpeaker =
+                                                    p.speaker || "";
+                                                const matchedEcapa =
+                                                    ecapaSpeakers.find(
+                                                        (s: string) =>
+                                                            geminiSpeaker.includes(
+                                                                s,
+                                                            ) ||
+                                                            s.includes(
+                                                                geminiSpeaker,
+                                                            ),
+                                                    );
+                                                speaker =
+                                                    matchedEcapa ||
+                                                    p.speaker ||
+                                                    ecapaSpeakers[0];
+                                            } else if (isEcapaIdentified) {
                                                 speaker = backendSpeaker;
                                             } else {
                                                 speaker =
