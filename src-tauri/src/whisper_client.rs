@@ -141,9 +141,10 @@ pub async fn transcribe_audio_with_context(
         let mut state = ctx.create_state()
             .map_err(|e| format!("Failed to create Whisper state: {:?}", e))?;
         
-        // Use Greedy decoding for FAST transcription
-        // (BeamSearch beam_size=8 was causing 10-30x slowdown)
-        let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+        // Greedy with best_of=2: runs 2 candidates and picks the best.
+        // Nearly same speed as best_of=1 (parallel internally) but catches
+        // misheard words that single-pass misses.
+        let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 2 });
         
         // Language handling
         if language == "auto" {
@@ -159,16 +160,16 @@ pub async fn transcribe_audio_with_context(
         params.set_single_segment(false);    // Allow multiple segments
         params.set_n_threads(4);              // 4 threads - balanced
         
-        // Fast + accurate settings
-        params.set_temperature(0.0);
-        params.set_temperature_inc(0.2);
-        params.set_no_speech_thold(0.5);
-        params.set_entropy_thold(2.4);
-        params.set_logprob_thold(-1.0);
+        // Accuracy-tuned settings (no speed cost — these are decoder filters)
+        params.set_temperature(0.0);          // Deterministic first pass
+        params.set_temperature_inc(0.2);      // Fallback increment if first pass fails
+        params.set_no_speech_thold(0.6);      // Stricter: reject segments Whisper thinks are not speech
+        params.set_entropy_thold(2.2);        // Tighter: reject garbled/uncertain segments (was 2.4)
+        params.set_logprob_thold(-0.8);       // Reject very low-confidence tokens (was -1.0)
         params.set_suppress_blank(true);
         
-        // Concise prompt (shorter = faster tokenization)
-        let base_prompt = "Transcribe exactly as spoken. Preserve names and punctuation.";
+        // Richer prompt for better word accuracy
+        let base_prompt = "Transcribe the following speech exactly as spoken. Use correct English words and proper nouns. Do not hallucinate or invent words.";
         
         let full_prompt = if let Some(ref context) = previous_context {
             let context_snippet = if context.len() > 150 {

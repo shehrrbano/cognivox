@@ -1,0 +1,26 @@
+﻿cargo :     Blocking waiting for file lock on build directory
+At line:1 char:56
++ ... s\USER\OneDrive\Desktop\AIproject\src-tauri; cargo check *>&1 | Out-S ...
++                                                  ~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Blocking wa...build directory 
+   :String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+    Checking cognivox v0.1.0 
+(C:\Users\USER\OneDrive\Desktop\AIproject\src-tauri)
+error[E0596]: cannot borrow `*session` as mutable, as it is behind a `&` 
+reference
+   --> src\speaker_id.rs:302:19
+    |
+302 |     let outputs = session
+    |                   ^^^^^^^ `session` is a `&` reference, so the data it 
+refers to cannot be borrowed as mutable
+    |
+help: consider changing this to be a mutable reference
+    |
+268 |     session: &mut Session,
+    |               +++
+
+For more information about this error, try `rustc --explain E0596`.
+error: could not compile `cognivox` (lib) due to 1 previous error
+

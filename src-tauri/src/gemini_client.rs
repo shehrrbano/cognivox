@@ -5,6 +5,7 @@ use tokio::time::{Duration, interval, Instant, sleep};
 use crossbeam_channel::Receiver;
 use crate::whisper_client::{WhisperState, transcribe_audio_with_context};
 use crate::audio_capture::{TaggedAudio, AudioSource, AudioState};
+use crate::speaker_id::{SpeakerIdState, extract_embedding, identify_or_register_speaker, save_profiles};
 
 /// Lock a StdMutex, recovering from poison (a spawned task panicked while holding it).
 /// This prevents the audio loop from dying when a child task crashes.
@@ -69,19 +70,14 @@ INPUT: Transcribed text from a meeting segment. It may have a speaker tag like "
 The conversation may be in English, Urdu (Roman Urdu), or a mix of both languages (code-switching).
 
 CRITICAL TASK 1 - SPEAKER DIARIZATION:
-If the input has a speaker tag like "[You]:" or "[Speaker 2]:", keep that tag as-is. Do NOT split into multiple speakers.
-If the input says "[Single mic]:", this is a SINGLE SPEAKER. Output exactly ONE JSON object with speaker set to "Speaker 1". Do NOT split into multiple speakers.
-If the input says "[Single mic, multiple speakers detected]:", carefully analyze the text for CLEAR and OBVIOUS speaker changes. Only split into multiple speakers if there is STRONG evidence such as:
-- Explicit conversational exchange (e.g., a question directly answered by someone else)
-- Clear contradicting viewpoints in direct dialogue form
-- Obvious greeting/farewell patterns indicating turn-taking ("Hello" -> "Hi, how are you?")
-Do NOT split based on:
-- Topic changes within what could be one person's monologue
-- Hedging or self-correction ("I think... well actually...")
-- Pauses, filler words, or "Ok", "Right" by themselves
-- Different sub-topics covered by the same speaker
-When genuinely confident multiple speakers are present, split the transcript and assign "Speaker 1", "Speaker 2", etc.
-When in doubt, keep it as ONE speaker ("Speaker 1").
+If the input starts with "[IDENTIFIED: Speaker N]:" (e.g. "[IDENTIFIED: Speaker 1]:", "[IDENTIFIED: Speaker 2]:"), this speaker has been IDENTIFIED by voice biometric analysis (ECAPA-TDNN). You MUST use EXACTLY that speaker label (e.g. "Speaker 1", "Speaker 2") in your output. Do NOT rename, change, or reassign. Do NOT split into multiple speakers — this is a SINGLE identified voice.
+If the input has a tag like "[You]:" or "[Speaker 2]:" (without IDENTIFIED prefix), keep that tag as-is. Do NOT split into multiple speakers.
+If the input says "[Single mic]:", this is from a single microphone. Analyze the text carefully for speaker changes:
+- If the text contains conversational exchange (questions and answers, back-and-forth dialogue), split into "Speaker 1", "Speaker 2", etc.
+- If one person is clearly talking (monologue, continuous thought), output as "Speaker 1".
+- Look for cues: greeting/response pairs, different viewpoints in dialogue, interruptions, turn-taking patterns.
+- When you detect a speaker change, start a new segment with the appropriate speaker label.
+If the input says "[Multiple speakers]:", there are DEFINITELY multiple speakers detected by audio analysis. You MUST identify and separate different speakers. Assign "Speaker 1", "Speaker 2", etc. to each segment.
 Output an ARRAY of JSON objects, one per speaker segment. If only one speaker, return a single-element array.
 
 CRITICAL TASK 2 - TONE DETECTION:
@@ -700,12 +696,12 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle, alive_flag:
                 
                 let speaker_tag = if has_significant_system && has_significant_mic {
                     // Both sources have significant audio: genuine two-source scenario
-                    if mic_samples_total >= sys_samples_total { "You" } else { "Speaker 2" }
+                    "multi" // Let Gemini identify speakers - don't pre-assign
                 } else if has_significant_system && !has_significant_mic {
                     "Speaker 2" // Only meaningful system audio
                 } else {
                     // Only mic audio (or system audio is just echo/noise)
-                    // Single-source: let Gemini analyze but with conservative single-speaker bias
+                    // Let Gemini analyze for potential multiple speakers
                     "auto"
                 };
                 
@@ -757,6 +753,71 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle, alive_flag:
                 // Spawn processing as async task so main loop keeps collecting audio
                 tokio::spawn(async move {
                     let app = app_clone;
+                    
+                    // === ECAPA-TDNN SPEAKER IDENTIFICATION ===
+                    // Override source-based speaker_tag with voice biometric identification
+                    let speaker_tag = {
+                        let sid_state = app.state::<SpeakerIdState>();
+                        let is_sid_init = *poison_lock(&sid_state.is_initialized);
+                        
+                        if is_sid_init {
+                            let sid_session = poison_lock(&sid_state.session).clone();
+                            let sid_window = poison_lock(&sid_state.hamming_window).clone();
+                            let sid_filterbank = poison_lock(&sid_state.mel_filterbank).clone();
+                            let sid_threshold = *poison_lock(&sid_state.threshold);
+                            
+                            if let (Some(sess), Some(win), Some(fb)) = (sid_session, sid_window, sid_filterbank) {
+                                let audio_for_sid = audio.clone();
+                                
+                                // CPU-heavy: run embedding extraction in blocking thread
+                                match tokio::task::spawn_blocking(move || {
+                                    let mut sess_guard = sess.lock().unwrap();
+                                    extract_embedding(&mut sess_guard, &audio_for_sid, &win, &fb)
+                                }).await {
+                                    Ok(Ok(embedding)) => {
+                                        // Quick: match against known speakers
+                                        let mut speakers = poison_lock(&sid_state.speakers);
+                                        let mut next_num = poison_lock(&sid_state.next_speaker_num);
+                                        let result = identify_or_register_speaker(
+                                            &mut speakers, &embedding, sid_threshold, &mut next_num
+                                        );
+                                        
+                                        println!("[SPEAKER-ID] \u{2713} {} (confidence: {:.3}, new: {})", 
+                                                 result.speaker_label, result.confidence, result.is_new_speaker);
+                                        
+                                        // Persist profiles periodically
+                                        if result.is_new_speaker || speakers.values().map(|p| p.sample_count).sum::<u32>() % 5 == 0 {
+                                            let _ = save_profiles(&speakers);
+                                        }
+                                        drop(speakers);
+                                        drop(next_num);
+                                        
+                                        // Emit speaker identification event to frontend
+                                        let _ = app.emit("cognivox:speaker_identified", serde_json::json!({
+                                            "speaker_id": result.speaker_id,
+                                            "speaker_label": result.speaker_label,
+                                            "confidence": result.confidence,
+                                            "is_new": result.is_new_speaker,
+                                        }));
+                                        
+                                        result.speaker_label
+                                    }
+                                    Ok(Err(e)) => {
+                                        println!("[SPEAKER-ID] Embedding error: {}, using source tag", e);
+                                        speaker_tag
+                                    }
+                                    Err(e) => {
+                                        println!("[SPEAKER-ID] Task error: {}, using source tag", e);
+                                        speaker_tag
+                                    }
+                                }
+                            } else {
+                                speaker_tag // Model components not ready
+                            }
+                        } else {
+                            speaker_tag // Speaker ID not initialized, keep source-based tag
+                        }
+                    };
                     
                     // Get Whisper state
                     let whisper_state = app.state::<WhisperState>();
@@ -857,9 +918,16 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle, alive_flag:
                     }
                     
                     // Include speaker tag in the transcript text sent to Gemini
-                    // When speaker is "auto", single mic mode — bias toward single speaker
-                    let speaker_annotated_transcript = if speaker_tag == "auto" {
+                    // When ECAPA-TDNN has identified the speaker (e.g. "Speaker 1"),
+                    // use a STRICT prefix so Gemini preserves the label exactly.
+                    let is_ecapa_identified = speaker_tag.starts_with("Speaker ") && speaker_tag != "Speaker";
+                    let speaker_annotated_transcript = if is_ecapa_identified {
+                        // ECAPA-TDNN identified this voice — tell Gemini authoritatively
+                        format!("[IDENTIFIED: {}]: {}", speaker_tag, transcription)
+                    } else if speaker_tag == "auto" {
                         format!("[Single mic]: {}", transcription)
+                    } else if speaker_tag == "multi" {
+                        format!("[Multiple speakers]: {}", transcription)
                     } else {
                         format!("[{}]: {}", speaker_tag, transcription)
                     };

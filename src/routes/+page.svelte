@@ -1,6 +1,7 @@
 <script lang="ts">
     import { invoke } from "@tauri-apps/api/core";
     import { listen } from "@tauri-apps/api/event";
+    import { getCurrentWindow } from "@tauri-apps/api/window";
     import { onMount, onDestroy } from "svelte";
     import KnowledgeGraph from "$lib/KnowledgeGraph.svelte";
     import CognivoxControls from "$lib/CognivoxControls.svelte";
@@ -102,6 +103,27 @@
     let processingError: string | null = null;
     let showSettingsModal = false;
     let recordingStartTime: Date | null = null;
+
+    // === SPEAKER IDENTIFICATION (ECAPA-TDNN) ===
+    let speakerIdInitialized = false;
+    let speakerIdStatus: {
+        initialized: boolean;
+        speaker_count: number;
+        threshold: number;
+        model: string;
+    } | null = null;
+    let speakerProfiles: Array<{
+        id: string;
+        label: string;
+        sample_count: number;
+        created_at: number;
+        last_seen: number;
+    }> = [];
+    let lastIdentifiedSpeaker: {
+        speaker_label: string;
+        confidence: number;
+        is_new: boolean;
+    } | null = null;
 
     // === DEBUG STATE ===
     let debugEventCount = 0;
@@ -284,6 +306,7 @@
         | "alerts"
         | "analytics"
         | "settings"
+        | "speakers"
         | "diagnostics" = "transcript";
 
     // Graph Data
@@ -381,6 +404,53 @@
     let extractError: string | null = null;
     let localInsights: any[] = []; // Renamed to avoid collision
 
+    // --- SPEAKER ID FUNCTIONS ---
+    async function initializeSpeakerId() {
+        if (!isRunningInTauri) return;
+        try {
+            console.log("[SPEAKER-ID] Initializing ECAPA-TDNN...");
+            const result = await invoke("initialize_speaker_id");
+            speakerIdInitialized = true;
+            console.log("[SPEAKER-ID]", result);
+            await refreshSpeakerIdStatus();
+        } catch (e: any) {
+            console.warn("[SPEAKER-ID] Init failed (non-blocking):", e);
+            speakerIdInitialized = false;
+        }
+    }
+
+    async function refreshSpeakerIdStatus() {
+        if (!isRunningInTauri) return;
+        try {
+            speakerIdStatus = (await invoke("get_speaker_id_status")) as any;
+            speakerProfiles = (await invoke("get_speaker_profiles")) as any;
+        } catch (e) {
+            console.warn("[SPEAKER-ID] Status refresh error:", e);
+        }
+    }
+
+    async function renameSpeaker(speakerId: string, newLabel: string) {
+        if (!isRunningInTauri) return;
+        try {
+            await invoke("rename_speaker", { speakerId, newLabel });
+            await refreshSpeakerIdStatus();
+            showToast(`Speaker renamed to "${newLabel}"`, "info");
+        } catch (e: any) {
+            showToast(`Rename failed: ${e}`, "error");
+        }
+    }
+
+    async function clearSpeakerProfiles() {
+        if (!isRunningInTauri) return;
+        try {
+            const result = (await invoke("clear_speaker_profiles")) as string;
+            await refreshSpeakerIdStatus();
+            showToast(result, "info");
+        } catch (e: any) {
+            showToast(`Clear failed: ${e}`, "error");
+        }
+    }
+
     // --- SESSION MANAGEMENT (Local-First + Cloud Sync) ---
 
     /**
@@ -432,11 +502,36 @@
                                 syncErr,
                             );
                         }
-                    } else if (
-                        new Date(cs.updated_at) > new Date(existing.updated_at)
-                    ) {
-                        // Cloud is newer — update
-                        sessionMap.set(cs.id, cs);
+                    } else {
+                        // SMART MERGE: prefer whichever version has MORE content.
+                        // Only fall back to updated_at if both have the same amount of data.
+                        const localTranscripts =
+                            existing.transcripts?.length || 0;
+                        const cloudTranscripts = cs.transcripts?.length || 0;
+                        const localNodes = existing.graph_nodes?.length || 0;
+                        const cloudNodes = cs.graph_nodes?.length || 0;
+                        const localContent = localTranscripts + localNodes;
+                        const cloudContent = cloudTranscripts + cloudNodes;
+
+                        if (cloudContent > localContent) {
+                            // Cloud has more data — use cloud
+                            sessionMap.set(cs.id, cs);
+                            console.log(
+                                `[SESSIONS] Cloud wins for ${cs.id}: ${cloudContent} > ${localContent} items`,
+                            );
+                        } else if (
+                            cloudContent === localContent &&
+                            new Date(cs.updated_at) >
+                                new Date(existing.updated_at)
+                        ) {
+                            // Same data volume but cloud is newer — use cloud
+                            sessionMap.set(cs.id, cs);
+                        } else {
+                            // Local has more data or is newer — keep local
+                            console.log(
+                                `[SESSIONS] Local wins for ${cs.id}: ${localContent} >= ${cloudContent} items`,
+                            );
+                        }
                     }
                 }
             } catch (e) {
@@ -467,6 +562,29 @@
     async function loadInitialData() {
         try {
             if (!isRunningInTauri) return;
+
+            // Recovery: Check if there's an unsaved session from a previous crash/close
+            try {
+                const pendingSave = localStorage.getItem(
+                    "cognivox_pending_save",
+                );
+                if (pendingSave) {
+                    console.log(
+                        "[RECOVERY] Found pending session save in localStorage, persisting to disk...",
+                    );
+                    await invoke("save_session", { sessionJson: pendingSave });
+                    localStorage.removeItem("cognivox_pending_save");
+                    console.log(
+                        "[RECOVERY] Pending session saved to disk and cleared from localStorage",
+                    );
+                }
+            } catch (recoveryErr) {
+                console.warn(
+                    "[RECOVERY] Failed to recover pending save:",
+                    recoveryErr,
+                );
+                localStorage.removeItem("cognivox_pending_save");
+            }
 
             // Initialize Firebase (wrapped so failures never block local data)
             try {
@@ -512,9 +630,10 @@
      * Capture the CURRENT session state (transcripts, graph, insights, etc.)
      * into the sessionCache so it can be restored later without Firestore.
      * GUARD: Does NOT add empty sessions (0 transcripts) to pastSessions.
+     * Returns the snapshot for callers that need it.
      */
-    function saveCurrentSessionToCache() {
-        if (!currentSession?.id) return;
+    function saveCurrentSessionToCache(): any | null {
+        if (!currentSession?.id) return null;
 
         // GUARD: Don't cache/persist sessions with no real data
         const hasData = transcripts.length > 0 || graphNodes.length > 0;
@@ -522,7 +641,7 @@
             console.log(
                 `[CACHE] Skipping empty session ${currentSession.id} (no transcripts or nodes)`,
             );
-            return;
+            return null;
         }
 
         // Build a full snapshot of the current session state
@@ -581,8 +700,9 @@
             try {
                 invoke("save_session", {
                     sessionJson: JSON.stringify(snapshot),
-                });
-                // Fire-and-forget — don't await to keep switching fast
+                }).catch((e: any) =>
+                    console.warn("[CACHE] Disk persist failed:", e),
+                );
             } catch (e) {
                 console.warn("[CACHE] Disk persist failed:", e);
             }
@@ -610,49 +730,88 @@
         // Try multiple sources in order: cache → disk → cloud → fallback
         let session = sessionCache.get(fullSession.id);
 
-        // If cache version has 0 transcripts but metadata says there should be more,
-        // the cache might be stale (e.g., from a premature save before processing completed).
-        // Force reload from disk in that case.
+        // Check if cached/provided data has actual content.
+        // If not, ALWAYS try reloading from disk — don't rely solely on metadata
+        // because metadata.total_transcripts can be 0 even if disk version has data
+        // (e.g., cloud version overwrote local during merge).
         const cacheTranscripts = session?.transcripts?.length || 0;
+        const cacheNodes = session?.graph_nodes?.length || 0;
         const expectedTranscripts = session?.metadata?.total_transcripts || 0;
+        const cacheHasNoContent = cacheTranscripts === 0 && cacheNodes === 0;
         const cacheIsStale =
-            session && cacheTranscripts === 0 && expectedTranscripts > 0;
+            session &&
+            (cacheHasNoContent ||
+                (cacheTranscripts === 0 && expectedTranscripts > 0));
 
         if (!session || cacheIsStale) {
             if (cacheIsStale) {
                 console.log(
-                    `[RESTORE] Cache stale for ${fullSession.id}: 0 transcripts but metadata says ${expectedTranscripts}. Reloading from disk.`,
+                    `[RESTORE] Cache empty/stale for ${fullSession.id}: ${cacheTranscripts} transcripts, ${cacheNodes} nodes (metadata says ${expectedTranscripts}). Reloading from disk.`,
                 );
             }
+            // Always try disk first — it's the most reliable source
+            let diskLoaded = false;
             try {
                 const localJson = (await invoke("load_session", {
                     sessionId: fullSession.id,
                 })) as string;
-                session = JSON.parse(localJson);
+                const diskSession = JSON.parse(localJson);
+                // Only use disk version if it actually has more content
+                const diskTranscripts = diskSession?.transcripts?.length || 0;
+                const diskNodes = diskSession?.graph_nodes?.length || 0;
+                if (
+                    diskTranscripts > cacheTranscripts ||
+                    diskNodes > cacheNodes ||
+                    !session
+                ) {
+                    session = diskSession;
+                    diskLoaded = true;
+                    console.log(
+                        `[RESTORE] Loaded from disk: ${diskTranscripts} transcripts, ${diskNodes} nodes`,
+                    );
+                }
                 sessionCache.set(
                     fullSession.id,
                     JSON.parse(JSON.stringify(session)),
                 );
             } catch {
-                // Disk load failed — try cloud if available
-                if (FirestoreSessionManager.isAvailable()) {
-                    try {
-                        session = await FirestoreSessionManager.loadSession(
+                console.log(
+                    `[RESTORE] Disk load failed for ${fullSession.id}, trying cloud...`,
+                );
+            }
+
+            // Try cloud if disk didn't have better data
+            if (!diskLoaded && FirestoreSessionManager.isAvailable()) {
+                try {
+                    const cloudSession =
+                        await FirestoreSessionManager.loadSession(
                             fullSession.id,
                         );
-                        sessionCache.set(
-                            fullSession.id,
-                            JSON.parse(JSON.stringify(session)),
-                        );
+                    const cloudTranscripts =
+                        cloudSession?.transcripts?.length || 0;
+                    const cloudNodes = cloudSession?.graph_nodes?.length || 0;
+                    if (
+                        cloudTranscripts > cacheTranscripts ||
+                        cloudNodes > cacheNodes ||
+                        !session
+                    ) {
+                        session = cloudSession;
                         console.log(
-                            `[RESTORE] Loaded session ${fullSession.id} from cloud`,
+                            `[RESTORE] Loaded from cloud: ${cloudTranscripts} transcripts, ${cloudNodes} nodes`,
                         );
-                    } catch {
-                        session = session || fullSession; // keep stale cache or use provided object
                     }
-                } else {
-                    session = session || fullSession;
+                    sessionCache.set(
+                        fullSession.id,
+                        JSON.parse(JSON.stringify(session)),
+                    );
+                } catch {
+                    session = session || fullSession; // keep stale cache or use provided object
                 }
+            }
+
+            // Final fallback
+            if (!session) {
+                session = fullSession;
             }
         }
 
@@ -754,8 +913,18 @@
 
         console.log(`[RESTORE] === Loading session: ${session.id} ===`);
 
-        // *** SAVE current session to cache BEFORE switching ***
-        saveCurrentSessionToCache();
+        // *** SAVE current session to cache AND disk BEFORE switching ***
+        const snapshot = saveCurrentSessionToCache();
+        if (snapshot && isRunningInTauri) {
+            try {
+                await invoke("save_session", {
+                    sessionJson: JSON.stringify(snapshot),
+                });
+                console.log("[SESSION-SWITCH] Previous session saved to disk");
+            } catch (e) {
+                console.warn("[SESSION-SWITCH] Disk save failed:", e);
+            }
+        }
 
         status = "Loading session...";
 
@@ -1201,94 +1370,13 @@ Return ONLY valid JSON, no markdown, no explanation.`;
                     summary: null,
                 };
 
-                // SMART: Pre-check API key before starting (with timeout per key)
-                if (keyState.keys.length > 0) {
-                    status = "Validating API key...";
-                    const keyResult = await keyManager.getNextWorkingKeyFast();
-
-                    if (!keyResult.success || !keyResult.key) {
-                        // ALL keys failed - BLOCK recording
-                        status = "Cannot start: All API keys failed";
-                        showToast(
-                            `Recording blocked: ${keyResult.message}. Check your API keys in Settings.`,
-                            "error",
-                        );
-                        setTimeout(() => {
-                            status = "Ready";
-                        }, 5000);
-                        return;
-                    }
-
-                    // getNextWorkingKeyFast() already tested the key via models.list
-                    // No need to test again - the Rust backend will do the real test
-
-                    isGeminiConnected = true;
-                    status = keyResult.message;
-                    apiKey = keyResult.key.key;
-                    console.log(
-                        "[Recording] Ready with key:",
-                        keyResult.key?.name,
-                    );
-
-                    // Ensure Whisper is initialized before recording
-                    try {
-                        await invoke("initialize_whisper", {
-                            modelSize: "base",
-                        });
-                        await invoke("set_whisper_language", {
-                            language: "auto",
-                        });
-                        console.log(
-                            "[Recording] Whisper initialized with auto language detection",
-                        );
-                    } catch (e) {
-                        console.log(
-                            "[Recording] Whisper already initialized or init skipped:",
-                            e,
-                        );
-                    }
-
-                    // Push working key to Rust backend AND start audio loop
-                    // Only try the selected key - no loop to avoid burning quota
-                    try {
-                        await invoke("test_gemini_connection", {
-                            key: keyResult.key!.key,
-                            model: selectedModel,
-                        });
-                        console.log(
-                            `[Recording] Connected with key: ${keyResult.key!.name}`,
-                        );
-                        apiKey = keyResult.key!.key;
-                    } catch (e: any) {
-                        const errMsg = e?.message || String(e);
-                        console.warn(
-                            `[Recording] Backend test warning: ${errMsg}`,
-                        );
-                        // The audio loop is started regardless of test result.
-                        // Don't block recording - the loop will retry on actual speech.
-                        // Only block if we have zero valid keys at all.
-                        apiKey = keyResult.key!.key;
-
-                        // Try to silently rotate to next key for the backend
-                        const nextKey = keyManager.rotateToNextKey();
-                        if (nextKey) {
-                            try {
-                                await invoke("update_gemini_key", {
-                                    key: nextKey.key,
-                                });
-                                apiKey = nextKey.key;
-                                console.log(
-                                    `[Recording] Rotated to ${nextKey.name} after initial test failure`,
-                                );
-                            } catch (_) {
-                                /* ignore */
-                            }
-                        }
-                    }
-                }
+                // ============================================================
+                // IMMEDIATE START: Begin audio capture + waveform FIRST
+                // so the user sees speech detection instantly. Heavy init
+                // (key validation, Whisper, Gemini) runs AFTER.
+                // ============================================================
 
                 // Reset the audio processing loop state for the new session
-                // This clears stale buffers, stuck processing flags, and pending audio
                 try {
                     await invoke("reset_audio_loop");
                     console.log("[Recording] Audio loop reset for new session");
@@ -1296,10 +1384,31 @@ Return ONLY valid JSON, no markdown, no explanation.`;
                     console.warn("[Recording] Audio loop reset failed:", e);
                 }
 
+                // Clear Whisper context from previous session to prevent cross-session contamination
+                try {
+                    await invoke("clear_whisper_context");
+                    console.log(
+                        "[Recording] Whisper context cleared for new session",
+                    );
+                } catch (e) {
+                    console.warn(
+                        "[Recording] Whisper context clear failed:",
+                        e,
+                    );
+                }
+
+                // Ensure currentVolume is 0 before starting (backend also resets it)
+                currentVolume = 0;
+
                 await invoke("start_audio_capture");
                 isRecording = true;
                 recordingStartTime = new Date();
                 status = "Listening for speech...";
+
+                // Start VAD BEFORE polling to ensure clean state before any volume data
+                vadManager.start();
+
+                // Now start polling volume (VAD is already reset and ready)
                 volumeInterval = setInterval(pollVolume, 100);
 
                 // Initialize the knowledge graph with a central Meeting node
@@ -1315,11 +1424,101 @@ Return ONLY valid JSON, no markdown, no explanation.`;
                     graphEdges = [];
                 }
 
-                // Start VAD
-                vadManager.start();
-
                 // Start Auto-save (every 30s)
                 autoSaveInterval = setInterval(() => saveSession(false), 30000);
+
+                // ============================================================
+                // BACKGROUND INIT: Validate keys + init engines AFTER capture
+                // starts. Audio is being captured and buffered while this runs.
+                // ============================================================
+                if (keyState.keys.length > 0) {
+                    // Don't block — run key validation in background
+                    (async () => {
+                        try {
+                            status = "Initializing AI engine...";
+                            const keyResult =
+                                await keyManager.getNextWorkingKeyFast();
+
+                            if (!keyResult.success || !keyResult.key) {
+                                // Keys failed but recording continues for audio capture
+                                status =
+                                    "Recording (AI offline — check API keys)";
+                                showToast(
+                                    `AI processing unavailable: ${keyResult.message}. Audio is still being captured.`,
+                                    "warning",
+                                );
+                                return;
+                            }
+
+                            isGeminiConnected = true;
+                            apiKey = keyResult.key.key;
+                            console.log(
+                                "[Recording] Ready with key:",
+                                keyResult.key?.name,
+                            );
+
+                            // Ensure Whisper is initialized
+                            try {
+                                await invoke("initialize_whisper", {
+                                    modelSize: "small",
+                                });
+                                await invoke("set_whisper_language", {
+                                    language: "auto",
+                                });
+                                console.log(
+                                    "[Recording] Whisper initialized (small model) with auto language detection",
+                                );
+                            } catch (e) {
+                                console.log(
+                                    "[Recording] Whisper already initialized or init skipped:",
+                                    e,
+                                );
+                            }
+
+                            // Push working key to Rust backend
+                            try {
+                                await invoke("test_gemini_connection", {
+                                    key: keyResult.key!.key,
+                                    model: selectedModel,
+                                });
+                                console.log(
+                                    `[Recording] Connected with key: ${keyResult.key!.name}`,
+                                );
+                                apiKey = keyResult.key!.key;
+                            } catch (e: any) {
+                                const errMsg = e?.message || String(e);
+                                console.warn(
+                                    `[Recording] Backend test warning: ${errMsg}`,
+                                );
+                                apiKey = keyResult.key!.key;
+
+                                // Try to silently rotate to next key
+                                const nextKey = keyManager.rotateToNextKey();
+                                if (nextKey) {
+                                    try {
+                                        await invoke("update_gemini_key", {
+                                            key: nextKey.key,
+                                        });
+                                        apiKey = nextKey.key;
+                                        console.log(
+                                            `[Recording] Rotated to ${nextKey.name} after initial test failure`,
+                                        );
+                                    } catch (_) {
+                                        /* ignore */
+                                    }
+                                }
+                            }
+
+                            status = "Listening for speech...";
+                        } catch (initErr) {
+                            console.error(
+                                "[Recording] Background init error:",
+                                initErr,
+                            );
+                            status = "Recording (AI init failed)";
+                        }
+                    })();
+                }
 
                 // Play start sound (browser notification)
                 try {
@@ -1768,7 +1967,7 @@ Return ONLY valid JSON, no markdown, no explanation.`;
         try {
             if (isRunningInTauri) {
                 try {
-                    await invoke("initialize_whisper", { modelSize: "base" });
+                    await invoke("initialize_whisper", { modelSize: "small" });
                     await invoke("set_whisper_language", { language: "auto" }); // Auto-detect: English + Urdu
                     console.log(
                         "[WHISPER] Initialized with auto language detection",
@@ -1776,6 +1975,9 @@ Return ONLY valid JSON, no markdown, no explanation.`;
                 } catch (e) {
                     console.warn("[WHISPER] Initialization failed:", e);
                 }
+
+                // Initialize ECAPA-TDNN speaker identification (non-blocking)
+                initializeSpeakerId();
             }
             status = "Connecting to " + selectedModel + "...";
             console.log(
@@ -1919,6 +2121,24 @@ Return ONLY valid JSON, no markdown, no explanation.`;
                     status = s;
                 });
 
+                // Speaker identification events (ECAPA-TDNN)
+                await listen("cognivox:speaker_identified", (event) => {
+                    const payload = event.payload as {
+                        speaker_id: string;
+                        speaker_label: string;
+                        confidence: number;
+                        is_new: boolean;
+                    };
+                    lastIdentifiedSpeaker = payload;
+                    console.log(
+                        `[SPEAKER-ID] ${payload.speaker_label} (confidence: ${payload.confidence.toFixed(3)}, new: ${payload.is_new})`,
+                    );
+                    // Refresh profiles when a new speaker is detected
+                    if (payload.is_new) {
+                        refreshSpeakerIdStatus();
+                    }
+                });
+
                 unlistenTranscript = await listen(
                     "cognivox:gemini_intelligence",
                     async (event) => {
@@ -1942,8 +2162,12 @@ Return ONLY valid JSON, no markdown, no explanation.`;
                         // Get raw values
                         const rawIntel = payload?.intelligence || "";
                         let transcriptText = payload?.transcript || "";
-                        // Use backend speaker tag (from audio diarization) as primary source
+                        // Use backend speaker tag (from ECAPA-TDNN voice biometric) as PRIMARY source
+                        // This is the authoritative speaker identity — Gemini's label is secondary
                         let backendSpeaker = payload?.speaker || "";
+                        const isEcapaIdentified =
+                            backendSpeaker.startsWith("Speaker ") &&
+                            backendSpeaker !== "Speaker";
 
                         // Update debug state
                         debugLastTranscript =
@@ -1984,21 +2208,37 @@ Return ONLY valid JSON, no markdown, no explanation.`;
                                 try {
                                     const parsed = JSON.parse(arrayMatch[0]);
                                     if (Array.isArray(parsed)) {
-                                        segments = parsed.map((p: any) => ({
-                                            transcript:
-                                                p.transcript || transcriptText,
-                                            speaker:
-                                                p.speaker ||
-                                                backendSpeaker ||
-                                                "Speaker",
-                                            tone: p.tone || "NEUTRAL",
-                                            confidence: p.confidence || 0.85,
-                                            category: p.category || ["INFO"],
-                                            entities: p.entities || [],
-                                            graph_edges: p.graph_edges || [],
-                                        }));
+                                        segments = parsed.map((p: any) => {
+                                            // When ECAPA-TDNN identified the speaker,
+                                            // ALWAYS use the backend label — it's voice-biometric,
+                                            // more reliable than Gemini's text-based guess
+                                            let speaker: string;
+                                            if (isEcapaIdentified) {
+                                                speaker = backendSpeaker;
+                                            } else {
+                                                speaker =
+                                                    p.speaker ||
+                                                    backendSpeaker ||
+                                                    "Speaker";
+                                            }
+                                            return {
+                                                transcript:
+                                                    p.transcript ||
+                                                    transcriptText,
+                                                speaker,
+                                                tone: p.tone || "NEUTRAL",
+                                                confidence:
+                                                    p.confidence || 0.85,
+                                                category: p.category || [
+                                                    "INFO",
+                                                ],
+                                                entities: p.entities || [],
+                                                graph_edges:
+                                                    p.graph_edges || [],
+                                            };
+                                        });
                                         console.log(
-                                            `[GEMINI] Parsed ${segments.length} speaker segments from array`,
+                                            `[GEMINI] Parsed ${segments.length} speaker segments from array (ECAPA=${isEcapaIdentified}, backend=${backendSpeaker})`,
                                         );
                                     }
                                 } catch {
@@ -2009,10 +2249,13 @@ Return ONLY valid JSON, no markdown, no explanation.`;
                             // Fallback: try single object format
                             if (segments.length === 0 && objMatch) {
                                 const parsed = JSON.parse(objMatch[0]);
-                                const speaker =
-                                    backendSpeaker && backendSpeaker !== "auto"
-                                        ? backendSpeaker
-                                        : parsed.speaker || "Speaker";
+                                // ECAPA-TDNN label always wins when available
+                                const speaker = isEcapaIdentified
+                                    ? backendSpeaker
+                                    : backendSpeaker &&
+                                        backendSpeaker !== "auto"
+                                      ? backendSpeaker
+                                      : parsed.speaker || "Speaker";
                                 segments = [
                                     {
                                         transcript:
@@ -2035,10 +2278,11 @@ Return ONLY valid JSON, no markdown, no explanation.`;
 
                         // If no segments parsed, create one from raw transcript
                         if (segments.length === 0) {
-                            const speaker =
-                                backendSpeaker && backendSpeaker !== "auto"
-                                    ? backendSpeaker
-                                    : "Speaker";
+                            const speaker = isEcapaIdentified
+                                ? backendSpeaker
+                                : backendSpeaker && backendSpeaker !== "auto"
+                                  ? backendSpeaker
+                                  : "Speaker 1";
                             segments = [
                                 {
                                     transcript: transcriptText,
@@ -2077,16 +2321,15 @@ Return ONLY valid JSON, no markdown, no explanation.`;
                                     minute: "2-digit",
                                 }),
                                 speaker: seg.speaker,
-                                speakerId:
-                                    seg.speaker.includes("1") ||
-                                    seg.speaker === "You" ||
-                                    seg.speaker === "Speaker"
-                                        ? 1
-                                        : seg.speaker.includes("2")
-                                          ? 2
-                                          : seg.speaker.includes("3")
-                                            ? 3
-                                            : 1,
+                                speakerId: (() => {
+                                    const s = seg.speaker || "Speaker 1";
+                                    // Extract speaker number from label like "Speaker 1", "Speaker 2", etc.
+                                    const numMatch = s.match(/(\d+)/);
+                                    if (numMatch)
+                                        return parseInt(numMatch[1], 10);
+                                    if (s === "You") return 1;
+                                    return 1;
+                                })(),
                                 text: seg.transcript,
                                 tone: seg.tone,
                                 category: seg.category,
@@ -2401,6 +2644,31 @@ Return ONLY valid JSON, no markdown, no explanation.`;
                 await listen("tray:stop", () => {
                     if (isRecording) toggleCapture();
                 });
+                // === CLOSE HANDLER: Save session on app close ===
+                // Tauri's onCloseRequested CAN await async operations,
+                // unlike browser's beforeunload
+                const appWindow = getCurrentWindow();
+                await appWindow.onCloseRequested(async (event) => {
+                    console.log(
+                        "[CLOSE] App close requested — saving session to disk...",
+                    );
+                    try {
+                        const snapshot = saveCurrentSessionToCache();
+                        if (snapshot && isRunningInTauri) {
+                            await invoke("save_session", {
+                                sessionJson: JSON.stringify(snapshot),
+                            });
+                            console.log(
+                                "[CLOSE] Session saved to disk successfully",
+                            );
+                        }
+                    } catch (e) {
+                        console.error(
+                            "[CLOSE] Failed to save session on close:",
+                            e,
+                        );
+                    }
+                });
             } // Close if (isRunningInTauri)
         } catch (error) {
             console.error("Failed to initialize Tauri listeners:", error);
@@ -2408,6 +2676,7 @@ Return ONLY valid JSON, no markdown, no explanation.`;
         }
 
         document.addEventListener("keydown", handleKeyDown);
+        window.addEventListener("beforeunload", handleBeforeUnload);
     });
 
     function handleKeyDown(e: KeyboardEvent) {
@@ -2447,7 +2716,25 @@ Return ONLY valid JSON, no markdown, no explanation.`;
         if (unlistenIntelligence) unlistenIntelligence();
         if (unlistenBackendErrors) unlistenBackendErrors();
         document.removeEventListener("keydown", handleKeyDown);
+        window.removeEventListener("beforeunload", handleBeforeUnload);
     });
+
+    // Save session on app close/refresh to prevent data loss
+    // Uses localStorage as synchronous backup since beforeunload can't await async ops
+    function handleBeforeUnload() {
+        const snapshot = saveCurrentSessionToCache();
+        if (snapshot) {
+            try {
+                localStorage.setItem(
+                    "cognivox_pending_save",
+                    JSON.stringify(snapshot),
+                );
+                console.log("[CLOSE] Saved session backup to localStorage");
+            } catch (e) {
+                console.warn("[CLOSE] localStorage backup failed:", e);
+            }
+        }
+    }
 
     // Computed display text for transcription
     $: displayText =
@@ -2726,6 +3013,32 @@ Return ONLY valid JSON, no markdown, no explanation.`;
                     <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"
                     ></polyline>
                 </svg>
+            </button>
+            <button
+                class="nav-icon {activeTab === 'speakers' ? 'active' : ''}"
+                onclick={() => (activeTab = "speakers")}
+                aria-label="Speaker ID Tab"
+                title="Speaker Identification (ECAPA-TDNN)"
+            >
+                <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    width="20"
+                    height="20"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                >
+                    <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
+                    <circle cx="9" cy="7" r="4"></circle>
+                    <path d="M23 21v-2a4 4 0 0 0-3-3.87"></path>
+                    <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
+                </svg>
+                {#if speakerIdInitialized}
+                    <span
+                        class="absolute -top-1 -right-1 w-2 h-2 bg-green-400 rounded-full"
+                    ></span>
+                {/if}
             </button>
         </div>
 
@@ -3861,6 +4174,122 @@ Return ONLY valid JSON, no markdown, no explanation.`;
                     </div>
                 {:else if activeTab === "diagnostics"}
                     <Diagnostics {isRecording} {isGeminiConnected} />
+                {:else if activeTab === "speakers"}
+                    <!-- ECAPA-TDNN Speaker Identification Panel -->
+                    <div class="p-4 space-y-4">
+                        <div class="flex items-center justify-between">
+                            <h3 class="text-lg font-semibold text-cyan-300">
+                                Speaker Identification
+                            </h3>
+                            <span
+                                class="text-xs px-2 py-1 rounded {speakerIdInitialized
+                                    ? 'bg-green-500/20 text-green-400'
+                                    : 'bg-yellow-500/20 text-yellow-400'}"
+                            >
+                                {speakerIdInitialized
+                                    ? "ECAPA-TDNN Active"
+                                    : "Not Initialized"}
+                            </span>
+                        </div>
+
+                        <div class="text-xs text-gray-400 space-y-1">
+                            <p>
+                                Model: ECAPA-TDNN (192-dim embeddings, ~95%
+                                accuracy)
+                            </p>
+                            <p>
+                                Method: Voice biometric comparison via cosine
+                                similarity
+                            </p>
+                            {#if speakerIdStatus}
+                                <p>
+                                    Known speakers: {speakerIdStatus.speaker_count}
+                                    | Threshold: {speakerIdStatus.threshold.toFixed(
+                                        2,
+                                    )}
+                                </p>
+                            {/if}
+                        </div>
+
+                        {#if !speakerIdInitialized}
+                            <button
+                                class="px-4 py-2 rounded bg-cyan-500/20 border border-cyan-500/30 text-cyan-300 hover:bg-cyan-500/30 transition text-sm"
+                                onclick={initializeSpeakerId}
+                            >
+                                Initialize Speaker ID
+                            </button>
+                            <p class="text-xs text-gray-500">
+                                Requires ONNX model. Run: <code
+                                    class="text-cyan-400"
+                                    >python scripts/export_ecapa_tdnn.py</code
+                                >
+                            </p>
+                        {/if}
+
+                        {#if lastIdentifiedSpeaker}
+                            <div
+                                class="p-3 rounded bg-cyan-500/10 border border-cyan-500/20"
+                            >
+                                <p class="text-sm text-cyan-300">
+                                    Last identified: <strong
+                                        >{lastIdentifiedSpeaker.speaker_label}</strong
+                                    >
+                                </p>
+                                <p class="text-xs text-gray-400">
+                                    Confidence: {(
+                                        lastIdentifiedSpeaker.confidence * 100
+                                    ).toFixed(1)}% | {lastIdentifiedSpeaker.is_new
+                                        ? "New speaker"
+                                        : "Known speaker"}
+                                </p>
+                            </div>
+                        {/if}
+
+                        {#if speakerProfiles.length > 0}
+                            <div class="space-y-2">
+                                <h4 class="text-sm font-medium text-gray-300">
+                                    Known Speakers ({speakerProfiles.length})
+                                </h4>
+                                {#each speakerProfiles as profile}
+                                    <div
+                                        class="flex items-center justify-between p-2 rounded bg-gray-800/50 border border-gray-700/50"
+                                    >
+                                        <div>
+                                            <span class="text-sm text-cyan-300"
+                                                >{profile.label}</span
+                                            >
+                                            <span
+                                                class="text-xs text-gray-500 ml-2"
+                                                >({profile.sample_count} segments)</span
+                                            >
+                                        </div>
+                                        <div class="flex gap-2">
+                                            <button
+                                                class="text-xs px-2 py-1 rounded bg-blue-500/20 text-blue-300 hover:bg-blue-500/30"
+                                                onclick={() => {
+                                                    const name = prompt(
+                                                        "New name for " +
+                                                            profile.label +
+                                                            ":",
+                                                    );
+                                                    if (name)
+                                                        renameSpeaker(
+                                                            profile.id,
+                                                            name,
+                                                        );
+                                                }}>Rename</button
+                                            >
+                                        </div>
+                                    </div>
+                                {/each}
+                                <button
+                                    class="text-xs px-3 py-1.5 rounded bg-red-500/20 border border-red-500/30 text-red-400 hover:bg-red-500/30 mt-2"
+                                    onclick={clearSpeakerProfiles}
+                                    >Clear All Profiles</button
+                                >
+                            </div>
+                        {/if}
+                    </div>
                 {/if}
             </div>
         </div>

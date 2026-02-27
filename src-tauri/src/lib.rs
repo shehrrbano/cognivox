@@ -4,9 +4,11 @@ mod google_auth;
 mod whisper_client;
 mod processing_engine;
 mod session_manager;
+mod speaker_id;
 use audio_capture::{AudioState, TaggedAudio};
 use gemini_client::GeminiState;
 use whisper_client::WhisperState;
+use speaker_id::SpeakerIdState;
 use std::sync::Mutex;
 use crossbeam_channel::unbounded;
 use tauri::{
@@ -38,6 +40,7 @@ pub fn run() {
     };
 
     let whisper_state = WhisperState::default();
+    let speaker_id_state = SpeakerIdState::default();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -106,6 +109,7 @@ pub fn run() {
         .manage(audio_state)
         .manage(gemini_state)
         .manage(whisper_state)
+        .manage(speaker_id_state)
         .invoke_handler(tauri::generate_handler![
             greet, 
             audio_capture::list_audio_devices,
@@ -136,7 +140,15 @@ pub fn run() {
             session_manager::export_session,
             session_manager::generate_session_summary,
             session_manager::get_session_summary,
-            google_auth::start_google_oauth
+            google_auth::start_google_oauth,
+            speaker_id::initialize_speaker_id,
+            speaker_id::identify_speaker_from_audio,
+            speaker_id::get_speaker_profiles,
+            speaker_id::rename_speaker,
+            speaker_id::delete_speaker_profile,
+            speaker_id::set_speaker_threshold,
+            speaker_id::clear_speaker_profiles,
+            speaker_id::get_speaker_id_status
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

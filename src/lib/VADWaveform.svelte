@@ -15,23 +15,33 @@
     // Volume threshold for speech (calibrates over time)
     const SPEECH_THRESHOLD = 0.015;
 
-    // Update bars based on volume
-    $: if (isRecording) {
-        // Determine if this is speech
-        const isSpeech = currentVolume > SPEECH_THRESHOLD;
+    // Waveform update interval (replaces $: reactive to avoid Svelte value-equality stalling)
+    let waveformInterval: ReturnType<typeof setInterval> | null = null;
+    let wasRecording = false;
 
-        // Add to history with slight jitter for natural look
-        const jitteredLevel = currentVolume * (0.85 + Math.random() * 0.3);
-        barHistory = [
-            ...barHistory.slice(-BAR_COUNT + 1),
-            {
-                level: jitteredLevel,
-                isSpeech,
-            },
-        ];
-
-        // Process volume through VAD
-        vadManager.processVolume(currentVolume);
+    // React to isRecording changes: start/stop waveform interval and reset state
+    $: {
+        if (isRecording && !wasRecording) {
+            // Recording just started — reset waveform state and start interval
+            barHistory = [];
+            if (waveformInterval) clearInterval(waveformInterval);
+            waveformInterval = setInterval(() => {
+                const isSpeech = currentVolume > SPEECH_THRESHOLD;
+                const jitteredLevel =
+                    currentVolume * (0.85 + Math.random() * 0.3);
+                barHistory = [
+                    ...barHistory.slice(-BAR_COUNT + 1),
+                    { level: jitteredLevel, isSpeech },
+                ];
+            }, 80);
+            wasRecording = true;
+        } else if (!isRecording && wasRecording) {
+            if (waveformInterval) {
+                clearInterval(waveformInterval);
+                waveformInterval = null;
+            }
+            wasRecording = false;
+        }
     }
 
     onMount(() => {
@@ -42,6 +52,10 @@
 
     onDestroy(() => {
         if (unsubscribe) unsubscribe();
+        if (waveformInterval) {
+            clearInterval(waveformInterval);
+            waveformInterval = null;
+        }
     });
 
     function getBarColor(isSpeech: boolean, level: number): string {

@@ -44,14 +44,34 @@
     // Animation
     let lastUpdateTime = 0;
 
+    // Waveform update interval (replaces $: reactive to avoid Svelte value-equality stalling)
+    let waveformInterval: ReturnType<typeof setInterval> | null = null;
+    let wasRecording = false;
+
+    // React to isRecording changes: start/stop waveform interval and reset state
+    $: {
+        if (isRecording && !wasRecording) {
+            // Recording just started — reset waveform state and start interval
+            barHistory = [];
+            lastUpdateTime = 0;
+            if (waveformInterval) clearInterval(waveformInterval);
+            waveformInterval = setInterval(() => {
+                updateWaveform(currentVolume);
+            }, 80);
+            wasRecording = true;
+        } else if (!isRecording && wasRecording) {
+            // Recording just stopped — clean up interval
+            if (waveformInterval) {
+                clearInterval(waveformInterval);
+                waveformInterval = null;
+            }
+            wasRecording = false;
+        }
+    }
+
     // Recent transcript for live display
     $: liveTranscript =
         transcripts.length > 0 ? transcripts[transcripts.length - 1] : null;
-
-    // Update waveform with volume
-    $: if (isRecording) {
-        updateWaveform(currentVolume);
-    }
 
     function updateWaveform(vol: number) {
         const now = Date.now();
@@ -122,6 +142,10 @@
 
     onDestroy(() => {
         if (unsubscribe) unsubscribe();
+        if (waveformInterval) {
+            clearInterval(waveformInterval);
+            waveformInterval = null;
+        }
     });
 </script>
 

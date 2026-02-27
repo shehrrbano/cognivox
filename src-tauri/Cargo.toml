@@ -42,3 +42,6 @@ open = "5"
 dotenvy = "0.15"
 whisper-rs = { git = "https://github.com/tazz4843/whisper-rs", branch = "master" }
 hf-hub = { version = "0.3", features = ["tokio"] }
+ort = "2.0.0-rc.11"
+ndarray = "0.16"
+rustfft = "6.2"

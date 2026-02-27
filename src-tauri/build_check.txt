@@ -1,0 +1,81 @@
+﻿cargo :     Blocking waiting for file lock on build directory
+At line:1 char:56
++ ... s\USER\OneDrive\Desktop\AIproject\src-tauri; cargo check *>&1 | Out-S ...
++                                                  ~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Blocking wa...build directory 
+   :String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+    Checking cognivox v0.1.0 
+(C:\Users\USER\OneDrive\Desktop\AIproject\src-tauri)
+error[E0433]: failed to resolve: could not find `GraphOptimizationLevel` in 
+`ort`
+   --> src\speaker_id.rs:611:43
+    |
+611 |             .with_optimization_level(ort::GraphOptimizationLevel::Level3)
+    |                                           ^^^^^^^^^^^^^^^^^^^^^^ could 
+not find `GraphOptimizationLevel` in `ort`
+    |
+help: consider importing this enum
+    |
+ 18 + use ort::session::builder::GraphOptimizationLevel;
+    |
+help: if you import `GraphOptimizationLevel`, refer to it directly
+    |
+611 -             .with_optimization_level(ort::GraphOptimizationLevel::Level3)
+611 +             .with_optimization_level(GraphOptimizationLevel::Level3)
+    |
+
+error[E0277]: the trait bound `SessionInputValue<'_>: 
+From<ArrayBase<ViewRepr<&f32>, Dim<[usize; 3]>>>` is not satisfied
+   --> src\speaker_id.rs:297:24
+    |
+297 |     let input_values = ort::inputs!["feats" => input.view()]
+    |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait 
+`From<ArrayBase<ViewRepr<&f32>, Dim<[usize; 3]>>>` is not implemented for 
+`SessionInputValue<'_>`
+    |
+    = help: the following other types implement trait `From<T>`:
+              `SessionInputValue<'_>` implements `From<&ort::value::Value<T>>`
+              `SessionInputValue<'_>` implements `From<ValueRef<'_, T>>`
+              `SessionInputValue<'_>` implements `From<ValueRefMut<'_, T>>`
+              `SessionInputValue<'_>` implements `From<ort::value::Value<T>>`
+    = note: this error originates in the macro `ort::inputs` (in Nightly 
+builds, run with -Z macro-backtrace for more info)
+
+error[E0599]: no method named `map_err` found for struct `Vec<(Cow<'_, str>, 
+SessionInputValue<'_>)>` in the current scope
+   --> src\speaker_id.rs:298:10
+    |
+297 |       let input_values = ort::inputs!["feats" => input.view()]
+    |  ________________________-
+298 | |         .map_err(|e| format!("ONNX input error: {}", e))?;
+    | |_________-^^^^^^^
+    |
+help: there is a method `sink_map_err` with a similar name
+    |
+298 |         .sink_map_err(|e| format!("ONNX input error: {}", e))?;
+    |          +++++
+
+error[E0599]: no method named `iter` found for tuple `(&ort::tensor::Shape, 
+&[f32])` in the current scope
+   --> src\speaker_id.rs:309:52
+    |
+309 |     let raw_embedding: Vec<f32> = 
+embedding_tensor.iter().copied().collect();
+    |                                                    ^^^^ method not found 
+in `(&ort::tensor::Shape, &[f32])`
+    |
+help: some of the expressions' fields have a method of the same name
+    |
+309 |     let raw_embedding: Vec<f32> = 
+embedding_tensor.0.iter().copied().collect();
+    |                                                    ++
+309 |     let raw_embedding: Vec<f32> = 
+embedding_tensor.1.iter().copied().collect();
+    |                                                    ++
+
+Some errors have detailed explanations: E0277, E0433, E0599.
+For more information about an error, try `rustc --explain E0277`.
+error: could not compile `cognivox` (lib) due to 4 previous errors
+

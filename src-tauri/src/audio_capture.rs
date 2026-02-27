@@ -48,7 +48,7 @@ impl Default for AudioState {
 const TARGET_SAMPLE_RATE: u32 = 16000;
 const MICRO_CHUNK_SAMPLES: usize = 160;
 const SILENCE_THRESHOLD: f32 = 0.0001;  // Very low - let processing loop handle speech detection
-const SILENCE_SKIP_CHUNKS: usize = 500;  // ~5 seconds before skipping (was 30 = 300ms)
+const SILENCE_SKIP_CHUNKS: usize = 50;  // ~0.5 seconds before skipping (instant response)
 
 #[tauri::command]
 pub fn list_audio_devices() -> Result<Vec<String>, String> {
@@ -117,11 +117,31 @@ fn to_mono(data: &[f32], channels: u16) -> Vec<f32> {
         .collect()
 }
 
-fn decimate(samples: Vec<f32>, from_rate: u32, to_rate: u32) -> Vec<f32> {
-    if from_rate == to_rate { return samples; }
-    let factor = from_rate / to_rate;
-    if factor == 0 { return samples; }
-    samples.into_iter().step_by(factor as usize).collect()
+/// Resample audio using linear interpolation (anti-aliased).
+/// The old `step_by` decimation dropped samples without filtering,
+/// causing severe aliasing that corrupted speech and made Whisper
+/// produce wrong words. Linear interpolation is still very fast
+/// (single pass, no FFT) but eliminates aliasing artifacts.
+fn resample_linear(samples: Vec<f32>, from_rate: u32, to_rate: u32) -> Vec<f32> {
+    if from_rate == to_rate || samples.is_empty() { return samples; }
+    let ratio = from_rate as f64 / to_rate as f64;
+    let out_len = ((samples.len() as f64) / ratio).ceil() as usize;
+    if out_len == 0 { return vec![0.0]; }
+    let mut output = Vec::with_capacity(out_len);
+    let last_idx = (samples.len() - 1) as f64;
+    for i in 0..out_len {
+        let src_pos = (i as f64) * ratio;
+        let src_pos = src_pos.min(last_idx); // clamp
+        let idx = src_pos as usize;
+        let frac = (src_pos - idx as f64) as f32;
+        let sample = if idx + 1 < samples.len() {
+            samples[idx] * (1.0 - frac) + samples[idx + 1] * frac
+        } else {
+            samples[idx]
+        };
+        output.push(sample);
+    }
+    output
 }
 
 #[tauri::command]
@@ -129,6 +149,11 @@ pub fn start_audio_capture(state: tauri::State<'_, AudioState>) -> Result<String
     let mut is_rec = state.is_recording.lock().map_err(|e| e.to_string())?;
     if *is_rec {
         return Ok("Already recording".to_string());
+    }
+
+    // Reset volume to 0 to ensure fresh start (prevents stale values from previous session)
+    if let Ok(mut v) = state.current_volume.lock() {
+        *v = 0.0;
     }
 
     let (stop_tx, stop_rx) = unbounded::<()>();
@@ -169,7 +194,7 @@ pub fn start_audio_capture(state: tauri::State<'_, AudioState>) -> Result<String
                             if data.is_empty() { return; }
                             
                             let mono = to_mono(data, channels);
-                            let resampled = decimate(mono, sample_rate, TARGET_SAMPLE_RATE);
+                            let resampled = resample_linear(mono, sample_rate, TARGET_SAMPLE_RATE);
                             
                             let rms = calculate_rms(&resampled);
                             if let Ok(mut v) = vol.lock() { *v = rms; }
@@ -244,7 +269,7 @@ pub fn start_audio_capture(state: tauri::State<'_, AudioState>) -> Result<String
                             if data.is_empty() { return; }
                             
                             let mono = to_mono(data, channels);
-                            let resampled = decimate(mono, sample_rate, TARGET_SAMPLE_RATE);
+                            let resampled = resample_linear(mono, sample_rate, TARGET_SAMPLE_RATE);
                             
                             let rms = calculate_rms(&resampled);
                             if let Ok(mut v) = vol.lock() { *v = rms; }
@@ -318,7 +343,7 @@ pub fn start_audio_capture(state: tauri::State<'_, AudioState>) -> Result<String
                                 if data.is_empty() { return; }
                                 
                                 let mono = to_mono(data, channels);
-                                let resampled = decimate(mono, sample_rate, TARGET_SAMPLE_RATE);
+                                let resampled = resample_linear(mono, sample_rate, TARGET_SAMPLE_RATE);
                                 
                                 let rms = calculate_rms(&resampled);
                                 if let Ok(mut v) = vol.lock() { *v = rms; }
@@ -398,6 +423,11 @@ pub fn stop_audio_capture(state: tauri::State<'_, AudioState>) -> Result<String,
     let mut control = state.stream_control.lock().map_err(|e| e.to_string())?;
     if let Some(tx) = control.take() {
         let _ = tx.send(());
+    }
+
+    // Reset volume to 0 so stale values don't persist between sessions
+    if let Ok(mut v) = state.current_volume.lock() {
+        *v = 0.0;
     }
 
     *is_rec = false;
