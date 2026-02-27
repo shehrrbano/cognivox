@@ -41,11 +41,12 @@ const LOG_EPSILON: f32 = 1e-6;
 const EMBEDDING_DIM: usize = 192;
 
 // Speaker identification thresholds
-// 0.55 is a good balance: high enough to separate different speakers, 
-// low enough to still match the same speaker across segments.
+// 0.50 works well with 2-second windowed diarization.
 // ECAPA-TDNN cosine similarity for same speaker is typically 0.6-0.9,
 // and for different speakers is typically 0.0-0.4.
-const DEFAULT_SIMILARITY_THRESHOLD: f32 = 0.55;
+// Slightly lower than 0.55 since short 2s windows produce slightly
+// less stable embeddings than longer utterances.
+const DEFAULT_SIMILARITY_THRESHOLD: f32 = 0.50;
 const MIN_AUDIO_SAMPLES: usize = 16000; // Minimum 1.0s at 16kHz for reliable embeddings
 const MAX_SPEAKERS: usize = 50;
 const MAX_EMBEDDING_UPDATES: u32 = 10; // Cap running-average updates to prevent profile drift
