@@ -431,39 +431,63 @@ pub fn generate_optimistic(
     Some(prediction)
 }
 
-/// Simple keyword detection for instant category hints
+/// Simple keyword detection for instant category hints (English + Roman Urdu)
 fn detect_category_keywords(text: &str) -> Option<String> {
     let text_lower = text.to_lowercase();
     
-    // Task keywords
+    // Task keywords (English + Roman Urdu)
     if text_lower.contains("todo") || text_lower.contains("need to") || 
        text_lower.contains("should") || text_lower.contains("must") ||
-       text_lower.contains("karna hai") || text_lower.contains("kar do") {
+       text_lower.contains("karna hai") || text_lower.contains("kar do") ||
+       text_lower.contains("karna padega") || text_lower.contains("karo") ||
+       text_lower.contains("kar dena") || text_lower.contains("ye kaam") {
         return Some("TASK".to_string());
     }
     
-    // Decision keywords
+    // Decision keywords (English + Roman Urdu)
     if text_lower.contains("decided") || text_lower.contains("let's go with") ||
-       text_lower.contains("final") || text_lower.contains("faisla") {
+       text_lower.contains("final") || text_lower.contains("faisla") ||
+       text_lower.contains("tay kiya") || text_lower.contains("pakka") ||
+       text_lower.contains("confirm") {
         return Some("DECISION".to_string());
     }
     
-    // Deadline keywords
+    // Deadline keywords (English + Roman Urdu)
     if text_lower.contains("by tomorrow") || text_lower.contains("deadline") ||
-       text_lower.contains("due") || text_lower.contains("kal tak") {
+       text_lower.contains("due") || text_lower.contains("kal tak") ||
+       text_lower.contains("is hafte") || text_lower.contains("waqt") ||
+       text_lower.contains("time limit") {
         return Some("DEADLINE".to_string());
     }
     
-    // Risk keywords
+    // Risk keywords (English + Roman Urdu)
     if text_lower.contains("risk") || text_lower.contains("problem") ||
-       text_lower.contains("issue") || text_lower.contains("masla") {
+       text_lower.contains("issue") || text_lower.contains("masla") ||
+       text_lower.contains("mushkil") || text_lower.contains("khatarnak") ||
+       text_lower.contains("dikkat") || text_lower.contains("pareshani") {
         return Some("RISK".to_string());
     }
     
-    // Urgency keywords
+    // Urgency keywords (English + Roman Urdu)
     if text_lower.contains("urgent") || text_lower.contains("asap") ||
-       text_lower.contains("jaldi") || text_lower.contains("abhi") {
+       text_lower.contains("jaldi") || text_lower.contains("abhi") ||
+       text_lower.contains("foran") || text_lower.contains("turant") ||
+       text_lower.contains("jitni jaldi") {
         return Some("URGENCY".to_string());
+    }
+    
+    // Agreement keywords (English + Roman Urdu)
+    if text_lower.contains("agreed") || text_lower.contains("i agree") ||
+       text_lower.contains("bilkul") || text_lower.contains("theek hai") ||
+       text_lower.contains("haan") || text_lower.contains("sahi kaha") {
+        return Some("AGREEMENT".to_string());
+    }
+    
+    // Disagreement keywords (English + Roman Urdu)
+    if text_lower.contains("disagree") || text_lower.contains("i don't think") ||
+       text_lower.contains("nahi") || text_lower.contains("galat") ||
+       text_lower.contains("ye sahi nahi") || text_lower.contains("mujhe nahi lagta") {
+        return Some("DISAGREEMENT".to_string());
     }
     
     None

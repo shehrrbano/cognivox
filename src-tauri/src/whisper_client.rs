@@ -168,8 +168,9 @@ pub async fn transcribe_audio_with_context(
         params.set_logprob_thold(-0.8);       // Reject very low-confidence tokens (was -1.0)
         params.set_suppress_blank(true);
         
-        // Richer prompt for better word accuracy
-        let base_prompt = "Transcribe the following speech exactly as spoken. Use correct English words and proper nouns. Do not hallucinate or invent words.";
+        // Richer prompt for better word accuracy, with bilingual English/Urdu support
+        // Whisper may output Urdu in Arabic script — Gemini will convert to Roman Urdu later
+        let base_prompt = "Transcribe the following speech exactly as spoken. The speech may be in English, Urdu, or a mix of both (code-switching). For English parts use correct English words and proper nouns. For Urdu parts write in Roman Urdu (Latin script transliteration e.g. 'kya haal hai' not 'کیا حال ہے'). Do not hallucinate or invent words.";
         
         let full_prompt = if let Some(ref context) = previous_context {
             let context_snippet = if context.len() > 150 {

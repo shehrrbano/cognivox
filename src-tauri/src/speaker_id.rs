@@ -41,9 +41,14 @@ const LOG_EPSILON: f32 = 1e-6;
 const EMBEDDING_DIM: usize = 192;
 
 // Speaker identification thresholds
-const DEFAULT_SIMILARITY_THRESHOLD: f32 = 0.25;
-const MIN_AUDIO_SAMPLES: usize = 8000; // Minimum 0.5s at 16kHz
+// 0.55 is a good balance: high enough to separate different speakers, 
+// low enough to still match the same speaker across segments.
+// ECAPA-TDNN cosine similarity for same speaker is typically 0.6-0.9,
+// and for different speakers is typically 0.0-0.4.
+const DEFAULT_SIMILARITY_THRESHOLD: f32 = 0.55;
+const MIN_AUDIO_SAMPLES: usize = 16000; // Minimum 1.0s at 16kHz for reliable embeddings
 const MAX_SPEAKERS: usize = 50;
+const MAX_EMBEDDING_UPDATES: u32 = 10; // Cap running-average updates to prevent profile drift
 
 // ============================================================================
 // DATA STRUCTURES
@@ -389,26 +394,33 @@ pub fn identify_or_register_speaker(
     if let Some((id, similarity)) = best_match {
         if similarity >= threshold {
             if let Some(profile) = speakers.get_mut(&id) {
-                // Update embedding with running average
-                let n = profile.sample_count as f32;
-                let new_n = n + 1.0;
+                // Update embedding with running average, but ONLY for first N samples
+                // This prevents profile drift where a profile gradually shifts
+                // to include a different speaker's voice characteristics
+                if profile.sample_count < MAX_EMBEDDING_UPDATES {
+                    let n = profile.sample_count as f32;
+                    let new_n = n + 1.0;
 
-                for (i, &new_val) in embedding.iter().enumerate() {
-                    if i < profile.embedding.len() {
-                        profile.embedding[i] = (profile.embedding[i] * n + new_val) / new_n;
+                    for (i, &new_val) in embedding.iter().enumerate() {
+                        if i < profile.embedding.len() {
+                            profile.embedding[i] = (profile.embedding[i] * n + new_val) / new_n;
+                        }
                     }
-                }
 
-                // Re-normalize the averaged embedding
-                let norm: f32 = profile.embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
-                if norm > 1e-12 {
-                    for val in profile.embedding.iter_mut() {
-                        *val /= norm;
+                    // Re-normalize the averaged embedding
+                    let norm: f32 = profile.embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
+                    if norm > 1e-12 {
+                        for val in profile.embedding.iter_mut() {
+                            *val /= norm;
+                        }
                     }
                 }
 
                 profile.sample_count += 1;
                 profile.last_seen = now;
+
+                println!("[SPEAKER-ID] Matched {} with similarity {:.3} (threshold {:.3})",
+                    profile.label, similarity, threshold);
 
                 return SpeakerIdResult {
                     speaker_id: id.clone(),
@@ -417,6 +429,9 @@ pub fn identify_or_register_speaker(
                     is_new_speaker: false,
                 };
             }
+        } else {
+            println!("[SPEAKER-ID] Best match similarity {:.3} below threshold {:.3} — registering new speaker",
+                similarity, threshold);
         }
     }
 

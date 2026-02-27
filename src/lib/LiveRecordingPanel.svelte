@@ -32,6 +32,9 @@
     export let urgencyLevel = 0;
     export let clarityLevel = 0.4;
 
+    // Track last processed tone to avoid re-triggering on same transcript
+    let lastProcessedToneId = "";
+
     // VAD State
     let vadState: VADState = vadManager.getState();
     let unsubscribe: (() => void) | null = null;
@@ -91,22 +94,68 @@
             },
         ];
 
-        // Decay levels slowly
-        urgencyLevel = Math.max(0, urgencyLevel - 0.005);
-        stressLevel = Math.max(0, stressLevel - 0.005);
-        engagementLevel = Math.max(0.2, engagementLevel - 0.002);
-        clarityLevel = Math.max(0.3, clarityLevel - 0.002);
+        // Decay levels slowly — reduced rates so gauges hold their values longer
+        urgencyLevel = Math.max(0, urgencyLevel - 0.001);
+        stressLevel = Math.max(0, stressLevel - 0.001);
+        engagementLevel = Math.max(0.2, engagementLevel - 0.0008);
+        clarityLevel = Math.max(0.3, clarityLevel - 0.0008);
     }
 
-    // Track emotions from transcript tones
-    $: if (liveTranscript?.tone) {
+    // Track emotions from transcript tones — all 9 tones affect gauges
+    $: if (liveTranscript?.tone && liveTranscript?.id !== lastProcessedToneId) {
+        lastProcessedToneId = liveTranscript.id;
         const t = liveTranscript.tone;
-        if (t === "URGENT") urgencyLevel = Math.min(1, urgencyLevel + 0.3);
-        if (t === "NEGATIVE" || t === "FRUSTRATED")
-            stressLevel = Math.min(1, stressLevel + 0.3);
-        if (t === "POSITIVE" || t === "EXCITED")
+
+        // URGENT: high urgency, moderate stress
+        if (t === "URGENT") {
+            urgencyLevel = Math.min(1, urgencyLevel + 0.35);
+            stressLevel = Math.min(1, stressLevel + 0.15);
+            clarityLevel = Math.min(1, clarityLevel + 0.05);
+        }
+        // FRUSTRATED: high stress, reduced clarity
+        if (t === "FRUSTRATED") {
+            stressLevel = Math.min(1, stressLevel + 0.35);
+            urgencyLevel = Math.min(1, urgencyLevel + 0.1);
+            clarityLevel = Math.max(0, clarityLevel - 0.1);
+        }
+        // NEGATIVE: elevated stress, reduced engagement
+        if (t === "NEGATIVE") {
+            stressLevel = Math.min(1, stressLevel + 0.25);
+            engagementLevel = Math.max(0, engagementLevel - 0.05);
+        }
+        // EXCITED: high engagement, high clarity
+        if (t === "EXCITED") {
+            engagementLevel = Math.min(1, engagementLevel + 0.35);
+            clarityLevel = Math.min(1, clarityLevel + 0.1);
+        }
+        // POSITIVE: good engagement, good clarity
+        if (t === "POSITIVE") {
+            engagementLevel = Math.min(1, engagementLevel + 0.25);
+            clarityLevel = Math.min(1, clarityLevel + 0.1);
+            stressLevel = Math.max(0, stressLevel - 0.05);
+        }
+        // HESITANT: reduced clarity, slight stress
+        if (t === "HESITANT") {
+            clarityLevel = Math.max(0, clarityLevel - 0.15);
+            stressLevel = Math.min(1, stressLevel + 0.1);
+            engagementLevel = Math.max(0, engagementLevel - 0.05);
+        }
+        // DOMINANT: high engagement/urgency, indicates forceful speech
+        if (t === "DOMINANT") {
             engagementLevel = Math.min(1, engagementLevel + 0.3);
-        if (t === "NEUTRAL") clarityLevel = Math.min(1, clarityLevel + 0.1);
+            urgencyLevel = Math.min(1, urgencyLevel + 0.15);
+            clarityLevel = Math.min(1, clarityLevel + 0.1);
+        }
+        // EMPATHETIC: moderate engagement, reduces stress, good clarity
+        if (t === "EMPATHETIC") {
+            engagementLevel = Math.min(1, engagementLevel + 0.2);
+            stressLevel = Math.max(0, stressLevel - 0.1);
+            clarityLevel = Math.min(1, clarityLevel + 0.1);
+        }
+        // NEUTRAL: slight clarity boost only
+        if (t === "NEUTRAL") {
+            clarityLevel = Math.min(1, clarityLevel + 0.05);
+        }
     }
 
     function getBarColor(isSpeech: boolean, level: number): string {

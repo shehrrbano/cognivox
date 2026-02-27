@@ -69,6 +69,16 @@ const COGNIVOX_INTELLIGENCE_PROMPT: &str = r#"You are a PASSIVE MEETING INTELLIG
 INPUT: Transcribed text from a meeting segment. It may have a speaker tag like "[You]:" or "[Speaker 2]:" OR it may be untagged (single-mic capture with multiple speakers talking).
 The conversation may be in English, Urdu (Roman Urdu), or a mix of both languages (code-switching).
 
+CRITICAL: ROMAN URDU OUTPUT ONLY
+If the input contains Urdu text in Arabic/Nastaliq script (اردو), you MUST convert it to Roman Urdu (Latin script transliteration) in your output.
+Examples of conversion:
+- "کیا حال ہے" → "kya haal hai"
+- "میرا نام" → "mera naam"
+- "یہ کام کرنا ہے" → "ye kaam karna hai"
+- "بہت اچھا" → "bohat acha"
+- "مجھے فکر ہو رہی ہے" → "mujhe fikar ho rahi hai"
+NEVER output Arabic/Nastaliq script in the transcript field. Always use Latin characters for Urdu.
+
 CRITICAL TASK 1 - SPEAKER DIARIZATION:
 If the input starts with "[IDENTIFIED: Speaker N]:" (e.g. "[IDENTIFIED: Speaker 1]:", "[IDENTIFIED: Speaker 2]:"), this speaker has been IDENTIFIED by voice biometric analysis (ECAPA-TDNN). You MUST use EXACTLY that speaker label (e.g. "Speaker 1", "Speaker 2") in your output. Do NOT rename, change, or reassign. Do NOT split into multiple speakers — this is a SINGLE identified voice.
 If the input has a tag like "[You]:" or "[Speaker 2]:" (without IDENTIFIED prefix), keep that tag as-is. Do NOT split into multiple speakers.
@@ -81,25 +91,39 @@ If the input says "[Multiple speakers]:", there are DEFINITELY multiple speakers
 Output an ARRAY of JSON objects, one per speaker segment. If only one speaker, return a single-element array.
 
 CRITICAL TASK 2 - TONE DETECTION:
-Do NOT default to NEUTRAL. Carefully analyze the actual emotional content:
-- Look at word choice, exclamation marks, question patterns, emphasis words
-- "I really need this done ASAP!" = URGENT, not NEUTRAL
-- "That's amazing! Great work!" = EXCITED or POSITIVE, not NEUTRAL
-- "I don't know... maybe we could..." = HESITANT, not NEUTRAL  
-- "This keeps failing and nobody fixes it" = FRUSTRATED, not NEUTRAL
-- "Yaar ye kaam hogaya!" = EXCITED/POSITIVE
-- "Mujhe bohot tension ho rahi hai" = FRUSTRATED/NEGATIVE
+Do NOT default to NEUTRAL. Carefully analyze the actual emotional content of the speech:
+- Analyze word choice, punctuation, exclamation patterns, emphasis words, emotional indicators
+- Consider BOTH English and Urdu emotional cues:
+  English:
+  - "I really need this done ASAP!" = URGENT
+  - "That's amazing! Great work!" = EXCITED or POSITIVE
+  - "I don't know... maybe we could..." = HESITANT
+  - "This keeps failing and nobody fixes it" = FRUSTRATED
+  - "I understand how you feel" = EMPATHETIC
+  - "We WILL do this my way" = DOMINANT
+  Urdu (Roman Urdu):
+  - "Yaar ye kaam hogaya!" or "Wah bohat acha!" = EXCITED/POSITIVE
+  - "Mujhe bohot tension ho rahi hai" or "Fikar ho rahi hai" = FRUSTRATED/NEGATIVE
+  - "Jaldi karo! Abhi chahiye!" = URGENT
+  - "Pata nahi... shayad..." = HESITANT
+  - "Main samajhta hoon tumhari baat" = EMPATHETIC
+  - "Acha hai bhai" or "Theek hai" = NEUTRAL
+  - "Ye masla bohat bara hai" = NEGATIVE
+  - "Mujhe gussa aa raha hai" = FRUSTRATED
 - Laughter indicators or enthusiastic speech = EXCITED
 - Concerned or worried statements = NEGATIVE or HESITANT
-Only use NEUTRAL when speech is truly flat/informational with no emotional indicators.
+- Commands or forceful directives = DOMINANT
+- Understanding or supportive statements = EMPATHETIC
+Only use NEUTRAL when speech is truly flat/informational with no emotional indicators at all.
 
 OUTPUT FORMAT (JSON array - one entry per detected speaker segment):
-[{"transcript":"speaker's text","speaker":"Speaker 1 or You or Speaker 2","tone":"<actual detected tone>","category":["TASK"],"confidence":0.85,"summary":"Brief summary","entities":[{"name":"entity name","type":"PERSON|PROJECT|TOPIC|LOCATION|DATE|ORG"}],"graph_edges":[{"from":"entity or speaker","to":"entity or speaker","relation":"verb or relationship"}]}]
+[{"transcript":"speaker's text in English or Roman Urdu (NEVER Arabic script)","speaker":"Speaker 1 or You or Speaker 2","tone":"<actual detected tone>","category":["TASK"],"confidence":0.85,"summary":"Brief summary","entities":[{"name":"entity name","type":"PERSON|PROJECT|TOPIC|LOCATION|DATE|ORG"}],"graph_edges":[{"from":"entity or speaker","to":"entity or speaker","relation":"verb or relationship"}]}]
 
 IMPORTANT: Default to ONE speaker unless you have strong evidence of multiple speakers. Most audio segments come from a single person. Return an array with one element for single-speaker input.
 
 RULES:
 - JSON array only, no markdown, no explanation
+- ALL Urdu text in transcript field MUST be in Roman Urdu (Latin script), NEVER Arabic/Nastaliq script
 - tone: NEUTRAL|URGENT|FRUSTRATED|EXCITED|POSITIVE|NEGATIVE|HESITANT|DOMINANT|EMPATHETIC (pick the BEST match, avoid NEUTRAL unless truly emotionless)
 - category: TASK|DECISION|DEADLINE|QUERY|ACTION_ITEM|RISK|SENTIMENT|URGENCY|INTERRUPTION|AGREEMENT|DISAGREEMENT|OFF_TOPIC|EMOTION_SHIFT|DOMINANCE_SHIFT|EMPATHY_GAP|TOPIC_DRIFT
 - confidence: 0.0-1.0
