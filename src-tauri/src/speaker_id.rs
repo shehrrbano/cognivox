@@ -269,7 +269,7 @@ fn normalize_features(features: &mut Array2<f32>) {
 /// Extract a 192-dim L2-normalized speaker embedding from raw audio.
 ///
 /// Pipeline:
-///   raw audio → mel spectrogram → CMVN → ONNX model → L2 normalize
+///   raw audio → energy check → mel spectrogram → CMVN → ONNX model → L2 normalize
 pub fn extract_embedding(
     session: &mut Session,
     audio: &[f32],
@@ -281,6 +281,15 @@ pub fn extract_embedding(
             "Audio too short: {} samples (need {})",
             audio.len(),
             MIN_AUDIO_SAMPLES
+        ));
+    }
+
+    // Energy pre-check: reject near-silent audio that would produce unreliable embeddings
+    let rms = (audio.iter().map(|s| s * s).sum::<f32>() / audio.len() as f32).sqrt();
+    if rms < 0.003 {
+        return Err(format!(
+            "Audio too quiet (RMS: {:.6}), embedding would be unreliable",
+            rms
         ));
     }
 

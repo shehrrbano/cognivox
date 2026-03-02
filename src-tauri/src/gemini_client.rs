@@ -32,12 +32,19 @@ const MAX_BACKOFF_SECS: u64 = 60;              // Max 60 second backoff
 const RATE_LIMIT_CODES: [&str; 3] = ["RESOURCE_EXHAUSTED", "RATE_LIMIT_EXCEEDED", "rateLimitExceeded"];
 
 // AUDIO SEGMENTATION CONFIG (used before Whisper)
-const MIN_SPEECH_SECS: f32 = 0.4;              // Minimum 0.4s of speech (catch quick utterances)
-const SILENCE_TIMEOUT_SECS: f32 = 2.5;         // 2.5s silence = end of segment (more patient)
-const MAX_BATCH_SECS: f32 = 30.0;              // Max 30 seconds per batch (good for conversations)
-const OVERLAP_SECS: f32 = 1.0;                 // 1s base overlap (we'll use 1.5x in code)
-const SPEECH_THRESHOLD: f32 = 0.00025;         // Slightly lower - more sensitive to soft speech
-const SILENCE_THRESHOLD: f32 = 0.00008;        // Lower - capture very quiet audio too
+const MIN_SPEECH_SECS: f32 = 0.3;              // Minimum 0.3s of speech (catch quick utterances)
+const SILENCE_TIMEOUT_SECS: f32 = 0.6;         // 0.6s silence = end of segment (quick turn-taking)
+const MAX_BATCH_SECS: f32 = 5.0;               // Max 5 seconds per batch — faster processing cycles
+const FIRST_BATCH_SECS: f32 = 2.5;             // First chunk triggers after just 2.5s for instant feedback
+const OVERLAP_SECS: f32 = 1.0;                 // 1.0s overlap between chunks — prevents lost context at boundaries
+const SPEECH_THRESHOLD: f32 = 0.0001;          // Very sensitive — catch ANY speaker regardless of distance from mic
+const SILENCE_THRESHOLD: f32 = 0.00004;        // Ultra-low — only true digital silence is skipped
+
+// Pre-roll ring buffer: always keep last ~1.5s of audio so that when speech IS
+// detected we don't lose the onset (critical for a second speaker whose first
+// syllables might start below SPEECH_THRESHOLD).
+const PRE_ROLL_SECS: f32 = 1.5;
+const PRE_ROLL_SAMPLES: usize = (PRE_ROLL_SECS * 16000.0) as usize;
 
 
 pub struct GeminiState {
@@ -514,6 +521,13 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle, alive_flag:
     let mut speaking = false;
     let mut speech_start: Option<Instant> = None;
     let mut last_speech: Option<Instant> = None;
+    let mut is_first_chunk = true; // Fast first-chunk trigger for instant feedback
+    
+    // Pre-roll ring buffer: captures ALL mic audio so we never lose the first
+    // syllables of a new speaker.  When speech is detected while speaking==false,
+    // the pre-roll is prepended to the main buffer.
+    let mut pre_roll: Vec<f32> = Vec::new();
+    let mut pre_roll_source: Vec<(usize, AudioSource)> = Vec::new();
     
     // Use Arc<Mutex<bool>> so we can share processing state with the spawned task
     let processing = Arc::new(StdMutex::new(false));
@@ -521,6 +535,7 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle, alive_flag:
     // Pending audio: audio collected during processing that we must not lose
     let pending_buffer: Arc<StdMutex<Vec<f32>>> = Arc::new(StdMutex::new(Vec::new()));
     let pending_speaking: Arc<StdMutex<bool>> = Arc::new(StdMutex::new(false));
+    let pending_last_speech: Arc<StdMutex<Option<Instant>>> = Arc::new(StdMutex::new(None)); // When speech last occurred in pending
     let pending_source_timeline: Arc<StdMutex<Vec<(usize, AudioSource)>>> = Arc::new(StdMutex::new(Vec::new()));
     
     // Speaker diarization: track which source contributed each timeslice
@@ -558,6 +573,8 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle, alive_flag:
                 *reset = false;
                 buffer.clear();
                 source_timeline.clear();
+                pre_roll.clear();
+                pre_roll_source.clear();
                 speaking = false;
                 speech_start = None;
                 last_speech = None;
@@ -566,9 +583,11 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle, alive_flag:
                 poison_lock(&pending_buffer).clear();
                 poison_lock(&pending_source_timeline).clear();
                 *poison_lock(&pending_speaking) = false;
+                *poison_lock(&pending_last_speech) = None;
                 total_samples_received = 0;
                 _audio_received_count = 0;
                 request_count = 0;
+                is_first_chunk = true; // Reset first-chunk flag on session reset
                 // Reset rate-limiting state so new session starts fresh
                 *poison_lock(&backoff) = 0;
                 *poison_lock(&last_request) = Instant::now() - Duration::from_secs(MIN_REQUEST_INTERVAL_SECS);
@@ -593,6 +612,7 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle, alive_flag:
                     poison_lock(&pending_buffer).clear();
                     poison_lock(&pending_source_timeline).clear();
                     *poison_lock(&pending_speaking) = false;
+                    *poison_lock(&pending_last_speech) = None;
                 }
             }
         } else {
@@ -621,9 +641,17 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle, alive_flag:
             if let Ok(mut pst) = pending_source_timeline.lock() {
                 pst.extend(new_source_chunks);
             }
-            if level > SPEECH_THRESHOLD {
+            // Use SILENCE_THRESHOLD (not SPEECH_THRESHOLD) so we catch quieter
+            // second speakers whose level sits between the two thresholds.
+            // Any audio above digital silence that arrives during processing
+            // is worth keeping and processing.
+            if level > SILENCE_THRESHOLD {
                 if let Ok(mut ps) = pending_speaking.lock() {
                     *ps = true;
+                }
+                // Track actual time of last speech in pending buffer
+                if let Ok(mut pls) = pending_last_speech.lock() {
+                    *pls = Some(Instant::now());
                 }
             }
             _audio_received_count += 1;
@@ -640,17 +668,35 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle, alive_flag:
             // Log audio level every 2 seconds for diagnostics
             if last_level_log.elapsed() > Duration::from_secs(2) {
                 let buffer_duration = buffer.len() as f32 / 16000.0;
-                println!("[AUDIO] Level: {:.6} (threshold: {:.6}) | Speaking: {} | Buffer: {:.1}s | Total samples: {}", 
-                         level, SPEECH_THRESHOLD, speaking, buffer_duration, total_samples_received);
+                println!("[AUDIO] Level: {:.6} (threshold: {:.6}) | Speaking: {} | Buffer: {:.1}s | PreRoll: {:.1}s | Total samples: {}", 
+                         level, SPEECH_THRESHOLD, speaking, buffer_duration, pre_roll.len() as f32 / 16000.0, total_samples_received);
                 last_level_log = Instant::now();
             }
             
-            // Speech detection - CONSERVATIVE to avoid losing packets
+            // Speech detection with pre-roll to NEVER miss any speaker
             if level > SPEECH_THRESHOLD {
                 if !speaking {
                     speaking = true;
-                    speech_start = Some(Instant::now());
-                    println!("[AUDIO] >>> SPEECH STARTED (level: {:.6} > threshold: {:.6}) <<<", level, SPEECH_THRESHOLD);
+                    
+                    // CRITICAL FIX: Prepend pre-roll buffer so we capture the
+                    // onset of speech that was below SPEECH_THRESHOLD.
+                    // This prevents losing the first syllables of a second
+                    // speaker who starts softly.
+                    if !pre_roll.is_empty() {
+                        let pre_duration = pre_roll.len() as f32 / 16000.0;
+                        println!("[AUDIO] >>> SPEECH STARTED — prepending {:.2}s pre-roll (level: {:.6}) <<<", pre_duration, level);
+                        let mut combined = std::mem::take(&mut pre_roll);
+                        combined.extend(&buffer);
+                        buffer = combined;
+                        let mut combined_timeline = std::mem::take(&mut pre_roll_source);
+                        combined_timeline.extend(source_timeline.drain(..));
+                        source_timeline = combined_timeline;
+                    } else {
+                        println!("[AUDIO] >>> SPEECH STARTED (level: {:.6} > threshold: {:.6}) <<<", level, SPEECH_THRESHOLD);
+                    }
+                    speech_start = Some(Instant::now() - Duration::from_secs_f32(
+                        buffer.len() as f32 / 16000.0  // backdate by pre-roll amount already in buffer
+                    ));
                     let _ = app.emit("cognivox:status", "Speech detected...");
                 }
                 last_speech = Some(Instant::now());
@@ -660,9 +706,29 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle, alive_flag:
                 if speaking {
                     buffer.extend(&new);
                     source_timeline.extend(new_source_chunks);
-                    last_speech = Some(Instant::now());
+                    // DO NOT update last_speech here!
+                    // Ambient noise (AC hum, breathing, keyboard) sits between
+                    // SILENCE_THRESHOLD and SPEECH_THRESHOLD. If we reset
+                    // last_speech for this noise, the silence timeout
+                    // NEVER fires — the buffer grows forever.
+                } else {
+                    // NOT speaking: add to pre-roll ring buffer so we never
+                    // lose the onset of a new speaker.  The pre-roll is
+                    // prepended to the main buffer when speech IS detected.
+                    pre_roll.extend(&new);
+                    pre_roll_source.extend(new_source_chunks);
+                    // Keep pre-roll bounded
+                    if pre_roll.len() > PRE_ROLL_SAMPLES {
+                        let excess = pre_roll.len() - PRE_ROLL_SAMPLES;
+                        pre_roll.drain(..excess);
+                        // Trim source timeline to match (approximate)
+                        let mut trimmed = 0usize;
+                        while trimmed < excess && !pre_roll_source.is_empty() {
+                            trimmed += pre_roll_source[0].0;
+                            pre_roll_source.remove(0);
+                        }
+                    }
                 }
-                // When not speaking, don't buffer low-level noise — avoids stale data
             } else {
                 // Pure silence — only keep buffering if we're in an active speech segment
                 if speaking {
@@ -678,11 +744,24 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle, alive_flag:
             let duration = speech_start.map(|s| s.elapsed().as_secs_f32()).unwrap_or(0.0);
             let silence = last_speech.map(|s| s.elapsed().as_secs_f32()).unwrap_or(0.0);
             
-            let should = (duration >= MIN_SPEECH_SECS && silence >= SILENCE_TIMEOUT_SECS)
-                || duration >= MAX_BATCH_SECS;
+            // Use faster trigger for first chunk to give instant feedback
+            let effective_max_batch = if is_first_chunk { FIRST_BATCH_SECS } else { MAX_BATCH_SECS };
+            
+            // Don't trigger processing if Whisper isn't ready — keep buffering instead of
+            // processing and losing audio when transcription fails
+            let whisper_ready = {
+                let ws = app.state::<WhisperState>();
+                let ready = *poison_lock(&ws.is_initialized);
+                ready
+            };
+            
+            let should = whisper_ready && (
+                (duration >= MIN_SPEECH_SECS && silence >= SILENCE_TIMEOUT_SECS)
+                || duration >= effective_max_batch
+            );
             
             if should {
-                println!("[AUDIO] >>> PROCESSING TRIGGER: duration={:.1}s, silence={:.1}s <<<", duration, silence);
+                println!("[AUDIO] >>> PROCESSING TRIGGER: duration={:.1}s, silence={:.1}s, first_chunk={} <<<", duration, silence, is_first_chunk);
             }
             should
         } else { false };
@@ -743,8 +822,8 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle, alive_flag:
                 println!("[AUDIO] ========================================");
                 let _ = app.emit("cognivox:status", format!("Whisper transcribing {:.1}s audio...", duration));
                 
-                // Keep overlap samples for next chunk
-                let overlap_samples = ((OVERLAP_SECS * 1.5) * 16000.0) as usize;
+                // Keep overlap samples for next chunk (0.5s overlap for context continuity)
+                let overlap_samples = (OVERLAP_SECS * 16000.0) as usize;
                 let audio = buffer.clone();
                 let _audio_source_timeline = source_timeline.clone(); // Kept for potential future use
                 
@@ -767,6 +846,10 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle, alive_flag:
                 }
                 
                 speaking = false;
+                is_first_chunk = false; // After first processing, use normal timing
+                // Clear pre-roll since we just consumed everything
+                pre_roll.clear();
+                pre_roll_source.clear();
                 
                 let speaker_tag = speaker_tag.to_string();
                 
@@ -784,12 +867,12 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle, alive_flag:
                 tokio::spawn(async move {
                     let app = app_clone;
                     
-                    // === ECAPA-TDNN WINDOWED SPEAKER DIARIZATION ===
-                    // Instead of producing one embedding for the entire audio buffer (which
-                    // blends multiple speakers into an unrecognizable average), we split the
-                    // audio into small overlapping windows (~2s each) and identify each
-                    // window's speaker independently.  This lets us detect speaker changes
-                    // even when both people share the same microphone.
+                    // === ECAPA-TDNN ENERGY-SEGMENTED SPEAKER DIARIZATION ===
+                    // Instead of fixed windows (which can straddle speaker transitions and
+                    // produce blended embeddings), we detect silence gaps in the audio to
+                    // find natural speaker turn boundaries. Each segment between silences
+                    // likely contains a single speaker, giving much cleaner embeddings.
+                    // Falls back to windowed approach for long continuous segments.
                     let speaker_tag = {
                         let sid_state = app.state::<SpeakerIdState>();
                         let is_sid_init = *poison_lock(&sid_state.is_initialized);
@@ -801,82 +884,133 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle, alive_flag:
                             let sid_threshold = *poison_lock(&sid_state.threshold);
                             
                             if let (Some(sess), Some(win), Some(fb)) = (sid_session, sid_window, sid_filterbank) {
-                                // --- Windowed diarization parameters ---
-                                // 2-second windows with 1-second hop → 50% overlap
-                                const WINDOW_SAMPLES: usize = 32000; // 2s at 16kHz
-                                const HOP_SAMPLES: usize = 16000;    // 1s hop
-                                const MIN_WINDOW_SAMPLES: usize = 16000; // 1s minimum for reliable embedding
+                                // --- Energy-based segmentation parameters ---
+                                const FRAME_SIZE: usize = 1600;  // 100ms frames at 16kHz
+                                const SILENCE_RMS_THRESH: f32 = 0.008; // RMS below this = silence
+                                const MIN_SILENCE_FRAMES: usize = 2;   // 200ms+ silence = speaker boundary
+                                const MIN_SEGMENT_SAMPLES: usize = 16000; // 1s minimum for ECAPA
+                                const MAX_SEGMENT_BEFORE_WINDOW: usize = 48000; // 3s — use windowed for longer
+                                const WINDOW_SAMPLES: usize = 24000; // 1.5s windows for fallback
+                                const HOP_SAMPLES: usize = 8000;     // 0.5s hop for finer granularity
+                                const MIN_WINDOW_RMS: f32 = 0.002;
                                 
-                                // Build list of windows
-                                let mut windows: Vec<(usize, usize)> = Vec::new(); // (start, end) indices
-                                if audio.len() >= MIN_WINDOW_SAMPLES {
-                                    let mut start = 0usize;
-                                    while start + MIN_WINDOW_SAMPLES <= audio.len() {
-                                        let end = (start + WINDOW_SAMPLES).min(audio.len());
-                                        windows.push((start, end));
-                                        start += HOP_SAMPLES;
-                                    }
-                                    // If no windows were created (audio slightly longer than MIN), add one window
-                                    if windows.is_empty() {
-                                        windows.push((0, audio.len()));
+                                // Step 1: Compute per-frame energy
+                                let n_frames = audio.len() / FRAME_SIZE;
+                                let frame_rms: Vec<f32> = (0..n_frames)
+                                    .map(|i| rms(&audio[i * FRAME_SIZE..(i + 1) * FRAME_SIZE]))
+                                    .collect();
+                                
+                                // Step 2: Find silence gaps (runs of low-energy frames)
+                                let mut segments: Vec<(usize, usize)> = Vec::new(); // (start_sample, end_sample)
+                                let mut seg_start: usize = 0;
+                                let mut silence_run: usize = 0;
+                                
+                                for (i, &frms) in frame_rms.iter().enumerate() {
+                                    if frms < SILENCE_RMS_THRESH {
+                                        silence_run += 1;
+                                        if silence_run >= MIN_SILENCE_FRAMES {
+                                            // Found a silence gap — end current segment
+                                            let seg_end = (i - silence_run + 1) * FRAME_SIZE;
+                                            if seg_end > seg_start + FRAME_SIZE {
+                                                segments.push((seg_start, seg_end));
+                                            }
+                                            seg_start = (i + 1) * FRAME_SIZE;
+                                        }
+                                    } else {
+                                        silence_run = 0;
                                     }
                                 }
+                                // Add final segment
+                                if audio.len() > seg_start + FRAME_SIZE {
+                                    segments.push((seg_start, audio.len()));
+                                }
                                 
-                                println!("[SPEAKER-ID] Windowed diarization: {:.1}s audio → {} windows (2s windows, 1s hop)",
-                                    audio.len() as f32 / 16000.0, windows.len());
+                                // If no segments found, treat whole audio as one segment
+                                if segments.is_empty() {
+                                    segments.push((0, audio.len()));
+                                }
                                 
-                                // Extract embedding for each window and identify
-                                let mut window_labels: Vec<String> = Vec::new();
+                                println!("[SPEAKER-ID] Energy segmentation: {:.1}s audio → {} segments",
+                                    audio.len() as f32 / 16000.0, segments.len());
+                                
+                                // Step 3: For each segment, run ECAPA (windowed fallback for long ones)
+                                let mut segment_labels: Vec<String> = Vec::new();
                                 let mut any_new_speaker = false;
                                 
-                                for (win_idx, &(w_start, w_end)) in windows.iter().enumerate() {
-                                    let window_audio = audio[w_start..w_end].to_vec();
-                                    let window_duration = window_audio.len() as f32 / 16000.0;
+                                for (seg_idx, &(s_start, s_end)) in segments.iter().enumerate() {
+                                    let seg_len = s_end - s_start;
+                                    if seg_len < MIN_SEGMENT_SAMPLES {
+                                        println!("[SPEAKER-ID] Segment {} too short ({:.2}s), skipping",
+                                            seg_idx, seg_len as f32 / 16000.0);
+                                        continue;
+                                    }
                                     
-                                    let sess_c = sess.clone();
-                                    let win_c = win.clone();
-                                    let fb_c = fb.clone();
-                                    
-                                    let emb_result = tokio::task::spawn_blocking(move || {
-                                        let mut sess_guard = sess_c.lock().unwrap();
-                                        extract_embedding(&mut sess_guard, &window_audio, &win_c, &fb_c)
-                                    }).await;
-                                    
-                                    match emb_result {
-                                        Ok(Ok(emb)) => {
-                                            let mut speakers = poison_lock(&sid_state.speakers);
-                                            let mut next_num = poison_lock(&sid_state.next_speaker_num);
-                                            let result = identify_or_register_speaker(
-                                                &mut speakers, &emb, sid_threshold, &mut next_num
-                                            );
-                                            println!("[SPEAKER-ID] Window {} ({:.1}s-{:.1}s, {:.1}s) → {} (confidence: {:.3}, new: {})",
-                                                win_idx, w_start as f32 / 16000.0, w_end as f32 / 16000.0,
-                                                window_duration, result.speaker_label, result.confidence, result.is_new_speaker);
-                                            
-                                            if result.is_new_speaker {
-                                                any_new_speaker = true;
-                                            }
-                                            window_labels.push(result.speaker_label.clone());
-                                            
-                                            // Save periodically
-                                            if result.is_new_speaker || speakers.values().map(|p| p.sample_count).sum::<u32>() % 5 == 0 {
-                                                let _ = save_profiles(&speakers);
-                                            }
-                                            drop(speakers);
-                                            drop(next_num);
+                                    // Build sub-windows for this segment
+                                    let mut sub_windows: Vec<(usize, usize)> = Vec::new();
+                                    if seg_len > MAX_SEGMENT_BEFORE_WINDOW {
+                                        // Long segment: use windowed approach within it
+                                        let mut ws = s_start;
+                                        while ws + MIN_SEGMENT_SAMPLES <= s_end {
+                                            let we = (ws + WINDOW_SAMPLES).min(s_end);
+                                            sub_windows.push((ws, we));
+                                            ws += HOP_SAMPLES;
                                         }
-                                        Ok(Err(e)) => {
-                                            println!("[SPEAKER-ID] Window {} embedding error: {}", win_idx, e);
+                                    } else {
+                                        // Short-to-medium segment: single ECAPA run
+                                        sub_windows.push((s_start, s_end));
+                                    }
+                                    
+                                    for &(w_start, w_end) in &sub_windows {
+                                        let window_audio = audio[w_start..w_end].to_vec();
+                                        let window_rms_val = rms(&window_audio);
+                                        if window_rms_val < MIN_WINDOW_RMS {
+                                            continue;
                                         }
-                                        Err(e) => {
-                                            println!("[SPEAKER-ID] Window {} task error: {}", win_idx, e);
+                                        
+                                        let sess_c = sess.clone();
+                                        let win_c = win.clone();
+                                        let fb_c = fb.clone();
+                                        
+                                        let emb_result = tokio::task::spawn_blocking(move || {
+                                            let mut sess_guard = sess_c.lock().unwrap();
+                                            extract_embedding(&mut sess_guard, &window_audio, &win_c, &fb_c)
+                                        }).await;
+                                        
+                                        match emb_result {
+                                            Ok(Ok(emb)) => {
+                                                let mut speakers = poison_lock(&sid_state.speakers);
+                                                let mut next_num = poison_lock(&sid_state.next_speaker_num);
+                                                let result = identify_or_register_speaker(
+                                                    &mut speakers, &emb, sid_threshold, &mut next_num
+                                                );
+                                                println!("[SPEAKER-ID] Seg {} ({:.1}s-{:.1}s) → {} (confidence: {:.3}, new: {})",
+                                                    seg_idx, w_start as f32 / 16000.0, w_end as f32 / 16000.0,
+                                                    result.speaker_label, result.confidence, result.is_new_speaker);
+                                                
+                                                if result.is_new_speaker {
+                                                    any_new_speaker = true;
+                                                }
+                                                segment_labels.push(result.speaker_label.clone());
+                                                
+                                                if result.is_new_speaker || speakers.values().map(|p| p.sample_count).sum::<u32>() % 5 == 0 {
+                                                    let _ = save_profiles(&speakers);
+                                                }
+                                                drop(speakers);
+                                                drop(next_num);
+                                            }
+                                            Ok(Err(e)) => {
+                                                println!("[SPEAKER-ID] Seg {} embedding error: {}", seg_idx, e);
+                                            }
+                                            Err(e) => {
+                                                println!("[SPEAKER-ID] Seg {} task error: {}", seg_idx, e);
+                                            }
                                         }
                                     }
                                 }
                                 
-                                // Determine unique speakers across all windows
+                                // Determine unique speakers across all segments
                                 let mut unique_speakers: Vec<String> = Vec::new();
-                                for label in &window_labels {
+                                for label in &segment_labels {
                                     if !unique_speakers.contains(label) {
                                         unique_speakers.push(label.clone());
                                     }
@@ -884,7 +1018,7 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle, alive_flag:
                                 
                                 // Build the final speaker tag
                                 let final_tag = if unique_speakers.is_empty() {
-                                    println!("[SPEAKER-ID] No windows produced results, keeping original tag: {}", speaker_tag);
+                                    println!("[SPEAKER-ID] No segments produced results, keeping original tag: {}", speaker_tag);
                                     speaker_tag.clone()
                                 } else if unique_speakers.len() == 1 {
                                     println!("[SPEAKER-ID] Single speaker detected: {}", unique_speakers[0]);
@@ -898,7 +1032,7 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle, alive_flag:
                                 } else {
                                     // Multiple distinct speakers detected!
                                     println!("[SPEAKER-ID] ★ MULTIPLE SPEAKERS DETECTED: {:?}", unique_speakers);
-                                    println!("[SPEAKER-ID]   Window sequence: {:?}", window_labels);
+                                    println!("[SPEAKER-ID]   Segment sequence: {:?}", segment_labels);
                                     for sp in &unique_speakers {
                                         let _ = app.emit("cognivox:speaker_identified", serde_json::json!({
                                             "speaker_id": sp,
@@ -907,7 +1041,6 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle, alive_flag:
                                             "is_new": false,
                                         }));
                                     }
-                                    // Join with "+" e.g. "Speaker 1+Speaker 2"
                                     unique_speakers.join("+")
                                 };
                                 
@@ -1106,30 +1239,62 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle, alive_flag:
             let mut pb = poison_lock(&pending_buffer);
             if !pb.is_empty() {
                 let pending_len = pb.len();
-                println!("[AUDIO] Reintegrating {:.2}s of pending audio", pending_len as f32 / 16000.0);
+                let pending_duration = pending_len as f32 / 16000.0;
                 
-                let mut new_buffer = pb.drain(..).collect::<Vec<f32>>();
-                new_buffer.extend(&buffer);
-                buffer = new_buffer;
+                // CRITICAL: Compute energy BEFORE draining — rms() on an empty
+                // vec is always 0, which was the root cause of the second
+                // speaker's audio being silently ignored.
+                let pending_rms = rms(&pb);
+                
+                println!("[AUDIO] Reintegrating {:.2}s of pending audio (rms: {:.6})", pending_duration, pending_rms);
+                
+                // CRITICAL FIX: Merge in correct chronological order.
+                // buffer = overlap from END of previous chunk (chronologically first)
+                // pb = audio captured during processing (chronologically second)
+                // Correct order: [overlap] + [pending_audio]
+                let pending_audio: Vec<f32> = pb.drain(..).collect();
+                buffer.extend(pending_audio);
                 drop(pb);
                 
-                // Also merge pending source timeline
+                // Also merge pending source timeline in correct order
                 {
                     let mut pst = poison_lock(&pending_source_timeline);
-                    let mut new_timeline = pst.drain(..).collect::<Vec<_>>();
-                    new_timeline.extend(source_timeline.drain(..));
-                    source_timeline = new_timeline;
+                    let pending_timeline: Vec<_> = pst.drain(..).collect();
+                    source_timeline.extend(pending_timeline);
                 }
                 
                 {
                     let mut ps = poison_lock(&pending_speaking);
+                    let actual_last_speech = poison_lock(&pending_last_speech).take();
+                    
+                    // ALWAYS set speaking=true when we have pending audio.
+                    // The audio capture layer already filters true digital silence
+                    // (audio_capture.rs skips chunks after 1.5s of silence).
+                    // Any audio that made it into pending_buffer came from the
+                    // microphone while someone could be talking.  Worst case:
+                    // Whisper returns empty text and we skip it — far better
+                    // than silently dropping a real speaker's audio.
+                    speaking = true;
+                    speech_start = Some(Instant::now() - Duration::from_secs_f32(pending_duration));
+                    
                     if *ps {
-                        speaking = true;
-                        speech_start = Some(Instant::now());
-                        last_speech = Some(Instant::now());
-                        *ps = false;
-                        println!("[AUDIO] Resumed speaking state from pending audio");
+                        // pending_speaking was set — someone spoke above threshold
+                        last_speech = actual_last_speech.or(Some(Instant::now()));
+                        println!("[AUDIO] ★ Pending had SPEECH — {:.1}s audio, last_speech {:.1}s ago",
+                            pending_duration,
+                            last_speech.map(|t| t.elapsed().as_secs_f32()).unwrap_or(0.0));
+                    } else {
+                        // No chunk exceeded threshold, but audio is present.
+                        // Set last_speech past the silence timeout so processing
+                        // triggers on the next tick.
+                        last_speech = actual_last_speech.or(
+                            Some(Instant::now() - Duration::from_secs_f32(SILENCE_TIMEOUT_SECS + 0.2))
+                        );
+                        println!("[AUDIO] Pending had audio (rms: {:.6}) but no speech flag — forcing process trigger",
+                            pending_rms);
                     }
+                    
+                    *ps = false;
                 }
             }
         }

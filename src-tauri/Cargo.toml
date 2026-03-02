@@ -45,3 +45,12 @@ hf-hub = { version = "0.3", features = ["tokio"] }
 ort = "2.0.0-rc.11"
 ndarray = "0.16"
 rustfft = "6.2"
+
+[profile.dev]
+debug = 1           # line tables only (much smaller than full debug)
+opt-level = 1       # basic optimizations, faster runtime
+incremental = true
+
+[profile.dev.package."*"]
+debug = 0           # no debuginfo for dependencies (saves GBs)
+opt-level = 2       # optimize dependencies

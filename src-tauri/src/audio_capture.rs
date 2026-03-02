@@ -40,15 +40,15 @@ impl Default for AudioState {
             stream_control: Mutex::new(None),
             audio_tx: Mutex::new(None),
             current_volume: Arc::new(Mutex::new(0.0)),
-            capture_mode: Mutex::new(CaptureMode::Both),
+            capture_mode: Mutex::new(CaptureMode::MicOnly),
         }
     }
 }
 
 const TARGET_SAMPLE_RATE: u32 = 16000;
 const MICRO_CHUNK_SAMPLES: usize = 160;
-const SILENCE_THRESHOLD: f32 = 0.0001;  // Very low - let processing loop handle speech detection
-const SILENCE_SKIP_CHUNKS: usize = 50;  // ~0.5 seconds before skipping (instant response)
+const SILENCE_THRESHOLD: f32 = 0.00005; // Ultra-low — only skip true digital silence, let processing loop decide
+const SILENCE_SKIP_CHUNKS: usize = 150; // ~1.5 seconds of true silence before skipping (was 0.5s — too aggressive)
 
 #[tauri::command]
 pub fn list_audio_devices() -> Result<Vec<String>, String> {
@@ -163,17 +163,16 @@ pub fn start_audio_capture(state: tauri::State<'_, AudioState>) -> Result<String
     }
     
     let audio_tx = state.audio_tx.lock().map_err(|e| e.to_string())?.clone();
-    let capture_mode = *state.capture_mode.lock().map_err(|e| e.to_string())?;
     let volume = state.current_volume.clone();
 
-    println!("[AUDIO] Starting capture. Mode: {:?}", capture_mode);
+    println!("[AUDIO] Starting mic capture (single mic, all speakers)");
 
     thread::spawn(move || {
         let buffer: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
         let silence_count: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
         
-        // === MICROPHONE CAPTURE ===
-        let mic_stream = if capture_mode == CaptureMode::MicOnly || capture_mode == CaptureMode::Both {
+        // === MICROPHONE CAPTURE (single mic, all speakers) ===
+        let mic_stream = {
             let host = cpal::default_host();
             if let Some(device) = host.default_input_device() {
                 let name = device.name().unwrap_or_default();
@@ -182,6 +181,7 @@ pub fn start_audio_capture(state: tauri::State<'_, AudioState>) -> Result<String
                 if let Ok(config) = device.default_input_config() {
                     let channels = config.channels();
                     let sample_rate = config.sample_rate().0;
+                    println!("[AUDIO] Config: {}Hz, {}ch", sample_rate, channels);
                     
                     let tx = audio_tx.clone();
                     let buf = buffer.clone();
@@ -199,7 +199,7 @@ pub fn start_audio_capture(state: tauri::State<'_, AudioState>) -> Result<String
                             let rms = calculate_rms(&resampled);
                             if let Ok(mut v) = vol.lock() { *v = rms; }
                             
-                            // Silence detection
+                            // Silence detection — skip sending after prolonged silence
                             if let Ok(mut count) = sil.lock() {
                                 if rms < SILENCE_THRESHOLD {
                                     *count += 1;
@@ -209,7 +209,7 @@ pub fn start_audio_capture(state: tauri::State<'_, AudioState>) -> Result<String
                                 }
                             }
                             
-                            // Buffer and send tagged chunks (Microphone source)
+                            // Send small 10ms chunks — speaker segmentation happens in processing loop
                             if let Ok(mut b) = buf.lock() {
                                 b.extend(resampled);
                                 while b.len() >= MICRO_CHUNK_SAMPLES {
@@ -229,182 +229,16 @@ pub fn start_audio_capture(state: tauri::State<'_, AudioState>) -> Result<String
                     stream
                 } else { None }
             } else { None }
-        } else { None };
+        };
         
-        // === SYSTEM AUDIO (WASAPI LOOPBACK) - Windows Only ===
-        #[cfg(target_os = "windows")]
-        let loopback_stream = if capture_mode == CaptureMode::SystemOnly || capture_mode == CaptureMode::Both {
-            use cpal::available_hosts;
-            
-            println!("[AUDIO] Attempting system audio capture...");
-            
-            // Try WASAPI host first
-            let wasapi_host = available_hosts()
-                .into_iter()
-                .find(|h| h.name().contains("WASAPI"))
-                .and_then(|id| cpal::host_from_id(id).ok());
-            
-            let host = wasapi_host.unwrap_or_else(|| {
-                println!("[AUDIO] WASAPI not available, using default host");
-                cpal::default_host()
-            });
-            
-            // Strategy 1: Try loopback from default output device
-            let loopback_result = host.default_output_device().and_then(|device| {
-                let name = device.name().unwrap_or_default();
-                println!("[AUDIO] Trying loopback on output device: {}", name);
-                
-                device.default_output_config().ok().and_then(|config| {
-                    let channels = config.channels();
-                    let sample_rate = config.sample_rate().0;
-                    
-                    let tx = audio_tx.clone();
-                    let buf = buffer.clone();
-                    let sil = silence_count.clone();
-                    let vol = volume.clone();
-                    
-                    device.build_input_stream(
-                        &config.into(),
-                        move |data: &[f32], _| {
-                            if data.is_empty() { return; }
-                            
-                            let mono = to_mono(data, channels);
-                            let resampled = resample_linear(mono, sample_rate, TARGET_SAMPLE_RATE);
-                            
-                            let rms = calculate_rms(&resampled);
-                            if let Ok(mut v) = vol.lock() { *v = rms; }
-                            
-                            if let Ok(mut count) = sil.lock() {
-                                if rms < SILENCE_THRESHOLD {
-                                    *count += 1;
-                                    if *count > SILENCE_SKIP_CHUNKS { return; }
-                                } else {
-                                    *count = 0;
-                                }
-                            }
-                            
-                            // Buffer and send tagged chunks (System/loopback source)
-                            if let Ok(mut b) = buf.lock() {
-                                b.extend(resampled);
-                                while b.len() >= MICRO_CHUNK_SAMPLES {
-                                    let chunk: Vec<f32> = b.drain(..MICRO_CHUNK_SAMPLES).collect();
-                                    if let Some(ref tx) = tx {
-                                        let _ = tx.send(TaggedAudio {
-                                            samples: chunk,
-                                            source: AudioSource::System,
-                                        });
-                                    }
-                                }
-                            }
-                        },
-                        |e| eprintln!("[AUDIO] Loopback stream error: {}", e),
-                        None
-                    ).ok()
-                })
-            });
-            
-            if loopback_result.is_some() {
-                println!("[AUDIO] ✓ WASAPI loopback stream created successfully");
-                loopback_result
-            } else {
-                // Strategy 2: Try finding Stereo Mix or similar virtual device
-                println!("[AUDIO] Loopback failed, searching for Stereo Mix...");
-                
-                let stereo_mix = host.input_devices().ok().and_then(|devices| {
-                    devices.into_iter().find(|d| {
-                        if let Ok(name) = d.name() {
-                            let name_lower = name.to_lowercase();
-                            name_lower.contains("stereo mix") ||
-                            name_lower.contains("what u hear") ||
-                            name_lower.contains("wave out") ||
-                            name_lower.contains("loopback")
-                        } else {
-                            false
-                        }
-                    })
-                });
-                
-                if let Some(device) = stereo_mix {
-                    let name = device.name().unwrap_or_default();
-                    println!("[AUDIO] Found virtual capture device: {}", name);
-                    
-                    device.default_input_config().ok().and_then(|config| {
-                        let channels = config.channels();
-                        let sample_rate = config.sample_rate().0;
-                        
-                        let tx = audio_tx.clone();
-                        let buf = buffer.clone();
-                        let sil = silence_count.clone();
-                        let vol = volume.clone();
-                        
-                        device.build_input_stream(
-                            &config.into(),
-                            move |data: &[f32], _| {
-                                if data.is_empty() { return; }
-                                
-                                let mono = to_mono(data, channels);
-                                let resampled = resample_linear(mono, sample_rate, TARGET_SAMPLE_RATE);
-                                
-                                let rms = calculate_rms(&resampled);
-                                if let Ok(mut v) = vol.lock() { *v = rms; }
-                                
-                                if let Ok(mut count) = sil.lock() {
-                                    if rms < SILENCE_THRESHOLD {
-                                        *count += 1;
-                                        if *count > SILENCE_SKIP_CHUNKS { return; }
-                                    } else {
-                                        *count = 0;
-                                    }
-                                }
-                                
-                                // Buffer and send tagged chunks (System/Stereo Mix source)
-                                if let Ok(mut b) = buf.lock() {
-                                    b.extend(resampled);
-                                    while b.len() >= MICRO_CHUNK_SAMPLES {
-                                        let chunk: Vec<f32> = b.drain(..MICRO_CHUNK_SAMPLES).collect();
-                                        if let Some(ref tx) = tx {
-                                            let _ = tx.send(TaggedAudio {
-                                                samples: chunk,
-                                                source: AudioSource::System,
-                                            });
-                                        }
-                                    }
-                                }
-                            },
-                            |e| eprintln!("[AUDIO] Stereo Mix error: {}", e),
-                            None
-                        ).ok()
-                    })
-                } else {
-                    eprintln!("[AUDIO] ✗ System audio capture not available");
-                    eprintln!("[AUDIO] To enable system audio capture:");
-                    eprintln!("  1. Right-click Sound icon in system tray → Sounds");
-                    eprintln!("  2. Go to Recording tab");
-                    eprintln!("  3. Right-click → Show Disabled Devices");
-                    eprintln!("  4. Enable 'Stereo Mix' if available");
-                    None
-                }
-            }
-        } else { None };
-        
-        #[cfg(not(target_os = "windows"))]
-        let loopback_stream: Option<cpal::Stream> = None;
-        
-        // Play streams
+        // Play stream
         if let Some(ref s) = mic_stream { 
             if s.play().is_ok() {
                 println!("[AUDIO] ✓ Mic stream active");
             }
         }
         
-        #[cfg(target_os = "windows")]
-        if let Some(ref s) = loopback_stream { 
-            if s.play().is_ok() {
-                println!("[AUDIO] ✓ Loopback stream active");
-            }
-        }
-        
-        println!("[AUDIO] Capture running...");
+        println!("[AUDIO] Capture running (single mic, ECAPA speaker identification)...");
         let _ = stop_rx.recv();
         println!("[AUDIO] Capture stopped");
     });
