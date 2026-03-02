@@ -286,7 +286,7 @@ pub fn extract_embedding(
 
     // Energy pre-check: reject near-silent audio that would produce unreliable embeddings
     let rms = (audio.iter().map(|s| s * s).sum::<f32>() / audio.len() as f32).sqrt();
-    if rms < 0.003 {
+    if rms < 0.001 {
         return Err(format!(
             "Audio too quiet (RMS: {:.6}), embedding would be unreliable",
             rms

@@ -48,7 +48,7 @@ impl Default for AudioState {
 const TARGET_SAMPLE_RATE: u32 = 16000;
 const MICRO_CHUNK_SAMPLES: usize = 160;
 const SILENCE_THRESHOLD: f32 = 0.00005; // Ultra-low — only skip true digital silence, let processing loop decide
-const SILENCE_SKIP_CHUNKS: usize = 150; // ~1.5 seconds of true silence before skipping (was 0.5s — too aggressive)
+const SILENCE_SKIP_CHUNKS: usize = 500; // ~5 seconds of true silence before stopping sends — gives pre-roll plenty of data
 
 #[tauri::command]
 pub fn list_audio_devices() -> Result<Vec<String>, String> {

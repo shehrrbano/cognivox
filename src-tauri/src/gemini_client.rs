@@ -299,6 +299,43 @@ async fn call_gemini_with_text(
 // Main Connection
 // ============================================================================
 
+/// Start the audio processing loop IMMEDIATELY so speech detection begins
+/// as soon as recording starts. This is decoupled from Gemini connection
+/// to eliminate the 6-7 second delay caused by waiting for Whisper + API init.
+#[tauri::command]
+pub async fn start_processing_loop(
+    state: tauri::State<'_, GeminiState>,
+    app: AppHandle,
+) -> Result<String, String> {
+    let loop_is_alive = state.loop_alive.load(Ordering::SeqCst);
+    let audio_rx = poison_lock(&state.audio_rx).take();
+    
+    if let Some(rx) = audio_rx {
+        println!("[AUDIO] Starting audio processing loop IMMEDIATELY...");
+        let app_clone = app.clone();
+        let alive_flag = state.loop_alive.clone();
+        tokio::spawn(async move {
+            smart_audio_loop(rx, app_clone, alive_flag).await;
+        });
+        Ok("Audio loop started".to_string())
+    } else if !loop_is_alive {
+        println!("[AUDIO] ⚠ Audio loop DIED — respawning with new channel...");
+        let (new_tx, new_rx) = crossbeam_channel::unbounded::<TaggedAudio>();
+        let audio_state = app.state::<AudioState>();
+        *poison_lock(&audio_state.audio_tx) = Some(new_tx);
+        let app_clone = app.clone();
+        let alive_flag = state.loop_alive.clone();
+        tokio::spawn(async move {
+            smart_audio_loop(new_rx, app_clone, alive_flag).await;
+        });
+        println!("[AUDIO] ✓ Audio loop respawned with fresh channel");
+        Ok("Audio loop respawned".to_string())
+    } else {
+        println!("[AUDIO] Audio loop already running");
+        Ok("Audio loop already running".to_string())
+    }
+}
+
 #[tauri::command]
 pub async fn test_gemini_connection(
     state: tauri::State<'_, GeminiState>,
@@ -319,34 +356,18 @@ pub async fn test_gemini_connection(
     
     let _ = app.emit("cognivox:status", "Testing...");
     
-    // ALWAYS start audio processing loop first (before test), so it's ready
-    // even if the connection test fails due to rate limiting etc.
+    // Ensure audio loop is running (in case start_processing_loop wasn't called yet)
     let loop_is_alive = state.loop_alive.load(Ordering::SeqCst);
-    let audio_rx = poison_lock(&state.audio_rx).take();
-    
-    if let Some(rx) = audio_rx {
-        // First time — rx was available, spawn the loop
-        println!("[GEMINI] Starting audio processing loop...");
-        let app_clone = app.clone();
-        let alive_flag = state.loop_alive.clone();
-        tokio::spawn(async move {
-            smart_audio_loop(rx, app_clone, alive_flag).await;
-        });
-    } else if !loop_is_alive {
-        // rx was already taken BUT the loop is DEAD — respawn with a new channel
-        println!("[GEMINI] ⚠ Audio loop DIED — respawning with new channel...");
-        let (new_tx, new_rx) = crossbeam_channel::unbounded::<TaggedAudio>();
-        // Replace the sender in AudioState so new capture threads use it
-        let audio_state = app.state::<AudioState>();
-        *poison_lock(&audio_state.audio_tx) = Some(new_tx);
-        let app_clone = app.clone();
-        let alive_flag = state.loop_alive.clone();
-        tokio::spawn(async move {
-            smart_audio_loop(new_rx, app_clone, alive_flag).await;
-        });
-        println!("[GEMINI] ✓ Audio loop respawned with fresh channel");
-    } else {
-        println!("[GEMINI] Audio loop already running");
+    if !loop_is_alive {
+        let audio_rx = poison_lock(&state.audio_rx).take();
+        if let Some(rx) = audio_rx {
+            println!("[GEMINI] Audio loop not running — starting it now");
+            let app_clone = app.clone();
+            let alive_flag = state.loop_alive.clone();
+            tokio::spawn(async move {
+                smart_audio_loop(rx, app_clone, alive_flag).await;
+            });
+        }
     }
     
     // Quick test
@@ -867,12 +888,14 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle, alive_flag:
                 tokio::spawn(async move {
                     let app = app_clone;
                     
-                    // === ECAPA-TDNN ENERGY-SEGMENTED SPEAKER DIARIZATION ===
-                    // Instead of fixed windows (which can straddle speaker transitions and
-                    // produce blended embeddings), we detect silence gaps in the audio to
-                    // find natural speaker turn boundaries. Each segment between silences
-                    // likely contains a single speaker, giving much cleaner embeddings.
-                    // Falls back to windowed approach for long continuous segments.
+                    // === ECAPA-TDNN SLIDING-WINDOW SPEAKER CHANGE DETECTION ===
+                    // Slides overlapping windows across the audio and computes
+                    // ECAPA embeddings.  Consecutive windows whose embeddings
+                    // have LOW cosine similarity indicate a speaker change.
+                    // Each run of same-speaker windows is identified against the
+                    // speaker registry.  This is more robust than energy-based
+                    // segmentation because it works even when speakers don't
+                    // leave silence gaps between turns.
                     let speaker_tag = {
                         let sid_state = app.state::<SpeakerIdState>();
                         let is_sid_init = *poison_lock(&sid_state.is_initialized);
@@ -884,167 +907,203 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle, alive_flag:
                             let sid_threshold = *poison_lock(&sid_state.threshold);
                             
                             if let (Some(sess), Some(win), Some(fb)) = (sid_session, sid_window, sid_filterbank) {
-                                // --- Energy-based segmentation parameters ---
-                                const FRAME_SIZE: usize = 1600;  // 100ms frames at 16kHz
-                                const SILENCE_RMS_THRESH: f32 = 0.008; // RMS below this = silence
-                                const MIN_SILENCE_FRAMES: usize = 2;   // 200ms+ silence = speaker boundary
-                                const MIN_SEGMENT_SAMPLES: usize = 16000; // 1s minimum for ECAPA
-                                const MAX_SEGMENT_BEFORE_WINDOW: usize = 48000; // 3s — use windowed for longer
-                                const WINDOW_SAMPLES: usize = 24000; // 1.5s windows for fallback
-                                const HOP_SAMPLES: usize = 8000;     // 0.5s hop for finer granularity
-                                const MIN_WINDOW_RMS: f32 = 0.002;
+                                // --- Sliding window parameters ---
+                                const WINDOW_SAMPLES: usize = 24000; // 1.5s windows — good stability/granularity balance
+                                const HOP_SAMPLES: usize = 8000;     // 0.5s hop for fine-grained change detection
+                                const MIN_WINDOW_SAMPLES: usize = 16000; // 1.0s minimum for ECAPA
+                                const MIN_WINDOW_RMS: f32 = 0.001;   // Lowered: catch quiet speakers
+                                // Cosine similarity between consecutive windows below this
+                                // indicates a speaker change.  Same-speaker consecutive
+                                // windows typically score 0.65-0.95, different speakers
+                                // score 0.0-0.40.
+                                const CHANGE_THRESHOLD: f32 = 0.45;
                                 
-                                // Step 1: Compute per-frame energy
-                                let n_frames = audio.len() / FRAME_SIZE;
-                                let frame_rms: Vec<f32> = (0..n_frames)
-                                    .map(|i| rms(&audio[i * FRAME_SIZE..(i + 1) * FRAME_SIZE]))
-                                    .collect();
-                                
-                                // Step 2: Find silence gaps (runs of low-energy frames)
-                                let mut segments: Vec<(usize, usize)> = Vec::new(); // (start_sample, end_sample)
-                                let mut seg_start: usize = 0;
-                                let mut silence_run: usize = 0;
-                                
-                                for (i, &frms) in frame_rms.iter().enumerate() {
-                                    if frms < SILENCE_RMS_THRESH {
-                                        silence_run += 1;
-                                        if silence_run >= MIN_SILENCE_FRAMES {
-                                            // Found a silence gap — end current segment
-                                            let seg_end = (i - silence_run + 1) * FRAME_SIZE;
-                                            if seg_end > seg_start + FRAME_SIZE {
-                                                segments.push((seg_start, seg_end));
-                                            }
-                                            seg_start = (i + 1) * FRAME_SIZE;
-                                        }
-                                    } else {
-                                        silence_run = 0;
+                                // Step 1: Build overlapping windows
+                                let mut windows: Vec<(usize, usize)> = Vec::new();
+                                if audio.len() >= MIN_WINDOW_SAMPLES {
+                                    let mut start = 0usize;
+                                    while start + MIN_WINDOW_SAMPLES <= audio.len() {
+                                        let end = (start + WINDOW_SAMPLES).min(audio.len());
+                                        windows.push((start, end));
+                                        start += HOP_SAMPLES;
                                     }
-                                }
-                                // Add final segment
-                                if audio.len() > seg_start + FRAME_SIZE {
-                                    segments.push((seg_start, audio.len()));
-                                }
-                                
-                                // If no segments found, treat whole audio as one segment
-                                if segments.is_empty() {
-                                    segments.push((0, audio.len()));
-                                }
-                                
-                                println!("[SPEAKER-ID] Energy segmentation: {:.1}s audio → {} segments",
-                                    audio.len() as f32 / 16000.0, segments.len());
-                                
-                                // Step 3: For each segment, run ECAPA (windowed fallback for long ones)
-                                let mut segment_labels: Vec<String> = Vec::new();
-                                let mut any_new_speaker = false;
-                                
-                                for (seg_idx, &(s_start, s_end)) in segments.iter().enumerate() {
-                                    let seg_len = s_end - s_start;
-                                    if seg_len < MIN_SEGMENT_SAMPLES {
-                                        println!("[SPEAKER-ID] Segment {} too short ({:.2}s), skipping",
-                                            seg_idx, seg_len as f32 / 16000.0);
-                                        continue;
+                                    if windows.is_empty() {
+                                        windows.push((0, audio.len()));
                                     }
-                                    
-                                    // Build sub-windows for this segment
-                                    let mut sub_windows: Vec<(usize, usize)> = Vec::new();
-                                    if seg_len > MAX_SEGMENT_BEFORE_WINDOW {
-                                        // Long segment: use windowed approach within it
-                                        let mut ws = s_start;
-                                        while ws + MIN_SEGMENT_SAMPLES <= s_end {
-                                            let we = (ws + WINDOW_SAMPLES).min(s_end);
-                                            sub_windows.push((ws, we));
-                                            ws += HOP_SAMPLES;
-                                        }
-                                    } else {
-                                        // Short-to-medium segment: single ECAPA run
-                                        sub_windows.push((s_start, s_end));
-                                    }
-                                    
-                                    for &(w_start, w_end) in &sub_windows {
-                                        let window_audio = audio[w_start..w_end].to_vec();
-                                        let window_rms_val = rms(&window_audio);
-                                        if window_rms_val < MIN_WINDOW_RMS {
-                                            continue;
-                                        }
-                                        
-                                        let sess_c = sess.clone();
-                                        let win_c = win.clone();
-                                        let fb_c = fb.clone();
-                                        
-                                        let emb_result = tokio::task::spawn_blocking(move || {
-                                            let mut sess_guard = sess_c.lock().unwrap();
-                                            extract_embedding(&mut sess_guard, &window_audio, &win_c, &fb_c)
-                                        }).await;
-                                        
-                                        match emb_result {
-                                            Ok(Ok(emb)) => {
-                                                let mut speakers = poison_lock(&sid_state.speakers);
-                                                let mut next_num = poison_lock(&sid_state.next_speaker_num);
-                                                let result = identify_or_register_speaker(
-                                                    &mut speakers, &emb, sid_threshold, &mut next_num
-                                                );
-                                                println!("[SPEAKER-ID] Seg {} ({:.1}s-{:.1}s) → {} (confidence: {:.3}, new: {})",
-                                                    seg_idx, w_start as f32 / 16000.0, w_end as f32 / 16000.0,
-                                                    result.speaker_label, result.confidence, result.is_new_speaker);
-                                                
-                                                if result.is_new_speaker {
-                                                    any_new_speaker = true;
-                                                }
-                                                segment_labels.push(result.speaker_label.clone());
-                                                
-                                                if result.is_new_speaker || speakers.values().map(|p| p.sample_count).sum::<u32>() % 5 == 0 {
-                                                    let _ = save_profiles(&speakers);
-                                                }
-                                                drop(speakers);
-                                                drop(next_num);
-                                            }
-                                            Ok(Err(e)) => {
-                                                println!("[SPEAKER-ID] Seg {} embedding error: {}", seg_idx, e);
-                                            }
-                                            Err(e) => {
-                                                println!("[SPEAKER-ID] Seg {} task error: {}", seg_idx, e);
-                                            }
-                                        }
-                                    }
-                                }
-                                
-                                // Determine unique speakers across all segments
-                                let mut unique_speakers: Vec<String> = Vec::new();
-                                for label in &segment_labels {
-                                    if !unique_speakers.contains(label) {
-                                        unique_speakers.push(label.clone());
-                                    }
-                                }
-                                
-                                // Build the final speaker tag
-                                let final_tag = if unique_speakers.is_empty() {
-                                    println!("[SPEAKER-ID] No segments produced results, keeping original tag: {}", speaker_tag);
-                                    speaker_tag.clone()
-                                } else if unique_speakers.len() == 1 {
-                                    println!("[SPEAKER-ID] Single speaker detected: {}", unique_speakers[0]);
-                                    let _ = app.emit("cognivox:speaker_identified", serde_json::json!({
-                                        "speaker_id": unique_speakers[0],
-                                        "speaker_label": unique_speakers[0],
-                                        "confidence": 1.0,
-                                        "is_new": any_new_speaker,
-                                    }));
-                                    unique_speakers[0].clone()
                                 } else {
-                                    // Multiple distinct speakers detected!
-                                    println!("[SPEAKER-ID] ★ MULTIPLE SPEAKERS DETECTED: {:?}", unique_speakers);
-                                    println!("[SPEAKER-ID]   Segment sequence: {:?}", segment_labels);
-                                    for sp in &unique_speakers {
-                                        let _ = app.emit("cognivox:speaker_identified", serde_json::json!({
-                                            "speaker_id": sp,
-                                            "speaker_label": sp,
-                                            "confidence": 1.0,
-                                            "is_new": false,
-                                        }));
-                                    }
-                                    unique_speakers.join("+")
-                                };
+                                    windows.push((0, audio.len()));
+                                }
                                 
-                                final_tag
+                                println!("[SPEAKER-ID] Sliding-window diarization: {:.1}s audio → {} windows (1.5s, 0.5s hop)",
+                                    audio.len() as f32 / 16000.0, windows.len());
+                                
+                                // Step 2: Extract embedding for each window
+                                let mut window_embeddings: Vec<(usize, usize, Vec<f32>)> = Vec::new(); // (start, end, embedding)
+                                
+                                for &(w_start, w_end) in &windows {
+                                    let window_audio = audio[w_start..w_end].to_vec();
+                                    let window_rms_val = rms(&window_audio);
+                                    if window_rms_val < MIN_WINDOW_RMS {
+                                        continue; // Too quiet for reliable embedding
+                                    }
+                                    
+                                    let sess_c = sess.clone();
+                                    let win_c = win.clone();
+                                    let fb_c = fb.clone();
+                                    
+                                    let emb_result = tokio::task::spawn_blocking(move || {
+                                        let mut sess_guard = sess_c.lock().unwrap();
+                                        extract_embedding(&mut sess_guard, &window_audio, &win_c, &fb_c)
+                                    }).await;
+                                    
+                                    match emb_result {
+                                        Ok(Ok(emb)) => {
+                                            window_embeddings.push((w_start, w_end, emb));
+                                        }
+                                        Ok(Err(e)) => {
+                                            println!("[SPEAKER-ID] Window {:.1}s-{:.1}s embedding error: {}",
+                                                w_start as f32 / 16000.0, w_end as f32 / 16000.0, e);
+                                        }
+                                        Err(e) => {
+                                            println!("[SPEAKER-ID] Window task error: {}", e);
+                                        }
+                                    }
+                                }
+                                
+                                if window_embeddings.is_empty() {
+                                    println!("[SPEAKER-ID] No valid embeddings, keeping original tag: {}", speaker_tag);
+                                    speaker_tag.clone()
+                                } else if window_embeddings.len() == 1 {
+                                    // Only one window — identify directly
+                                    let mut speakers = poison_lock(&sid_state.speakers);
+                                    let mut next_num = poison_lock(&sid_state.next_speaker_num);
+                                    let result = identify_or_register_speaker(
+                                        &mut speakers, &window_embeddings[0].2, sid_threshold, &mut next_num
+                                    );
+                                    println!("[SPEAKER-ID] Single window → {} (confidence: {:.3})",
+                                        result.speaker_label, result.confidence);
+                                    let _ = app.emit("cognivox:speaker_identified", serde_json::json!({
+                                        "speaker_id": result.speaker_id,
+                                        "speaker_label": result.speaker_label,
+                                        "confidence": result.confidence,
+                                        "is_new": result.is_new_speaker,
+                                    }));
+                                    if result.is_new_speaker {
+                                        let _ = save_profiles(&speakers);
+                                    }
+                                    result.speaker_label
+                                } else {
+                                    // Step 3: Detect speaker changes between consecutive windows
+                                    // using cosine similarity of their embeddings
+                                    let mut segment_boundaries: Vec<usize> = vec![0]; // Start of first segment
+                                    
+                                    for i in 1..window_embeddings.len() {
+                                        let sim = {
+                                            let a = &window_embeddings[i - 1].2;
+                                            let b = &window_embeddings[i].2;
+                                            let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+                                            dot // Already L2-normalized, so dot = cosine similarity
+                                        };
+                                        
+                                        println!("[SPEAKER-ID] Window {} → {}: cosine similarity = {:.3}{}",
+                                            i - 1, i, sim,
+                                            if sim < CHANGE_THRESHOLD { " ★ SPEAKER CHANGE" } else { "" });
+                                        
+                                        if sim < CHANGE_THRESHOLD {
+                                            segment_boundaries.push(i);
+                                        }
+                                    }
+                                    segment_boundaries.push(window_embeddings.len()); // End marker
+                                    
+                                    // Step 4: For each speaker segment (run of consecutive same-speaker windows),
+                                    // average their embeddings and identify against the registry
+                                    let mut segment_labels: Vec<String> = Vec::new();
+                                    let mut any_new_speaker = false;
+                                    
+                                    for seg_idx in 0..segment_boundaries.len() - 1 {
+                                        let seg_start_win = segment_boundaries[seg_idx];
+                                        let seg_end_win = segment_boundaries[seg_idx + 1];
+                                        
+                                        // Average embeddings in this segment for a more stable representation
+                                        let n_windows = seg_end_win - seg_start_win;
+                                        let emb_dim = window_embeddings[seg_start_win].2.len();
+                                        let mut avg_emb = vec![0.0f32; emb_dim];
+                                        
+                                        for w_idx in seg_start_win..seg_end_win {
+                                            for (j, &v) in window_embeddings[w_idx].2.iter().enumerate() {
+                                                avg_emb[j] += v;
+                                            }
+                                        }
+                                        for v in avg_emb.iter_mut() {
+                                            *v /= n_windows as f32;
+                                        }
+                                        // L2 normalize the averaged embedding
+                                        let norm: f32 = avg_emb.iter().map(|x| x * x).sum::<f32>().sqrt();
+                                        if norm > 1e-12 {
+                                            for v in avg_emb.iter_mut() {
+                                                *v /= norm;
+                                            }
+                                        }
+                                        
+                                        let time_start = window_embeddings[seg_start_win].0 as f32 / 16000.0;
+                                        let time_end = window_embeddings[seg_end_win - 1].1 as f32 / 16000.0;
+                                        
+                                        let mut speakers = poison_lock(&sid_state.speakers);
+                                        let mut next_num = poison_lock(&sid_state.next_speaker_num);
+                                        let result = identify_or_register_speaker(
+                                            &mut speakers, &avg_emb, sid_threshold, &mut next_num
+                                        );
+                                        
+                                        println!("[SPEAKER-ID] Segment {} ({:.1}s-{:.1}s, {} windows) → {} (confidence: {:.3}, new: {})",
+                                            seg_idx, time_start, time_end, n_windows,
+                                            result.speaker_label, result.confidence, result.is_new_speaker);
+                                        
+                                        if result.is_new_speaker {
+                                            any_new_speaker = true;
+                                        }
+                                        segment_labels.push(result.speaker_label.clone());
+                                        
+                                        if result.is_new_speaker || speakers.values().map(|p| p.sample_count).sum::<u32>() % 5 == 0 {
+                                            let _ = save_profiles(&speakers);
+                                        }
+                                        drop(speakers);
+                                        drop(next_num);
+                                    }
+                                    
+                                    // Build final tag from unique speakers
+                                    let mut unique_speakers: Vec<String> = Vec::new();
+                                    for label in &segment_labels {
+                                        if !unique_speakers.contains(label) {
+                                            unique_speakers.push(label.clone());
+                                        }
+                                    }
+                                    
+                                    if unique_speakers.is_empty() {
+                                        println!("[SPEAKER-ID] No segments identified, keeping: {}", speaker_tag);
+                                        speaker_tag.clone()
+                                    } else if unique_speakers.len() == 1 {
+                                        println!("[SPEAKER-ID] Single speaker: {}", unique_speakers[0]);
+                                        let _ = app.emit("cognivox:speaker_identified", serde_json::json!({
+                                            "speaker_id": unique_speakers[0],
+                                            "speaker_label": unique_speakers[0],
+                                            "confidence": 1.0,
+                                            "is_new": any_new_speaker,
+                                        }));
+                                        unique_speakers[0].clone()
+                                    } else {
+                                        println!("[SPEAKER-ID] ★ MULTIPLE SPEAKERS: {:?}", unique_speakers);
+                                        println!("[SPEAKER-ID]   Segment order: {:?}", segment_labels);
+                                        for sp in &unique_speakers {
+                                            let _ = app.emit("cognivox:speaker_identified", serde_json::json!({
+                                                "speaker_id": sp,
+                                                "speaker_label": sp,
+                                                "confidence": 1.0,
+                                                "is_new": false,
+                                            }));
+                                        }
+                                        unique_speakers.join("+")
+                                    }
+                                }
                             } else {
                                 speaker_tag // Model components not ready
                             }

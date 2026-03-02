@@ -117,6 +117,7 @@ pub fn run() {
             audio_capture::stop_audio_capture,
             audio_capture::set_capture_mode,
             audio_capture::get_current_volume,
+            gemini_client::start_processing_loop,
             gemini_client::test_gemini_connection,
             gemini_client::update_gemini_key,
             gemini_client::reset_audio_loop,

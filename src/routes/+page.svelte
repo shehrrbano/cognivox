@@ -1428,19 +1428,72 @@ Return ONLY valid JSON, no markdown, no explanation.`;
                 autoSaveInterval = setInterval(() => saveSession(false), 30000);
 
                 // ============================================================
-                // BACKGROUND INIT: Validate keys + init engines AFTER capture
-                // starts. Audio is being captured and buffered while this runs.
+                // INSTANT START: Start audio processing loop IMMEDIATELY
+                // so speech detection begins on the very first syllable.
+                // Whisper, Speaker ID, and Gemini init run in parallel.
                 // ============================================================
+
+                // STEP 0: Start the audio processing loop NOW — before any
+                // model loading or API calls. This reads from the audio
+                // channel right away so no samples are lost.
+                try {
+                    await invoke("start_processing_loop");
+                    console.log(
+                        "[Recording] Audio processing loop started IMMEDIATELY",
+                    );
+                } catch (e) {
+                    console.warn("[Recording] start_processing_loop:", e);
+                }
+
                 if (keyState.keys.length > 0) {
-                    // Don't block — run key validation in background
+                    // Don't block recording — run all initialization in background
                     (async () => {
                         try {
                             status = "Initializing AI engine...";
+
+                            // STEP 1: Init Whisper + Speaker ID in PARALLEL
+                            // Both are needed for processing but are independent
+                            const [whisperResult, speakerResult] =
+                                await Promise.allSettled([
+                                    (async () => {
+                                        await invoke("initialize_whisper", {
+                                            modelSize: "small",
+                                        });
+                                        await invoke("set_whisper_language", {
+                                            language: "auto",
+                                        });
+                                        console.log(
+                                            "[Recording] Whisper ready (small, auto-detect)",
+                                        );
+                                    })(),
+                                    (async () => {
+                                        await invoke("initialize_speaker_id");
+                                        speakerIdInitialized = true;
+                                        console.log(
+                                            "[Recording] ECAPA-TDNN speaker ID ready",
+                                        );
+                                        await refreshSpeakerIdStatus();
+                                    })(),
+                                ]);
+
+                            if (whisperResult.status === "rejected") {
+                                console.log(
+                                    "[Recording] Whisper already initialized or skipped:",
+                                    whisperResult.reason,
+                                );
+                            }
+                            if (speakerResult.status === "rejected") {
+                                console.warn(
+                                    "[Recording] Speaker ID init failed (non-blocking):",
+                                    speakerResult.reason,
+                                );
+                            }
+
+                            // STEP 2: Get a working API key
                             const keyResult =
                                 await keyManager.getNextWorkingKeyFast();
 
                             if (!keyResult.success || !keyResult.key) {
-                                // Keys failed but recording continues for audio capture
                                 status =
                                     "Recording (AI offline — check API keys)";
                                 showToast(
@@ -1457,25 +1510,7 @@ Return ONLY valid JSON, no markdown, no explanation.`;
                                 keyResult.key?.name,
                             );
 
-                            // Ensure Whisper is initialized
-                            try {
-                                await invoke("initialize_whisper", {
-                                    modelSize: "small",
-                                });
-                                await invoke("set_whisper_language", {
-                                    language: "auto",
-                                });
-                                console.log(
-                                    "[Recording] Whisper initialized (small model) with auto language detection",
-                                );
-                            } catch (e) {
-                                console.log(
-                                    "[Recording] Whisper already initialized or init skipped:",
-                                    e,
-                                );
-                            }
-
-                            // Push working key to Rust backend
+                            // STEP 3: Set Gemini key (audio loop already running)
                             try {
                                 await invoke("test_gemini_connection", {
                                     key: keyResult.key!.key,
