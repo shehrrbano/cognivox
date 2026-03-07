@@ -132,9 +132,11 @@ pub async fn transcribe_audio_with_context(
     let duration_secs = audio_samples.len() as f32 / 16000.0;
     println!("[WHISPER] Transcribing {:.1}s of audio ({} samples)...", duration_secs, audio_samples.len());
     
-    // Run CPU-intensive transcription in a blocking thread pool
-    // This prevents blocking the async runtime (which was causing delays)
-    tokio::task::spawn_blocking(move || {
+    // Run CPU-intensive transcription in a blocking thread pool with a timeout.
+    // CPU-only Whisper can take ~10-20x real-time on a typical machine.
+    // For 30s audio that could be 5-10 minutes, so scale timeout generously.
+    let timeout_secs = (duration_secs * 30.0).max(90.0).min(600.0) as u64;
+    let task = tokio::task::spawn_blocking(move || {
         let start_time = std::time::Instant::now();
         
         // Create inference state from the CACHED context (fast - no model reload!)
@@ -158,14 +160,19 @@ pub async fn transcribe_audio_with_context(
         params.set_print_realtime(false);
         params.set_print_timestamps(false);
         params.set_single_segment(false);    // Allow multiple segments
-        params.set_n_threads(4);              // 4 threads - balanced
+        // Use more threads for CPU-only transcription to reduce latency
+        let cpu_threads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .min(8);   // Cap at 8 to avoid contention
+        params.set_n_threads(cpu_threads as i32);
         
         // Accuracy-tuned settings (no speed cost — these are decoder filters)
         params.set_temperature(0.0);          // Deterministic first pass
         params.set_temperature_inc(0.2);      // Fallback increment if first pass fails
-        params.set_no_speech_thold(0.6);      // Stricter: reject segments Whisper thinks are not speech
-        params.set_entropy_thold(2.2);        // Tighter: reject garbled/uncertain segments (was 2.4)
-        params.set_logprob_thold(-0.8);       // Reject very low-confidence tokens (was -1.0)
+        params.set_no_speech_thold(0.7);      // Stricter: reject segments Whisper thinks are not speech (raised from 0.6)
+        params.set_entropy_thold(2.0);        // Tighter: reject garbled/uncertain segments (was 2.2)
+        params.set_logprob_thold(-0.5);       // Reject low-confidence tokens more aggressively (was -0.8)
         params.set_suppress_blank(true);
         
         // Richer prompt for better word accuracy, with bilingual English/Urdu support
@@ -224,9 +231,15 @@ pub async fn transcribe_audio_with_context(
             language: language.to_string(),
             confidence,
         })
-    })
-    .await
-    .map_err(|e| format!("Transcription task join error: {}", e))?
+    });
+
+    match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), task).await {
+        Ok(join_result) => join_result.map_err(|e| format!("Transcription task join error: {}", e))?,
+        Err(_) => {
+            println!("[WHISPER] ⚠ Transcription timed out after {}s for {:.1}s audio", timeout_secs, duration_secs);
+            Err(format!("Transcription timed out after {}s (CPU-only mode is slow — try shorter speech segments)", timeout_secs))
+        }
+    }
 }
 
 pub async fn transcribe_audio(

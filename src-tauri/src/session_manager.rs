@@ -159,7 +159,7 @@ impl SessionData {
         
         self.summary = Some(SessionSummary {
             executive_summary: format!(
-                "Meeting with {} transcripts, {} entities discussed.",
+                "Session with {} transcripts, {} entities discussed.",
                 self.transcripts.len(),
                 self.graph_nodes.len()
             ),

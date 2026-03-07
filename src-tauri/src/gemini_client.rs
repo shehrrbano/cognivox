@@ -32,13 +32,17 @@ const MAX_BACKOFF_SECS: u64 = 60;              // Max 60 second backoff
 const RATE_LIMIT_CODES: [&str; 3] = ["RESOURCE_EXHAUSTED", "RATE_LIMIT_EXCEEDED", "rateLimitExceeded"];
 
 // AUDIO SEGMENTATION CONFIG (used before Whisper)
-const MIN_SPEECH_SECS: f32 = 0.3;              // Minimum 0.3s of speech (catch quick utterances)
-const SILENCE_TIMEOUT_SECS: f32 = 0.6;         // 0.6s silence = end of segment (quick turn-taking)
-const MAX_BATCH_SECS: f32 = 5.0;               // Max 5 seconds per batch — faster processing cycles
-const FIRST_BATCH_SECS: f32 = 2.5;             // First chunk triggers after just 2.5s for instant feedback
-const OVERLAP_SECS: f32 = 1.0;                 // 1.0s overlap between chunks — prevents lost context at boundaries
-const SPEECH_THRESHOLD: f32 = 0.0001;          // Very sensitive — catch ANY speaker regardless of distance from mic
-const SILENCE_THRESHOLD: f32 = 0.00004;        // Ultra-low — only true digital silence is skipped
+const MIN_SPEECH_SECS: f32 = 1.5;              // Minimum 1.5s of speech before we consider processing
+const SILENCE_TIMEOUT_SECS: f32 = 2.5;         // 2.5s silence = end of utterance (generous to avoid cutting natural pauses)
+const MAX_BATCH_SECS: f32 = 30.0;              // Safety-valve only: process after 30s even if still speaking
+const OVERLAP_SECS: f32 = 0.5;                 // 0.5s overlap between chunks for context continuity
+const SPEECH_THRESHOLD: f32 = 0.003;           // Minimum speech threshold — raised to reject ambient noise
+const SILENCE_THRESHOLD: f32 = 0.0005;         // Below this is silence — raised from near-zero
+
+// Adaptive noise gate parameters
+const NOISE_ADAPT_RATE: f32 = 0.03;            // Slow adaptation to track ambient noise floor
+const SPEECH_SNR: f32 = 3.5;                   // Speech must be 3.5x above noise floor
+const MAX_DYNAMIC_THRESHOLD: f32 = 0.15;       // Cap dynamic threshold so loud noise doesn't block speech
 
 // Pre-roll ring buffer: always keep last ~1.5s of audio so that when speech IS
 // detected we don't lose the onset (critical for a second speaker whose first
@@ -53,6 +57,9 @@ pub struct GeminiState {
     pub is_connected: StdMutex<bool>,
     pub selected_model: StdMutex<String>,
     pub reset_signal: StdMutex<bool>,
+    /// When true, the audio loop will immediately process whatever is buffered
+    /// (skip the silence timeout). Set when user stops recording.
+    pub flush_signal: StdMutex<bool>,
     /// Tracks whether the audio processing loop is alive.
     /// Set to true when loop starts, false when it exits (including on panic via drop guard).
     pub loop_alive: Arc<AtomicBool>,
@@ -66,6 +73,7 @@ impl Default for GeminiState {
             is_connected: StdMutex::new(false),
             selected_model: StdMutex::new("gemini-2.0-flash".to_string()),
             reset_signal: StdMutex::new(false),
+            flush_signal: StdMutex::new(false),
             loop_alive: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -129,7 +137,7 @@ Do NOT default to NEUTRAL. Carefully analyze the actual emotional content of the
 Only use NEUTRAL when speech is truly flat/informational with no emotional indicators at all.
 
 OUTPUT FORMAT (JSON array - one entry per detected speaker segment):
-[{"transcript":"speaker's text in English or Roman Urdu (NEVER Arabic script)","speaker":"Speaker 1 or You or Speaker 2","tone":"<actual detected tone>","category":["TASK"],"confidence":0.85,"summary":"Brief summary","entities":[{"name":"entity name","type":"PERSON|PROJECT|TOPIC|LOCATION|DATE|ORG"}],"graph_edges":[{"from":"entity or speaker","to":"entity or speaker","relation":"verb or relationship"}]}]
+[{"transcript":"speaker's text in English or Roman Urdu (NEVER Arabic script)","speaker":"Speaker 1 or You or Speaker 2","tone":"<actual detected tone>","category":["TASK"],"confidence":0.85,"summary":"Brief summary","entities":[{"name":"entity name","type":"PERSON|PROJECT|TOPIC|CONCEPT|TECHNOLOGY|METHOD|THEORY|LOCATION|DATE|ORG"}],"graph_edges":[{"from":"entity or speaker","to":"entity or concept","relation":"discusses|requires|used_in|explains|part_of|related_to|example_of|depends_on|leads_to"}]}]
 
 IMPORTANT: Default to ONE speaker unless you have strong evidence of multiple speakers. Most audio segments come from a single person. Return an array with one element for single-speaker input.
 
@@ -139,9 +147,10 @@ RULES:
 - tone: NEUTRAL|URGENT|FRUSTRATED|EXCITED|POSITIVE|NEGATIVE|HESITANT|DOMINANT|EMPATHETIC (pick the BEST match, avoid NEUTRAL unless truly emotionless)
 - category: TASK|DECISION|DEADLINE|QUERY|ACTION_ITEM|RISK|SENTIMENT|URGENCY|INTERRUPTION|AGREEMENT|DISAGREEMENT|OFF_TOPIC|EMOTION_SHIFT|DOMINANCE_SHIFT|EMPATHY_GAP|TOPIC_DRIFT
 - confidence: 0.0-1.0
-- entities: Extract ALL people, projects, topics, organizations, locations, dates mentioned
-- graph_edges: Create relationships between entities
-- Always include at least one graph_edge connecting the speaker to the main topic
+- entities: Extract ALL concepts, theories, methods, techniques, people, projects, topics, organizations, locations, dates mentioned. Use multi-word names (e.g. "Machine Learning" not "ML"). Include academic/technical concepts.
+- graph_edges: Create SEMANTIC relationships between entities. Use relationship types like: discusses, requires, used_in, explains, part_of, related_to, example_of, depends_on, leads_to, contrasts_with, implements, extends
+- Always include at least one graph_edge connecting the speaker to the main concept discussed
+- Create concept-to-concept edges when concepts are related (e.g. "Gradient Descent" requires "Derivative")
 - For low-confidence or unclear: lower confidence value, not error"#;
 
 // ============================================================================
@@ -514,6 +523,15 @@ pub fn reset_audio_loop(state: tauri::State<'_, GeminiState>) -> Result<String, 
     Ok("Reset signal sent".to_string())
 }
 
+/// Flush: tell the audio loop to process whatever is currently buffered NOW,
+/// without waiting for the silence timeout. Called when user stops recording.
+#[tauri::command]
+pub fn flush_audio_buffer(state: tauri::State<'_, GeminiState>) -> Result<String, String> {
+    *poison_lock(&state.flush_signal) = true;
+    println!("[AUDIO] Flush signal sent — will process buffered audio immediately");
+    Ok("Flush signal sent".to_string())
+}
+
 // ============================================================================
 // Smart Audio Loop: Audio -> Whisper -> Gemini
 // ============================================================================
@@ -542,7 +560,7 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle, alive_flag:
     let mut speaking = false;
     let mut speech_start: Option<Instant> = None;
     let mut last_speech: Option<Instant> = None;
-    let mut is_first_chunk = true; // Fast first-chunk trigger for instant feedback
+    // No first-chunk shortcut — wait for the user to finish speaking for complete transcription
     
     // Pre-roll ring buffer: captures ALL mic audio so we never lose the first
     // syllables of a new speaker.  When speech is detected while speaking==false,
@@ -575,12 +593,17 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle, alive_flag:
     let mut tick = interval(Duration::from_millis(50)); // More frequent polling
     let mut total_samples_received: u64 = 0;
     let mut processing_started_at: Option<Instant> = None;
-    const PROCESSING_TIMEOUT_SECS: u64 = 45; // Force-reset processing after 45s
+    const PROCESSING_TIMEOUT_SECS: u64 = 600; // Force-reset processing after 10 min (CPU Whisper on 30s audio can take minutes)
+    
+    // Adaptive noise floor — tracks ambient noise level and adjusts speech detection
+    let mut noise_floor: f32 = 0.005; // Conservative initial estimate
+    let mut dynamic_threshold: f32 = SPEECH_THRESHOLD;
     
     println!("[AUDIO] ========================================");
-    println!("[AUDIO] Speech threshold: {}, Silence threshold: {}", SPEECH_THRESHOLD, SILENCE_THRESHOLD);
+    println!("[AUDIO] Speech threshold (min): {}, Silence threshold: {}", SPEECH_THRESHOLD, SILENCE_THRESHOLD);
+    println!("[AUDIO] Adaptive noise gate: SNR={}, adapt_rate={}", SPEECH_SNR, NOISE_ADAPT_RATE);
     println!("[AUDIO] Min speech: {}s, Silence timeout: {}s, Max batch: {}s", MIN_SPEECH_SECS, SILENCE_TIMEOUT_SECS, MAX_BATCH_SECS);
-    println!("[AUDIO] Overlap between chunks: {}s", OVERLAP_SECS);
+    println!("[AUDIO] Overlap: {}s | Strategy: wait for speaker to finish, then transcribe entire utterance", OVERLAP_SECS);
     println!("[AUDIO] ========================================");
     
     loop {
@@ -608,10 +631,15 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle, alive_flag:
                 total_samples_received = 0;
                 _audio_received_count = 0;
                 request_count = 0;
-                is_first_chunk = true; // Reset first-chunk flag on session reset
+                // Session reset — fresh start
+                // Clear flush signal so a stale flush doesn't bleed into new session
+                *poison_lock(&state.flush_signal) = false;
                 // Reset rate-limiting state so new session starts fresh
                 *poison_lock(&backoff) = 0;
                 *poison_lock(&last_request) = Instant::now() - Duration::from_secs(MIN_REQUEST_INTERVAL_SECS);
+                // Reset adaptive noise floor
+                noise_floor = 0.005;
+                dynamic_threshold = SPEECH_THRESHOLD;
                 // Bump generation so any in-flight tasks from old session won't overwrite our fresh state
                 *poison_lock(&session_generation) += 1;
                 println!("[AUDIO] *** RESET: Backoff reset to 0, generation bumped ***");
@@ -689,13 +717,18 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle, alive_flag:
             // Log audio level every 2 seconds for diagnostics
             if last_level_log.elapsed() > Duration::from_secs(2) {
                 let buffer_duration = buffer.len() as f32 / 16000.0;
-                println!("[AUDIO] Level: {:.6} (threshold: {:.6}) | Speaking: {} | Buffer: {:.1}s | PreRoll: {:.1}s | Total samples: {}", 
-                         level, SPEECH_THRESHOLD, speaking, buffer_duration, pre_roll.len() as f32 / 16000.0, total_samples_received);
+                // Compute dynamic speech threshold from noise floor
+                dynamic_threshold = (noise_floor * SPEECH_SNR).max(SPEECH_THRESHOLD).min(MAX_DYNAMIC_THRESHOLD);
+                println!("[AUDIO] Level: {:.6} (dynamic_thr: {:.6}, noise_floor: {:.6}) | Speaking: {} | Buffer: {:.1}s | PreRoll: {:.1}s | Total samples: {}", 
+                         level, dynamic_threshold, noise_floor, speaking, buffer_duration, pre_roll.len() as f32 / 16000.0, total_samples_received);
                 last_level_log = Instant::now();
             }
             
-            // Speech detection with pre-roll to NEVER miss any speaker
-            if level > SPEECH_THRESHOLD {
+            // Compute dynamic threshold every audio tick (not just every 2s)
+            dynamic_threshold = (noise_floor * SPEECH_SNR).max(SPEECH_THRESHOLD).min(MAX_DYNAMIC_THRESHOLD);
+            
+            // Speech detection with adaptive threshold and pre-roll
+            if level > dynamic_threshold {
                 if !speaking {
                     speaking = true;
                     
@@ -705,7 +738,7 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle, alive_flag:
                     // speaker who starts softly.
                     if !pre_roll.is_empty() {
                         let pre_duration = pre_roll.len() as f32 / 16000.0;
-                        println!("[AUDIO] >>> SPEECH STARTED — prepending {:.2}s pre-roll (level: {:.6}) <<<", pre_duration, level);
+                        println!("[AUDIO] >>> SPEECH STARTED — prepending {:.2}s pre-roll (level: {:.6}, dyn_thr: {:.6}) <<<", pre_duration, level, dynamic_threshold);
                         let mut combined = std::mem::take(&mut pre_roll);
                         combined.extend(&buffer);
                         buffer = combined;
@@ -713,17 +746,29 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle, alive_flag:
                         combined_timeline.extend(source_timeline.drain(..));
                         source_timeline = combined_timeline;
                     } else {
-                        println!("[AUDIO] >>> SPEECH STARTED (level: {:.6} > threshold: {:.6}) <<<", level, SPEECH_THRESHOLD);
+                        println!("[AUDIO] >>> SPEECH STARTED (level: {:.6} > dyn_thr: {:.6}, noise_floor: {:.6}) <<<", level, dynamic_threshold, noise_floor);
                     }
                     speech_start = Some(Instant::now() - Duration::from_secs_f32(
                         buffer.len() as f32 / 16000.0  // backdate by pre-roll amount already in buffer
                     ));
-                    let _ = app.emit("cognivox:status", "Speech detected...");
+                    let _ = app.emit("cognivox:status", "Speech detected — recording...");
                 }
                 last_speech = Some(Instant::now());
                 buffer.extend(&new);
                 source_timeline.extend(new_source_chunks);
+                // Show live recording duration so user knows audio is being captured
+                if let Some(start) = speech_start {
+                    let dur = start.elapsed().as_secs_f32();
+                    if dur > 2.0 {
+                        let _ = app.emit("cognivox:status", format!("Recording speech... {:.0}s", dur));
+                    }
+                }
             } else if level > SILENCE_THRESHOLD {
+                // Between silence and speech thresholds — ambient noise zone
+                // Update noise floor estimate (only during non-speech)
+                if !speaking {
+                    noise_floor = noise_floor * (1.0 - NOISE_ADAPT_RATE) + level * NOISE_ADAPT_RATE;
+                }
                 if speaking {
                     buffer.extend(&new);
                     source_timeline.extend(new_source_chunks);
@@ -751,7 +796,11 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle, alive_flag:
                     }
                 }
             } else {
-                // Pure silence — only keep buffering if we're in an active speech segment
+                // Pure silence — update noise floor more aggressively
+                if !speaking {
+                    noise_floor = noise_floor * 0.99 + level * 0.01;
+                }
+                // Only keep buffering if we're in an active speech segment
                 if speaking {
                     buffer.extend(&new);
                     source_timeline.extend(new_source_chunks);
@@ -761,12 +810,57 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle, alive_flag:
         }
         
         // CRITICAL: Always check if we should process, even when no new audio arrives.
+        // === CHECK FOR FLUSH SIGNAL (user stopped recording) ===
+        let flush_requested = {
+            let state = app.state::<GeminiState>();
+            let mut flush = poison_lock(&state.flush_signal);
+            if *flush {
+                *flush = false;
+                true
+            } else {
+                false
+            }
+        };
+        
+        // If flush requested, force-process buffered audio immediately
+        if flush_requested {
+            if is_processing {
+                // Processing is already in progress — re-set flush so it fires
+                // after processing completes and pending buffer is merged back
+                let state = app.state::<GeminiState>();
+                *poison_lock(&state.flush_signal) = true;
+                println!("[AUDIO] Flush requested but processing in progress — will retry after merge");
+            } else if !buffer.is_empty() {
+                let buf_duration = buffer.len() as f32 / 16000.0;
+                if buf_duration >= 0.5 {
+                    println!("[AUDIO] >>> FLUSH: force-processing {:.1}s buffered audio <<<", buf_duration);
+                    speaking = true;
+                    speech_start = speech_start.or(Some(Instant::now() - Duration::from_secs_f32(buf_duration)));
+                    last_speech = Some(Instant::now() - Duration::from_secs_f32(SILENCE_TIMEOUT_SECS + 1.0));
+                } else {
+                    println!("[AUDIO] Flush requested but buffer too short ({:.2}s), skipping", buf_duration);
+                }
+            } else if !pre_roll.is_empty() {
+                // Buffer is empty but pre-roll has audio — move it to buffer and process
+                let pre_duration = pre_roll.len() as f32 / 16000.0;
+                if pre_duration >= 0.5 {
+                    println!("[AUDIO] >>> FLUSH: processing {:.1}s from pre-roll <<<", pre_duration);
+                    buffer = std::mem::take(&mut pre_roll);
+                    source_timeline = std::mem::take(&mut pre_roll_source);
+                    speaking = true;
+                    speech_start = Some(Instant::now() - Duration::from_secs_f32(pre_duration));
+                    last_speech = Some(Instant::now() - Duration::from_secs_f32(SILENCE_TIMEOUT_SECS + 1.0));
+                } else {
+                    println!("[AUDIO] Flush: pre-roll too short ({:.2}s), skipping", pre_duration);
+                }
+            } else {
+                println!("[AUDIO] Flush requested but no audio available");
+            }
+        }
+        
         let should_process = if speaking && !buffer.is_empty() {
             let duration = speech_start.map(|s| s.elapsed().as_secs_f32()).unwrap_or(0.0);
             let silence = last_speech.map(|s| s.elapsed().as_secs_f32()).unwrap_or(0.0);
-            
-            // Use faster trigger for first chunk to give instant feedback
-            let effective_max_batch = if is_first_chunk { FIRST_BATCH_SECS } else { MAX_BATCH_SECS };
             
             // Don't trigger processing if Whisper isn't ready — keep buffering instead of
             // processing and losing audio when transcription fails
@@ -776,13 +870,17 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle, alive_flag:
                 ready
             };
             
+            // STRATEGY: Wait for the speaker to FINISH (silence detected), then
+            // transcribe the entire utterance in one shot. MAX_BATCH_SECS is a
+            // safety-valve only — it should rarely trigger in normal speech.
             let should = whisper_ready && (
                 (duration >= MIN_SPEECH_SECS && silence >= SILENCE_TIMEOUT_SECS)
-                || duration >= effective_max_batch
+                || duration >= MAX_BATCH_SECS
             );
             
             if should {
-                println!("[AUDIO] >>> PROCESSING TRIGGER: duration={:.1}s, silence={:.1}s, first_chunk={} <<<", duration, silence, is_first_chunk);
+                let trigger_reason = if duration >= MAX_BATCH_SECS { "MAX_BATCH" } else { "SILENCE" };
+                println!("[AUDIO] >>> PROCESSING TRIGGER [{}]: duration={:.1}s, silence={:.1}s <<<", trigger_reason, duration, silence);
             }
             should
         } else { false };
@@ -867,7 +965,8 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle, alive_flag:
                 }
                 
                 speaking = false;
-                is_first_chunk = false; // After first processing, use normal timing
+                speech_start = None;
+                last_speech = None;
                 // Clear pre-roll since we just consumed everything
                 pre_roll.clear();
                 pre_roll_source.clear();
@@ -1192,6 +1291,44 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle, alive_flag:
                         return;
                     }
                     
+                    // === POST-WHISPER NOISE FILTERING ===
+                    // Reject transcriptions that are clearly noise artifacts,
+                    // hallucinations, or Whisper filler when fed ambient noise.
+                    let trimmed_text = transcription.trim();
+                    let lower_text = trimmed_text.to_lowercase();
+                    let is_noise_text = trimmed_text.len() < 3
+                        || lower_text == "you" || lower_text == "." || lower_text == "..."
+                        || lower_text == "the" || lower_text == "i" || lower_text == "a"
+                        || lower_text == "hmm" || lower_text == "um" || lower_text == "uh"
+                        || lower_text.starts_with("[music")
+                        || lower_text.starts_with("[applause")
+                        || lower_text.starts_with("[noise")
+                        || lower_text.starts_with("[silence")
+                        || lower_text.starts_with("[blank")
+                        || lower_text.starts_with("[no speech")
+                        || lower_text.starts_with("[end")
+                        || lower_text.starts_with("(end")
+                        || lower_text.contains("end of audio")
+                        || lower_text.contains("end of transcript")
+                        || lower_text.starts_with("(music")
+                        || lower_text.starts_with("( music")
+                        || lower_text.starts_with("[laughter")
+                        || lower_text.starts_with("[cough")
+                        || lower_text.contains("thank you for watching")
+                        || lower_text.contains("thanks for watching")
+                        || lower_text.contains("please subscribe")
+                        || lower_text.contains("like and subscribe")
+                        || lower_text.contains("subtitles by")
+                        || lower_text.contains("transcribed by")
+                        || lower_text.contains("copyright");
+                    
+                    if is_noise_text {
+                        println!("[WHISPER] Filtered noise-like transcription: '{}'", trimmed_text);
+                        let _ = app.emit("cognivox:status", "Listening for speech...");
+                        *poison_lock(&processing_clone) = false;
+                        return;
+                    }
+                    
                     let _ = app.emit("cognivox:status", "Extracting intelligence...");
                     
                     // Get current key and model from state
@@ -1343,13 +1480,11 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle, alive_flag:
                             pending_duration,
                             last_speech.map(|t| t.elapsed().as_secs_f32()).unwrap_or(0.0));
                     } else {
-                        // No chunk exceeded threshold, but audio is present.
-                        // Set last_speech past the silence timeout so processing
-                        // triggers on the next tick.
-                        last_speech = actual_last_speech.or(
-                            Some(Instant::now() - Duration::from_secs_f32(SILENCE_TIMEOUT_SECS + 0.2))
-                        );
-                        println!("[AUDIO] Pending had audio (rms: {:.6}) but no speech flag — forcing process trigger",
+                        // No speech detected in pending buffer — don't force immediate processing.
+                        // Let normal silence detection handle when to process.
+                        // Set last_speech to "now" so the silence timeout starts counting from merge time.
+                        last_speech = actual_last_speech.or(Some(Instant::now()));
+                        println!("[AUDIO] Pending had audio (rms: {:.6}) but no speech — waiting for silence timeout",
                             pending_rms);
                     }
                     
@@ -1358,13 +1493,13 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle, alive_flag:
             }
         }
         
-        // Allow buffer to grow up to max batch size (no truncation - we process before it gets too big)
-        let max_samples = (MAX_BATCH_SECS * 16000.0 * 1.5) as usize; // 1.5x to allow some overflow
+        // Safety valve: cap buffer at 60 seconds (960k samples) to prevent unbounded memory growth.
+        // This should never trigger in practice — MAX_BATCH_SECS (30s) triggers processing first.
+        let max_samples = (60.0 * 16000.0) as usize;
         if buffer.len() > max_samples {
-            // Keep the most recent audio instead of discarding
-            let keep_from = buffer.len() - (MAX_BATCH_SECS * 16000.0) as usize;
+            let keep_from = buffer.len() - max_samples;
             buffer = buffer[keep_from..].to_vec();
-            println!("[AUDIO] Buffer overflow - kept last {:.1}s", MAX_BATCH_SECS);
+            println!("[AUDIO] ⚠ Buffer overflow at {:.1}s — kept last 60s. This shouldn't happen.", buffer.len() as f32 / 16000.0);
         }
     }
 }

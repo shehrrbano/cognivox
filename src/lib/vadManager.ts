@@ -42,10 +42,10 @@ const FILLER_WORDS = [
 
 class VADManager {
     private config: VADConfig = {
-        minSpeechDuration: 1000,    // Detect even 1s of speech (was 18s) - user wants instant
-        silenceThreshold: 0.0001,   // ULTRA sensitive (was 0.002) - catch breaths
+        minSpeechDuration: 1500,    // 1.5s of speech before considering it real (filters brief noise)
+        silenceThreshold: 0.003,    // Raised — matches backend adaptive threshold baseline
         silenceDuration: 2000,      // 2 seconds silence (was 4s) - quicker updates
-        minChunkDuration: 1000,     // 1s minimum chunk
+        minChunkDuration: 1500,     // 1.5s minimum chunk (raised from 1s)
         maxChunkDuration: 30000,    // 30s max
         enableFillerDetection: true
     };

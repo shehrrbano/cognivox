@@ -47,8 +47,8 @@ impl Default for AudioState {
 
 const TARGET_SAMPLE_RATE: u32 = 16000;
 const MICRO_CHUNK_SAMPLES: usize = 160;
-const SILENCE_THRESHOLD: f32 = 0.00005; // Ultra-low — only skip true digital silence, let processing loop decide
-const SILENCE_SKIP_CHUNKS: usize = 500; // ~5 seconds of true silence before stopping sends — gives pre-roll plenty of data
+const SILENCE_THRESHOLD: f32 = 0.0005; // Very low — let processing loop make speech decisions, don't drop audio at capture
+const SILENCE_SKIP_CHUNKS: usize = 500; // ~5 seconds of true dead silence before stopping sends
 
 #[tauri::command]
 pub fn list_audio_devices() -> Result<Vec<String>, String> {
@@ -144,6 +144,20 @@ fn resample_linear(samples: Vec<f32>, from_rate: u32, to_rate: u32) -> Vec<f32> 
     output
 }
 
+/// Apply a single-pole IIR high-pass filter to remove low-frequency noise
+/// (AC hum ~50/60Hz, fan rumble, traffic). Cutoff ≈ 80Hz at 16kHz sample rate.
+fn apply_high_pass(samples: &mut [f32], state: &mut (f32, f32)) {
+    const ALPHA: f32 = 0.969; // cutoff ~80Hz at fs=16kHz
+    let (ref mut prev_in, ref mut prev_out) = state;
+    for s in samples.iter_mut() {
+        let input = *s;
+        let output = ALPHA * (*prev_out + input - *prev_in);
+        *prev_in = input;
+        *prev_out = output;
+        *s = output;
+    }
+}
+
 #[tauri::command]
 pub fn start_audio_capture(state: tauri::State<'_, AudioState>) -> Result<String, String> {
     let mut is_rec = state.is_recording.lock().map_err(|e| e.to_string())?;
@@ -170,6 +184,7 @@ pub fn start_audio_capture(state: tauri::State<'_, AudioState>) -> Result<String
     thread::spawn(move || {
         let buffer: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
         let silence_count: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
+        let hp_filter_state: Arc<Mutex<(f32, f32)>> = Arc::new(Mutex::new((0.0, 0.0)));
         
         // === MICROPHONE CAPTURE (single mic, all speakers) ===
         let mic_stream = {
@@ -187,6 +202,7 @@ pub fn start_audio_capture(state: tauri::State<'_, AudioState>) -> Result<String
                     let buf = buffer.clone();
                     let sil = silence_count.clone();
                     let vol = volume.clone();
+                    let hp = hp_filter_state.clone();
                     
                     let stream = device.build_input_stream(
                         &config.into(),
@@ -194,7 +210,9 @@ pub fn start_audio_capture(state: tauri::State<'_, AudioState>) -> Result<String
                             if data.is_empty() { return; }
                             
                             let mono = to_mono(data, channels);
-                            let resampled = resample_linear(mono, sample_rate, TARGET_SAMPLE_RATE);
+                            let mut resampled = resample_linear(mono, sample_rate, TARGET_SAMPLE_RATE);
+                            // High-pass filter: remove low-frequency noise (AC hum, fans)
+                            if let Ok(mut h) = hp.lock() { apply_high_pass(&mut resampled, &mut *h); }
                             
                             let rms = calculate_rms(&resampled);
                             if let Ok(mut v) = vol.lock() { *v = rms; }

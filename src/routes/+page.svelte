@@ -3,17 +3,12 @@
     import { listen } from "@tauri-apps/api/event";
     import { getCurrentWindow } from "@tauri-apps/api/window";
     import { onMount, onDestroy } from "svelte";
-    import KnowledgeGraph from "$lib/KnowledgeGraph.svelte";
-    import CognivoxControls from "$lib/CognivoxControls.svelte";
-    import SessionManager from "$lib/SessionManager.svelte";
     import Diagnostics from "$lib/Diagnostics.svelte";
     import RecordingOverlay from "$lib/RecordingOverlay.svelte";
     import ProcessingProgress from "$lib/ProcessingProgress.svelte";
     import SettingsModal from "$lib/SettingsModal.svelte";
     import LiveRecordingPanel from "$lib/LiveRecordingPanel.svelte";
     import StatusBar from "$lib/StatusBar.svelte";
-    import VADWaveform from "$lib/VADWaveform.svelte";
-    import InsightsPanel from "$lib/InsightsPanel.svelte";
     import { vadManager, type VADState } from "$lib/vadManager";
     import {
         intelligenceExtractor,
@@ -21,74 +16,120 @@
     } from "$lib/intelligenceExtractor";
     import { FirestoreSessionManager } from "$lib/firestoreSessionManager";
     import { getCurrentUser, initFirebase, waitForAuth } from "$lib/firebase";
+    import { keyManager, type KeyManagerState } from "$lib/keyManager";
 
-    // --- STATE ---
+    // === UI COMPONENTS ===
+    import DebugBar from "$lib/DebugBar.svelte";
+    import Sidebar from "$lib/Sidebar.svelte";
+    import MainHeader from "$lib/MainHeader.svelte";
+    import TranscriptView from "$lib/TranscriptView.svelte";
+    import SummaryPanel from "$lib/SummaryPanel.svelte";
+    import MemoriesPanel from "$lib/MemoriesPanel.svelte";
+    import AlertsTab from "$lib/AlertsTab.svelte";
+    import AnalyticsTab from "$lib/AnalyticsTab.svelte";
+    import SettingsTab from "$lib/SettingsTab.svelte";
+    import SpeakersTab from "$lib/SpeakersTab.svelte";
+    import GraphTab from "$lib/GraphTab.svelte";
+    import BottomActionBar from "$lib/BottomActionBar.svelte";
+    import ToastNotification from "$lib/ToastNotification.svelte";
+
+    // === SERVICE MODULES ===
+    import type {
+        Transcript,
+        GraphNode,
+        GraphEdge,
+        ExtractedSummary,
+        ExtractedMemoriesData,
+        SpeakerIdStatus,
+        SpeakerProfile,
+        IdentifiedSpeaker,
+        RestoredState,
+        SnapshotParams,
+    } from "$lib/types";
+    import {
+        parseGeminiPayload,
+        createTranscriptEntry,
+        buildGraphFromSegment,
+        buildGraphFromTranscripts,
+        analyzeToneDistribution,
+        createPartialTranscript,
+    } from "$lib/services/geminiProcessor";
+    import {
+        buildSessionSnapshot,
+        updatePastSessionsList,
+        persistSnapshotToDisk,
+        loadFullSession,
+        parseSessionIntoState,
+        fetchAllSessions,
+        buildSessionJson,
+        saveSessionToDisk,
+        syncSessionToCloud,
+        deleteSession as deleteSessionService,
+        recoverPendingSave,
+    } from "$lib/services/sessionService";
+    import {
+        extractSummary as doExtractSummary,
+        extractMemories as doExtractMemories,
+    } from "$lib/services/extractionService";
+    import {
+        extractKnowledgeGraph,
+        applyGraphQualityRules,
+        autoClusterGraph,
+        expandCluster,
+    } from "$lib/services/graphExtractionService";
+    import {
+        initializeSpeakerId as doInitSpeakerId,
+        refreshSpeakerIdStatus as doRefreshSpeakerStatus,
+        renameSpeaker as doRenameSpeaker,
+        clearSpeakerProfiles as doClearSpeakerProfiles,
+    } from "$lib/services/speakerService";
+    import {
+        connectGemini as doConnectGemini,
+        setupKeyManagerSubscription,
+        setupBackendEventListeners,
+        setupVADSubscription,
+        backgroundRecordingInit,
+        waitForTranscriptions,
+    } from "$lib/services/connectionService";
+
+    // ============================================================
+    // STATE DECLARATIONS
+    // ============================================================
     let devices: string[] = [];
     let status = "Ready";
     let isRecording = false;
+    let forceNewSession = false;
     let apiKey = "";
     let isGeminiConnected = false;
-    // FORCE TRUE - This is a Tauri-only desktop app, no web mode
     let isRunningInTauri = true;
 
-    // Model Selection - User's specified models
     let selectedModel = "gemini-2.0-flash";
     let availableModels = [
-        {
-            id: "gemini-2.0-flash",
-            name: "Gemini 2.0 Flash (Stable)",
-        },
-        {
-            id: "gemini-2.0-flash-lite",
-            name: "Gemini 2.0 Flash Lite",
-        },
+        { id: "gemini-2.0-flash", name: "Gemini 2.0 Flash (Stable)" },
+        { id: "gemini-2.0-flash-lite", name: "Gemini 2.0 Flash Lite" },
         {
             id: "gemini-2.5-flash-preview-04-17",
             name: "Gemini 2.5 Flash Preview",
         },
-        {
-            id: "gemini-1.5-flash",
-            name: "Gemini 1.5 Flash (Fallback)",
-        },
+        { id: "gemini-1.5-flash", name: "Gemini 1.5 Flash (Fallback)" },
     ];
 
-    // Station 1: Audio Controls
-    let captureMode = "both"; // "mic", "system", "both" - Defaulting to "both" for diarization
+    let captureMode = "both";
     let currentVolume = 0;
     let volumeInterval: ReturnType<typeof setInterval> | null = null;
     let autoSaveInterval: ReturnType<typeof setInterval> | null = null;
     let pastSessions: any[] = [];
-
-    // === SESSION CACHE: Keeps full session data in memory for instant switching ===
     let sessionCache: Map<string, any> = new Map();
-
-    // Station 4: Latency Illusion
     let isTyping = false;
     let partialText = "";
     let latencyMs = 0;
     let searchQuery = "";
     let searchFilter = "all";
-
-    // Core Data
-    let transcripts: Array<{
-        id: string;
-        timestamp: string;
-        speaker: string;
-        speakerId: number;
-        text: string;
-        tone?: string;
-        category?: string[];
-        confidence?: number;
-        isPartial?: boolean;
-    }> = [];
-
-    // Psychosomatic State (Synchronized with LiveRecordingPanel)
+    let transcripts: Transcript[] = [];
     let stressLevel = 0;
     let engagementLevel = 0.3;
     let urgencyLevel = 0;
     let clarityLevel = 0.4;
-
-    // Alerts data
     let alerts: Array<{
         id: string;
         type: string;
@@ -96,210 +137,27 @@
         timestamp: string;
         severity: "info" | "warning" | "critical";
     }> = [];
-
-    // === NEW: Processing & UI State ===
     let isProcessing = false;
     let processingStep = 0;
     let processingError: string | null = null;
     let showSettingsModal = false;
     let recordingStartTime: Date | null = null;
-
-    // === SPEAKER IDENTIFICATION (ECAPA-TDNN) ===
     let speakerIdInitialized = false;
-    let speakerIdStatus: {
-        initialized: boolean;
-        speaker_count: number;
-        threshold: number;
-        model: string;
-    } | null = null;
-    let speakerProfiles: Array<{
-        id: string;
-        label: string;
-        sample_count: number;
-        created_at: number;
-        last_seen: number;
-    }> = [];
-    let lastIdentifiedSpeaker: {
-        speaker_label: string;
-        confidence: number;
-        is_new: boolean;
-    } | null = null;
-
-    // === DEBUG STATE ===
+    let speakerIdStatus: SpeakerIdStatus | null = null;
+    let speakerProfiles: SpeakerProfile[] = [];
+    let lastIdentifiedSpeaker: IdentifiedSpeaker | null = null;
     let debugEventCount = 0;
     let debugLastEvent = "";
     let debugLastTranscript = "";
-
-    // === API Key Management ===
-    import { keyManager, type KeyManagerState } from "$lib/keyManager";
-
     let keyState: KeyManagerState = keyManager.getState();
     let isRateLimited = false;
     let lastRequestTime: string | null = null;
     let debugMode = false;
-
-    // Toast Notification State
     let toastMessage: string | null = null;
     let toastType: "info" | "warning" | "error" = "info";
-
-    function showToast(
-        message: string,
-        type: "info" | "warning" | "error" = "info",
-    ) {
-        toastMessage = message;
-        toastType = type;
-        setTimeout(() => {
-            toastMessage = null;
-        }, 5000);
-    }
-
-    // === VAD State ===
     let vadState: VADState = vadManager.getState();
     let vadUnsubscribe: (() => void) | null = null;
     let chunkUnsubscribe: (() => void) | null = null;
-
-    // Subscribe to key manager updates
-    function setupKeyManagerSubscription() {
-        keyManager.subscribe((state) => {
-            const prevTotal = keyState.keys.length;
-            const prevIndex = keyState.currentIndex;
-            keyState = state;
-            isRateLimited = state.keys.some((k) => k.rateLimited);
-
-            const activeKey = state.keys.find((k) => k.isActive);
-            if (activeKey) {
-                apiKey = activeKey.key;
-            }
-
-            // Toast on key switch
-            if (
-                state.keys.length > 1 &&
-                state.currentIndex !== prevIndex &&
-                prevTotal === state.keys.length
-            ) {
-                const activeKey = state.keys.find((k) => k.isActive);
-                if (activeKey) {
-                    apiKey = activeKey.key;
-                    showToast(
-                        `Key exhausted – switching to ${activeKey.name} (Key ${state.currentIndex + 1}/${state.keys.length})`,
-                        "warning",
-                    );
-
-                    // Push the new key to Rust backend if we are recording
-                    if (isRecording) {
-                        invoke("update_gemini_key", {
-                            key: activeKey.key,
-                        }).catch((err) =>
-                            console.error("[TAURI] Failed to update key:", err),
-                        );
-                    }
-                }
-            }
-
-            // Toast on all keys exhausted
-            if (
-                state.keys.length > 0 &&
-                state.keys.every((k) => k.isDisabled || k.rateLimited)
-            ) {
-                showToast("All keys exhausted – add more in Settings", "error");
-            }
-        });
-    }
-
-    // Listen for backend API errors
-    async function setupBackendEventListeners() {
-        const unlisten = await listen(
-            "cognivox:api_error",
-            async (event: any) => {
-                const { code, message } = event.payload;
-                console.warn(`[BACKEND] API Error: ${code} - ${message}`);
-
-                // Trigger rotation in key manager
-                const result = keyManager.handleError(code, message);
-
-                if (result.switched && result.newKey) {
-                    // CRITICAL: Push the new key to the Rust backend so the audio loop uses it
-                    try {
-                        await invoke("update_gemini_key", {
-                            key: result.newKey.key,
-                        });
-                        console.log(
-                            `[BACKEND] Rotated key to: ${result.newKey.name}`,
-                        );
-                    } catch (e) {
-                        console.error(
-                            `[BACKEND] Failed to push rotated key:`,
-                            e,
-                        );
-                    }
-                    showToast(result.message, "warning");
-                } else {
-                    showToast("Service disrupted: All keys exhausted", "error");
-                }
-            },
-        );
-
-        return unlisten;
-    }
-
-    // Setup VAD subscriptions
-    function setupVADSubscription() {
-        vadUnsubscribe = vadManager.subscribe((state) => {
-            vadState = state;
-            // Update status based on VAD
-            if (isRecording && !isProcessing) {
-                if (state.status === "buffering") {
-                    status = "Speaking detected – analyzing live...";
-                } else if (state.status === "sending") {
-                    status = "Sending chunk to Intelligence Engine...";
-                } else if (state.isSpeaking) {
-                    status = "Speaking detected – analyzing live...";
-                } else {
-                    status = "Listening for speech...";
-                }
-            }
-        });
-
-        // Handle chunks when VAD decides to send
-        chunkUnsubscribe = vadManager.onChunk(async (chunk) => {
-            console.log(
-                `[VAD] Chunk detected: ${(chunk.duration / 1000).toFixed(1)}s`,
-            );
-
-            // In a real implementation with streaming audio, we would send 'chunk.samples' here.
-            // Since we currently rely on the backend's continuous capture, we'll manually invoke
-            // a "flush" or just rely on the backend's segmentation if available.
-
-            if (isRecording) {
-                // REAL MODE: Do not inject fake text.
-                // The backend now uses Whisper for transcription and Gemini for intelligence.
-                // It will emit 'cognivox:whisper_transcription' then 'cognivox:gemini_intelligence'.
-                status = "Analyzing speech...";
-            }
-        });
-    }
-
-    // Load settings from storage
-    function loadApiKeysFromStorage() {
-        debugMode = localStorage.getItem("debug_mode") === "true";
-        keyState = keyManager.getState();
-    }
-
-    function getActiveApiKey(): string | null {
-        const current = keyManager.getCurrentKey();
-        return current?.key || null;
-    }
-
-    function getActiveKeyName(): string {
-        const info = keyManager.getCurrentKeyInfo();
-        return info?.name || "";
-    }
-
-    function getActiveKeyIndex(): number {
-        const info = keyManager.getCurrentKeyInfo();
-        return info?.index || 1;
-    }
-
     let activeTab:
         | "transcript"
         | "graph"
@@ -308,17 +166,11 @@
         | "settings"
         | "speakers"
         | "diagnostics" = "transcript";
-
-    // Graph Data
-    let graphNodes: Array<{
-        id: string;
-        type: string;
-        label?: string;
-        weight?: number;
-    }> = [];
-    let graphEdges: Array<{ from: string; to: string; relation: string }> = [];
-
-    // Session Data - matches Rust SessionData struct
+    let graphNodes: GraphNode[] = [];
+    let graphEdges: GraphEdge[] = [];
+    // Keep unclustered originals for expanding clusters
+    let _originalGraphNodes: GraphNode[] = [];
+    let _originalGraphEdges: GraphEdge[] = [];
     let currentSession: any = {
         id: crypto.randomUUID ? crypto.randomUUID() : `session_${Date.now()}`,
         created_at: new Date().toISOString(),
@@ -335,8 +187,20 @@
         },
         summary: null,
     };
+    let isCollapsed = false;
+    let showSummaryPanel = false;
+    let showMemoriesPanel = false;
+    let extractedSummary: ExtractedSummary | null = null;
+    let extractedMemories: ExtractedMemoriesData | null = null;
+    let isExtractingSummary = false;
+    let isExtractingMemories = false;
+    let isGeneratingGraph = false;
+    let extractError: string | null = null;
+    let localInsights: any[] = [];
 
-    // Keep session in sync with transcripts and graph
+    // ============================================================
+    // REACTIVE STATEMENTS
+    // ============================================================
     $: {
         if (currentSession) {
             currentSession.transcripts = transcripts.map((t) => ({
@@ -360,8 +224,6 @@
             }));
             currentSession.metadata.total_transcripts = transcripts.length;
             currentSession.updated_at = new Date().toISOString();
-
-            // NEW: Capture Psychosomatic & Insights
             currentSession.psychosomatic = {
                 stress: stressLevel || 0,
                 engagement: engagementLevel || 0,
@@ -379,602 +241,173 @@
         }
     }
 
-    // --- COLLAPSIBLE STATE ---
-    let isCollapsed = false;
-    let showSummaryPanel = false;
-    let showMemoriesPanel = false;
+    $: displayText =
+        transcripts.length > 0
+            ? transcripts[transcripts.length - 1].text
+            : "No transcripts yet. Start recording to begin.";
 
-    // --- EXTRACTED DATA ---
-    let extractedSummary: {
-        topics: string[];
-        decisions: string[];
-        actionItems: string[];
-        keyPoints: string[];
-    } | null = null;
-
-    let extractedMemories: {
-        keyMoments: string[];
-        personalInsights: string[];
-        quotes: string[];
-        emotionShifts: string[];
-    } | null = null;
-
-    let isExtractingSummary = false;
-    let isExtractingMemories = false;
-    let extractError: string | null = null;
-    let localInsights: any[] = []; // Renamed to avoid collision
-
-    // --- SPEAKER ID FUNCTIONS ---
-    async function initializeSpeakerId() {
-        if (!isRunningInTauri) return;
-        try {
-            console.log("[SPEAKER-ID] Initializing ECAPA-TDNN...");
-            const result = await invoke("initialize_speaker_id");
-            speakerIdInitialized = true;
-            console.log("[SPEAKER-ID]", result);
-            await refreshSpeakerIdStatus();
-        } catch (e: any) {
-            console.warn("[SPEAKER-ID] Init failed (non-blocking):", e);
-            speakerIdInitialized = false;
-        }
+    // ============================================================
+    // UTILITY FUNCTIONS
+    // ============================================================
+    function showToast(
+        message: string,
+        type: "info" | "warning" | "error" = "info",
+    ) {
+        toastMessage = message;
+        toastType = type;
+        setTimeout(() => {
+            toastMessage = null;
+        }, 5000);
     }
 
-    async function refreshSpeakerIdStatus() {
-        if (!isRunningInTauri) return;
-        try {
-            speakerIdStatus = (await invoke("get_speaker_id_status")) as any;
-            speakerProfiles = (await invoke("get_speaker_profiles")) as any;
-        } catch (e) {
-            console.warn("[SPEAKER-ID] Status refresh error:", e);
-        }
+    function getActiveApiKey(): string | null {
+        return keyManager.getCurrentKey()?.key || null;
+    }
+    function getActiveKeyName(): string {
+        return keyManager.getCurrentKeyInfo()?.name || "";
+    }
+    function getActiveKeyIndex(): number {
+        return keyManager.getCurrentKeyInfo()?.index || 1;
+    }
+    function loadApiKeysFromStorage() {
+        debugMode = localStorage.getItem("debug_mode") === "true";
+        keyState = keyManager.getState();
+    }
+    function openSettings() {
+        showSettingsModal = true;
+    }
+    function closeSettings() {
+        showSettingsModal = false;
+    }
+    function toggleCollapseState() {
+        isCollapsed = !isCollapsed;
+    }
+    function closeSummaryPanel() {
+        showSummaryPanel = false;
+    }
+    function closeMemoriesPanel() {
+        showMemoriesPanel = false;
+    }
+    function handleSettingsChange(settings: any) {
+        console.log("Settings updated:", settings);
+    }
+    function dismissProcessing() {
+        isProcessing = false;
+        processingStep = 0;
+        processingError = null;
+        status = "Ready";
+    }
+    function retryProcessing() {
+        runProcessingFlow(5);
     }
 
-    async function renameSpeaker(speakerId: string, newLabel: string) {
-        if (!isRunningInTauri) return;
-        try {
-            await invoke("rename_speaker", { speakerId, newLabel });
-            await refreshSpeakerIdStatus();
-            showToast(`Speaker renamed to "${newLabel}"`, "info");
-        } catch (e: any) {
-            showToast(`Rename failed: ${e}`, "error");
-        }
-    }
-
-    async function clearSpeakerProfiles() {
-        if (!isRunningInTauri) return;
-        try {
-            const result = (await invoke("clear_speaker_profiles")) as string;
-            await refreshSpeakerIdStatus();
-            showToast(result, "info");
-        } catch (e: any) {
-            showToast(`Clear failed: ${e}`, "error");
-        }
-    }
-
-    // --- SESSION MANAGEMENT (Local-First + Cloud Sync) ---
-
-    /**
-     * SINGLE SOURCE OF TRUTH for pastSessions.
-     * Loads local sessions, merges cloud, deduplicates by id (newest wins),
-     * and updates the sessionCache.
-     */
-    async function refreshSessionList(): Promise<void> {
-        // Use a Map to deduplicate by session id — newest updated_at wins
-        const sessionMap = new Map<string, any>();
-
-        // Step 1: Load all local sessions
-        try {
-            const localJson = (await invoke("list_sessions")) as string;
-            const localSessions = JSON.parse(localJson);
-            for (const s of localSessions) {
-                sessionMap.set(s.id, s);
-            }
-            console.log(
-                `[SESSIONS] Loaded ${localSessions.length} local sessions`,
-            );
-        } catch (e) {
-            console.warn("[SESSIONS] Failed to load local sessions:", e);
-        }
-
-        // Step 2: Merge cloud sessions if signed in (cloud-only get synced to local)
-        if (FirestoreSessionManager.isAvailable()) {
-            try {
-                const cloudSessions =
-                    await FirestoreSessionManager.listSessions();
-                console.log(
-                    `[SESSIONS] Found ${cloudSessions.length} cloud sessions`,
-                );
-                for (const cs of cloudSessions) {
-                    const existing = sessionMap.get(cs.id);
-                    if (!existing) {
-                        // Cloud-only session — save to local for offline
-                        sessionMap.set(cs.id, cs);
-                        try {
-                            await invoke("save_session", {
-                                sessionJson: JSON.stringify(cs),
-                            });
-                            console.log(
-                                `[SESSIONS] Synced cloud→local: ${cs.metadata?.title}`,
-                            );
-                        } catch (syncErr) {
-                            console.warn(
-                                `[SESSIONS] Cloud→local sync failed:`,
-                                syncErr,
-                            );
-                        }
-                    } else {
-                        // SMART MERGE: prefer whichever version has MORE content.
-                        // Only fall back to updated_at if both have the same amount of data.
-                        const localTranscripts =
-                            existing.transcripts?.length || 0;
-                        const cloudTranscripts = cs.transcripts?.length || 0;
-                        const localNodes = existing.graph_nodes?.length || 0;
-                        const cloudNodes = cs.graph_nodes?.length || 0;
-                        const localContent = localTranscripts + localNodes;
-                        const cloudContent = cloudTranscripts + cloudNodes;
-
-                        if (cloudContent > localContent) {
-                            // Cloud has more data — use cloud
-                            sessionMap.set(cs.id, cs);
-                            console.log(
-                                `[SESSIONS] Cloud wins for ${cs.id}: ${cloudContent} > ${localContent} items`,
-                            );
-                        } else if (
-                            cloudContent === localContent &&
-                            new Date(cs.updated_at) >
-                                new Date(existing.updated_at)
-                        ) {
-                            // Same data volume but cloud is newer — use cloud
-                            sessionMap.set(cs.id, cs);
-                        } else {
-                            // Local has more data or is newer — keep local
-                            console.log(
-                                `[SESSIONS] Local wins for ${cs.id}: ${localContent} >= ${cloudContent} items`,
-                            );
-                        }
-                    }
-                }
-            } catch (e) {
-                console.warn(
-                    "[SESSIONS] Cloud load failed (using local only):",
-                    e,
-                );
-            }
-        }
-
-        // Step 3: Build deduplicated array, sorted newest first
-        const deduped = Array.from(sessionMap.values()).sort(
-            (a: any, b: any) =>
-                new Date(b.updated_at).getTime() -
-                new Date(a.updated_at).getTime(),
-        );
-
-        // Step 4: Update cache and pastSessions atomically
-        for (const s of deduped) {
-            sessionCache.set(s.id, JSON.parse(JSON.stringify(s)));
-        }
-        pastSessions = deduped;
-        console.log(
-            `[SESSIONS] pastSessions set: ${pastSessions.length} sessions (deduplicated)`,
-        );
-    }
-
-    async function loadInitialData() {
-        try {
-            if (!isRunningInTauri) return;
-
-            // Recovery: Check if there's an unsaved session from a previous crash/close
-            try {
-                const pendingSave = localStorage.getItem(
-                    "cognivox_pending_save",
-                );
-                if (pendingSave) {
-                    console.log(
-                        "[RECOVERY] Found pending session save in localStorage, persisting to disk...",
-                    );
-                    await invoke("save_session", { sessionJson: pendingSave });
-                    localStorage.removeItem("cognivox_pending_save");
-                    console.log(
-                        "[RECOVERY] Pending session saved to disk and cleared from localStorage",
-                    );
-                }
-            } catch (recoveryErr) {
-                console.warn(
-                    "[RECOVERY] Failed to recover pending save:",
-                    recoveryErr,
-                );
-                localStorage.removeItem("cognivox_pending_save");
-            }
-
-            // Initialize Firebase (wrapped so failures never block local data)
-            try {
-                initFirebase();
-                console.log("[RESTORE] Checking Firebase auth...");
-                const user = await waitForAuth();
-                if (user) {
-                    console.log(`[RESTORE] Authenticated as: ${user.email}`);
-                } else {
-                    console.log("[RESTORE] Not signed in — local only");
-                }
-            } catch (firebaseErr) {
-                console.warn(
-                    "[RESTORE] Firebase init failed (continuing with local):",
-                    firebaseErr,
-                );
-            }
-
-            // Load and deduplicate all sessions (local + cloud)
-            await refreshSessionList();
-
-            // Auto-load the latest session if we have no active transcripts
-            if (pastSessions.length > 0 && transcripts.length === 0) {
-                const latest = pastSessions[0];
-                console.log(
-                    `[RESTORE] Auto-loading latest session: ${latest.metadata?.title}`,
-                );
-                // Directly restore the session without triggering saveCurrentSessionToCache
-                // for the empty initial session
-                await restoreSessionData(latest);
-            }
-        } catch (error: any) {
-            const errMsg =
-                typeof error === "string"
-                    ? error
-                    : error?.message || String(error);
-            console.error("[RESTORE] Failed to load sessions:", errMsg);
-            status = `Error loading sessions: ${errMsg}`;
-        }
-    }
-
-    /**
-     * Capture the CURRENT session state (transcripts, graph, insights, etc.)
-     * into the sessionCache so it can be restored later without Firestore.
-     * GUARD: Does NOT add empty sessions (0 transcripts) to pastSessions.
-     * Returns the snapshot for callers that need it.
-     */
-    function saveCurrentSessionToCache(): any | null {
-        if (!currentSession?.id) return null;
-
-        // GUARD: Don't cache/persist sessions with no real data
-        const hasData = transcripts.length > 0 || graphNodes.length > 0;
-        if (!hasData) {
-            console.log(
-                `[CACHE] Skipping empty session ${currentSession.id} (no transcripts or nodes)`,
-            );
-            return null;
-        }
-
-        // Build a full snapshot of the current session state
-        const snapshot = JSON.parse(JSON.stringify(currentSession));
-        // Explicitly sync live arrays into the snapshot (the $: block may not have run yet)
-        snapshot.transcripts = transcripts.map((t) => ({
-            timestamp: t.timestamp || "",
-            speaker_id: t.speaker || "Speaker",
-            text: t.text || "",
-            tone: t.tone || null,
-            category: t.category || null,
-            confidence: t.confidence || 0.5,
-        }));
-        snapshot.graph_nodes = graphNodes.map((n) => ({
-            id: n.id,
-            node_type: n.type || "Entity",
-            metadata: {},
-        }));
-        snapshot.graph_edges = graphEdges.map((e) => ({
-            from: e.from,
-            to: e.to,
-            relation: e.relation || "related",
-            weight: 1.0,
-        }));
-        snapshot.metadata.total_transcripts = transcripts.length;
-        snapshot.updated_at = new Date().toISOString();
-        snapshot.psychosomatic = {
-            stress: stressLevel || 0,
-            engagement: engagementLevel || 0,
-            urgency: urgencyLevel || 0,
-            clarity: clarityLevel || 0,
+    // ============================================================
+    // STATE HELPERS
+    // ============================================================
+    function getSnapshotParams(): SnapshotParams {
+        return {
+            currentSession,
+            transcripts,
+            graphNodes,
+            graphEdges,
+            stressLevel,
+            engagementLevel,
+            urgencyLevel,
+            clarityLevel,
+            extractedSummary,
+            extractedMemories,
+            showSummaryPanel,
+            showMemoriesPanel,
         };
-        snapshot.insights = extractedSummary
-            ? {
-                  topics: extractedSummary.topics || [],
-                  decisions: extractedSummary.decisions || [],
-                  action_items: extractedSummary.actionItems || [],
-                  key_points: extractedSummary.keyPoints || [],
-              }
-            : null;
-
-        // Also store extractedMemories in the cache snapshot
-        snapshot._extractedMemories = extractedMemories
-            ? JSON.parse(JSON.stringify(extractedMemories))
-            : null;
-        snapshot._showSummaryPanel = showSummaryPanel;
-        snapshot._showMemoriesPanel = showMemoriesPanel;
-
-        sessionCache.set(currentSession.id, snapshot);
-        console.log(
-            `[CACHE] Saved session ${currentSession.id} to cache (${snapshot.transcripts?.length || 0} transcripts, ${snapshot.graph_nodes?.length || 0} nodes)`,
-        );
-
-        // Also persist to disk so data survives cache clears / app restart
-        if (isRunningInTauri && transcripts.length > 0) {
-            try {
-                invoke("save_session", {
-                    sessionJson: JSON.stringify(snapshot),
-                }).catch((e: any) =>
-                    console.warn("[CACHE] Disk persist failed:", e),
-                );
-            } catch (e) {
-                console.warn("[CACHE] Disk persist failed:", e);
-            }
-        }
-
-        // Update pastSessions (replace if exists, add if not)
-        const idx = pastSessions.findIndex(
-            (s: any) => s.id === currentSession.id,
-        );
-        if (idx >= 0) {
-            pastSessions[idx] = snapshot;
-            pastSessions = [...pastSessions]; // trigger reactivity
-        } else {
-            pastSessions = [snapshot, ...pastSessions];
-        }
     }
 
-    /**
-     * Core session data restore — populates UI state from a fully-loaded session object.
-     * Does NOT save previous session (caller is responsible for that).
-     */
+    function applyRestoredState(state: RestoredState) {
+        currentSession = state.currentSession;
+        transcripts = state.transcripts;
+        graphNodes = state.graphNodes;
+        graphEdges = state.graphEdges;
+        stressLevel = state.stressLevel;
+        engagementLevel = state.engagementLevel;
+        urgencyLevel = state.urgencyLevel;
+        clarityLevel = state.clarityLevel;
+        extractedSummary = state.extractedSummary;
+        extractedMemories = state.extractedMemories;
+        showSummaryPanel = state.showSummaryPanel;
+        showMemoriesPanel = state.showMemoriesPanel;
+        activeTab = state.activeTab as any;
+        isCollapsed = state.isCollapsed;
+        status = state.status;
+    }
+
+    // ============================================================
+    // SESSION MANAGEMENT (thin wrappers around sessionService)
+    // ============================================================
+    function saveCurrentSessionToCache(): any | null {
+        const snapshot = buildSessionSnapshot(getSnapshotParams());
+        if (!snapshot) return null;
+        sessionCache.set(currentSession.id, snapshot);
+        if (isRunningInTauri && transcripts.length > 0) {
+            persistSnapshotToDisk(snapshot);
+        }
+        pastSessions = updatePastSessionsList(
+            pastSessions,
+            snapshot,
+            currentSession.id,
+        );
+        return snapshot;
+    }
+
+    async function refreshSessionList(): Promise<void> {
+        const result = await fetchAllSessions(sessionCache);
+        pastSessions = result.pastSessions;
+        sessionCache = result.sessionCache;
+    }
+
     async function restoreSessionData(fullSession: any) {
-        if (!fullSession) return;
-
-        // Try multiple sources in order: cache → disk → cloud → fallback
-        let session = sessionCache.get(fullSession.id);
-
-        // Check if cached/provided data has actual content.
-        // If not, ALWAYS try reloading from disk — don't rely solely on metadata
-        // because metadata.total_transcripts can be 0 even if disk version has data
-        // (e.g., cloud version overwrote local during merge).
-        const cacheTranscripts = session?.transcripts?.length || 0;
-        const cacheNodes = session?.graph_nodes?.length || 0;
-        const expectedTranscripts = session?.metadata?.total_transcripts || 0;
-        const cacheHasNoContent = cacheTranscripts === 0 && cacheNodes === 0;
-        const cacheIsStale =
-            session &&
-            (cacheHasNoContent ||
-                (cacheTranscripts === 0 && expectedTranscripts > 0));
-
-        if (!session || cacheIsStale) {
-            if (cacheIsStale) {
-                console.log(
-                    `[RESTORE] Cache empty/stale for ${fullSession.id}: ${cacheTranscripts} transcripts, ${cacheNodes} nodes (metadata says ${expectedTranscripts}). Reloading from disk.`,
-                );
-            }
-            // Always try disk first — it's the most reliable source
-            let diskLoaded = false;
-            try {
-                const localJson = (await invoke("load_session", {
-                    sessionId: fullSession.id,
-                })) as string;
-                const diskSession = JSON.parse(localJson);
-                // Only use disk version if it actually has more content
-                const diskTranscripts = diskSession?.transcripts?.length || 0;
-                const diskNodes = diskSession?.graph_nodes?.length || 0;
-                if (
-                    diskTranscripts > cacheTranscripts ||
-                    diskNodes > cacheNodes ||
-                    !session
-                ) {
-                    session = diskSession;
-                    diskLoaded = true;
-                    console.log(
-                        `[RESTORE] Loaded from disk: ${diskTranscripts} transcripts, ${diskNodes} nodes`,
-                    );
-                }
-                sessionCache.set(
-                    fullSession.id,
-                    JSON.parse(JSON.stringify(session)),
-                );
-            } catch {
-                console.log(
-                    `[RESTORE] Disk load failed for ${fullSession.id}, trying cloud...`,
-                );
-            }
-
-            // Try cloud if disk didn't have better data
-            if (!diskLoaded && FirestoreSessionManager.isAvailable()) {
-                try {
-                    const cloudSession =
-                        await FirestoreSessionManager.loadSession(
-                            fullSession.id,
-                        );
-                    const cloudTranscripts =
-                        cloudSession?.transcripts?.length || 0;
-                    const cloudNodes = cloudSession?.graph_nodes?.length || 0;
-                    if (
-                        cloudTranscripts > cacheTranscripts ||
-                        cloudNodes > cacheNodes ||
-                        !session
-                    ) {
-                        session = cloudSession;
-                        console.log(
-                            `[RESTORE] Loaded from cloud: ${cloudTranscripts} transcripts, ${cloudNodes} nodes`,
-                        );
-                    }
-                    sessionCache.set(
-                        fullSession.id,
-                        JSON.parse(JSON.stringify(session)),
-                    );
-                } catch {
-                    session = session || fullSession; // keep stale cache or use provided object
-                }
-            }
-
-            // Final fallback
-            if (!session) {
-                session = fullSession;
-            }
-        }
-
-        // Set as current
-        currentSession = JSON.parse(JSON.stringify(session));
-
-        // Restore transcripts
-        transcripts = (session.transcripts || []).map((t: any, i: number) => ({
-            id: t.id || `restored_${i}`,
-            timestamp: t.timestamp || "",
-            speaker: t.speaker_id || t.speaker || "Speaker",
-            speakerId: t.speakerId || 0,
-            text: t.text || "",
-            tone: t.tone || undefined,
-            category: t.category || undefined,
-            confidence: t.confidence || 0.5,
-            isPartial: false,
-        }));
-
-        // Restore graph
-        graphNodes = (session.graph_nodes || []).map((n: any) => ({
-            id: n.id,
-            type: n.node_type || n.type || "Entity",
-            label: n.label || n.id,
-            weight: n.weight || 1,
-        }));
-        graphEdges = (session.graph_edges || []).map((e: any) => ({
-            from: e.from,
-            to: e.to,
-            relation: e.relation || "related",
-        }));
-
-        // Restore insights
-        if (session.insights) {
-            extractedSummary = {
-                topics: session.insights.topics || [],
-                decisions: session.insights.decisions || [],
-                actionItems: session.insights.action_items || [],
-                keyPoints: session.insights.key_points || [],
-            };
-            showSummaryPanel = true;
-        } else if (session.summary) {
-            extractedSummary = {
-                topics: [],
-                decisions: session.summary.key_decisions || [],
-                actionItems: (session.summary.action_items || []).map(
-                    (a: any) => (typeof a === "string" ? a : a.description),
-                ),
-                keyPoints: session.summary.next_steps || [],
-            };
-            showSummaryPanel = true;
-        } else {
-            extractedSummary = null;
-        }
-
-        // Restore psychosomatic
-        if (session.psychosomatic) {
-            stressLevel = session.psychosomatic.stress || 0;
-            engagementLevel = session.psychosomatic.engagement || 0;
-            urgencyLevel = session.psychosomatic.urgency || 0;
-            clarityLevel = session.psychosomatic.clarity || 0;
-        } else {
-            stressLevel = 0;
-            engagementLevel = 0.3;
-            urgencyLevel = 0;
-            clarityLevel = 0.4;
-        }
-
-        // Restore memories from cache
-        if (session._extractedMemories) {
-            extractedMemories = session._extractedMemories;
-            showMemoriesPanel = session._showMemoriesPanel || false;
-        } else {
-            extractedMemories = null;
-            showMemoriesPanel = false;
-        }
-        if (session._showSummaryPanel !== undefined) {
-            showSummaryPanel = session._showSummaryPanel;
-        }
-
-        activeTab = "transcript";
-        isCollapsed = false;
-        const title = session.metadata?.title || "Session";
-        status = `Restored: ${title} (${transcripts.length} transcripts, ${graphNodes.length} nodes)`;
-        console.log(`[RESTORE] === Session loaded: ${title} ===`);
+        const { session, updatedCache } = await loadFullSession(
+            fullSession.id,
+            sessionCache,
+            fullSession,
+        );
+        sessionCache = updatedCache;
+        applyRestoredState(parseSessionIntoState(session));
     }
 
     async function handleSessionLoad(session: any) {
         if (!session) return;
-
-        // Don't reload if it's the same session already displayed
         if (currentSession?.id === session.id) {
-            console.log(
-                `[RESTORE] Session ${session.id} already active, skipping reload`,
-            );
             activeTab = "transcript";
             return;
         }
-
         console.log(`[RESTORE] === Loading session: ${session.id} ===`);
-
-        // *** SAVE current session to cache AND disk BEFORE switching ***
         const snapshot = saveCurrentSessionToCache();
         if (snapshot && isRunningInTauri) {
             try {
                 await invoke("save_session", {
                     sessionJson: JSON.stringify(snapshot),
                 });
-                console.log("[SESSION-SWITCH] Previous session saved to disk");
             } catch (e) {
                 console.warn("[SESSION-SWITCH] Disk save failed:", e);
             }
         }
-
         status = "Loading session...";
-
-        // Delegate to restoreSessionData which handles cache/disk/cloud fallback
         await restoreSessionData(session);
     }
 
     async function handleSessionDelete(sessionId: string, event: MouseEvent) {
         event.stopPropagation();
-        const confirmed = confirm(
-            "Delete this session? This cannot be undone.",
-        );
-        if (!confirmed) return;
-        try {
-            // Always delete from local storage
-            try {
-                await invoke("delete_session", { sessionId });
-                console.log("[SESSION] Deleted from local storage");
-            } catch (e) {
-                console.warn("[SESSION] Local delete failed:", e);
-            }
-
-            // Also delete from cloud if available
-            if (FirestoreSessionManager.isAvailable()) {
-                try {
-                    await FirestoreSessionManager.deleteSession(sessionId);
-                    console.log("[SESSION] Deleted from cloud");
-                } catch (e) {
-                    console.warn("[SESSION] Cloud delete failed:", e);
-                }
-            }
-
-            // Remove from local cache and rebuild session list from source of truth
-            sessionCache.delete(sessionId);
-
-            if (currentSession?.id === sessionId) {
-                currentSession = null;
-                transcripts = [];
-                graphNodes = [];
-                graphEdges = [];
-                extractedSummary = null;
-            }
-
-            // Rebuild pastSessions from disk + cloud (guaranteed no ghost entries)
-            await refreshSessionList();
-            status = "Session deleted";
-        } catch (error) {
-            console.error("[SESSION] Delete failed:", error);
-            status = "Failed to delete session";
+        if (!confirm("Delete this session? This cannot be undone.")) return;
+        await deleteSessionService(sessionId);
+        sessionCache.delete(sessionId);
+        if (currentSession?.id === sessionId) {
+            currentSession = null;
+            transcripts = [];
+            graphNodes = [];
+            graphEdges = [];
+            extractedSummary = null;
         }
+        await refreshSessionList();
+        status = "Session deleted";
     }
 
     async function saveSession(isFinal = false) {
@@ -983,92 +416,31 @@
             console.warn("[PERSISTENCE] No current session to save");
             return;
         }
-
         try {
-            // CRITICAL: Explicitly sync live state into currentSession BEFORE saving.
-            // The Svelte $: reactive block runs asynchronously and may not have
-            // updated currentSession yet when saveSession is called.
-            currentSession.transcripts = transcripts.map((t) => ({
-                timestamp: t.timestamp || "",
-                speaker_id: t.speaker || "Speaker",
-                text: t.text || "",
-                tone: t.tone || null,
-                category: t.category || null,
-                confidence: t.confidence || 0.5,
-            }));
-            currentSession.graph_nodes = graphNodes.map((n) => ({
-                id: n.id,
-                node_type: n.type || "Entity",
-                metadata: {},
-            }));
-            currentSession.graph_edges = graphEdges.map((e) => ({
-                from: e.from,
-                to: e.to,
-                relation: e.relation || "related",
-                weight: 1.0,
-            }));
-            currentSession.metadata.total_transcripts = transcripts.length;
-            currentSession.updated_at = new Date().toISOString();
-            currentSession.psychosomatic = {
-                stress: stressLevel || 0,
-                engagement: engagementLevel || 0,
-                urgency: urgencyLevel || 0,
-                clarity: clarityLevel || 0,
-            };
-            currentSession.insights = extractedSummary
-                ? {
-                      topics: extractedSummary.topics || [],
-                      decisions: extractedSummary.decisions || [],
-                      action_items: extractedSummary.actionItems || [],
-                      key_points: extractedSummary.keyPoints || [],
-                  }
-                : null;
-
-            const transcriptCount = currentSession.transcripts.length;
-            const nodeCount = currentSession.graph_nodes.length;
+            const sessionObj = buildSessionJson(
+                currentSession,
+                transcripts,
+                graphNodes,
+                graphEdges,
+                stressLevel,
+                engagementLevel,
+                urgencyLevel,
+                clarityLevel,
+                extractedSummary,
+                extractedMemories,
+                showSummaryPanel,
+                showMemoriesPanel,
+            );
+            currentSession = sessionObj;
+            const transcriptCount = sessionObj.transcripts.length;
+            const nodeCount = sessionObj.graph_nodes.length;
             console.log(
                 `[PERSISTENCE] Saving ${isFinal ? "(Final)" : "(Auto)"}: ${transcriptCount} transcripts, ${nodeCount} nodes`,
             );
-
-            // Always update local cache immediately (instant access)
             saveCurrentSessionToCache();
-
-            // ====================================================
-            // LOCAL SAVE: Always save to local disk (works for ALL users)
-            // ====================================================
-            try {
-                const sessionJson = JSON.stringify(currentSession);
-                await invoke("save_session", { sessionJson });
-                console.log("[PERSISTENCE] ✓ Saved to local disk");
-            } catch (localErr: any) {
-                console.error("[PERSISTENCE] Local save failed:", localErr);
-            }
-
-            // ====================================================
-            // CLOUD SYNC: Optionally sync to Firebase if signed in
-            // ====================================================
-            if (FirestoreSessionManager.isAvailable()) {
-                try {
-                    await FirestoreSessionManager.saveSession(currentSession);
-                    console.log(
-                        "[PERSISTENCE] ✓ Synced to Google Cloud Firestore",
-                    );
-                } catch (cloudErr: any) {
-                    const cloudMsg =
-                        typeof cloudErr === "string"
-                            ? cloudErr
-                            : cloudErr?.message || String(cloudErr);
-                    console.warn(
-                        "[PERSISTENCE] Cloud sync failed (local save OK):",
-                        cloudMsg,
-                    );
-                }
-            } else {
-                console.log("[PERSISTENCE] Cloud sync skipped (not signed in)");
-            }
-
+            await saveSessionToDisk(JSON.stringify(sessionObj));
+            await syncSessionToCloud(sessionObj);
             if (isFinal) {
-                // Refresh session list with proper deduplication
                 await refreshSessionList();
                 status = `Session saved (${transcriptCount} transcripts)`;
             }
@@ -1082,168 +454,199 @@
         }
     }
 
-    // --- COLLAPSE TOGGLE ---
-    function toggleCollapseState() {
-        isCollapsed = !isCollapsed;
+    async function loadInitialData() {
+        try {
+            if (!isRunningInTauri) return;
+            await recoverPendingSave();
+            try {
+                initFirebase();
+                const user = await waitForAuth();
+                if (user)
+                    console.log(`[RESTORE] Authenticated as: ${user.email}`);
+                else console.log("[RESTORE] Not signed in — local only");
+            } catch (firebaseErr) {
+                console.warn("[RESTORE] Firebase init failed:", firebaseErr);
+            }
+            await refreshSessionList();
+            if (pastSessions.length > 0 && transcripts.length === 0) {
+                const latest = pastSessions[0];
+                console.log(
+                    `[RESTORE] Auto-loading latest session: ${latest.metadata?.title}`,
+                );
+                await restoreSessionData(latest);
+            }
+        } catch (error: any) {
+            const errMsg =
+                typeof error === "string"
+                    ? error
+                    : error?.message || String(error);
+            console.error("[RESTORE] Failed to load sessions:", errMsg);
+            status = `Error loading sessions: ${errMsg}`;
+        }
     }
 
-    // --- EXTRACT SUMMARY (uses Gemini) ---
-    async function extractSummary() {
-        if (transcripts.length === 0) {
-            extractError = "No transcripts to summarize";
-            setTimeout(() => (extractError = null), 3000);
-            return;
-        }
+    // ============================================================
+    // SPEAKER ID (thin wrappers)
+    // ============================================================
+    async function initializeSpeakerId() {
+        if (!isRunningInTauri) return;
+        speakerIdInitialized = await doInitSpeakerId();
+        if (speakerIdInitialized) await doRefreshSpeakerIdStatus();
+    }
 
+    async function doRefreshSpeakerIdStatus() {
+        if (!isRunningInTauri) return;
+        const result = await doRefreshSpeakerStatus();
+        speakerIdStatus = result.status;
+        speakerProfiles = result.profiles;
+    }
+
+    async function renameSpeaker(speakerId: string, newLabel: string) {
+        if (!isRunningInTauri) return;
+        const result = await doRenameSpeaker(speakerId, newLabel);
+        if (result.success) {
+            await doRefreshSpeakerIdStatus();
+            showToast(result.message, "info");
+        } else showToast(result.message, "error");
+    }
+
+    async function clearSpeakerProfiles() {
+        if (!isRunningInTauri) return;
+        const result = await doClearSpeakerProfiles();
+        if (result.success) {
+            await doRefreshSpeakerIdStatus();
+            showToast(result.message, "info");
+        } else showToast(result.message, "error");
+    }
+
+    // ============================================================
+    // EXTRACTION (thin wrappers)
+    // ============================================================
+    async function extractSummary() {
         isExtractingSummary = true;
         extractError = null;
-
-        const transcriptText = transcripts
-            .map((t) => `[${t.timestamp}] ${t.speaker}: ${t.text}`)
-            .join("\n");
-
-        const prompt = `Analyze this meeting transcript and return a JSON object with:
-- topics: array of main discussion topics (3-5 items)
-- decisions: array of decisions made
-- actionItems: array of action items with assignees if mentioned
-- keyPoints: array of key takeaways (3-5 items)
-
-Transcript:
-${transcriptText}
-
-Return ONLY valid JSON, no markdown, no explanation.`;
-
-        try {
-            const apiKey = getActiveApiKey();
-            if (!apiKey) {
-                throw new Error("No API key configured");
-            }
-
-            const response = await fetch(
-                `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
-                {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                        contents: [{ parts: [{ text: prompt }] }],
-                        generationConfig: { temperature: 0.3 },
-                    }),
-                },
-            );
-
-            if (!response.ok) {
-                const err = await response.text();
-                if (response.status === 429) {
-                    keyManager.handleError(429, "Rate limit");
-                }
-                throw new Error(`API Error: ${response.status}`);
-            }
-
-            const data = await response.json();
-            const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
-
-            // Parse JSON from response
-            const jsonMatch = text.match(/\{[\s\S]*\}/);
-            if (jsonMatch) {
-                extractedSummary = JSON.parse(jsonMatch[0]);
-                showSummaryPanel = true;
-                keyManager.reportSuccess();
-            } else {
-                throw new Error("Invalid response format");
-            }
-        } catch (error: any) {
-            extractError = `Summary extraction failed: ${error.message}`;
-            console.error("Summary extraction error:", error);
-        } finally {
-            isExtractingSummary = false;
+        const result = await doExtractSummary(transcripts, getActiveApiKey);
+        if (result.summary) {
+            extractedSummary = result.summary;
+            showSummaryPanel = true;
+        } else {
+            extractError = result.error;
+            setTimeout(() => (extractError = null), 3000);
         }
+        isExtractingSummary = false;
     }
 
-    // --- EXTRACT MEMORIES (uses Gemini) ---
     async function extractMemories() {
-        if (transcripts.length === 0) {
-            extractError = "No transcripts to extract memories from";
-            setTimeout(() => (extractError = null), 3000);
-            return;
-        }
-
         isExtractingMemories = true;
         extractError = null;
+        const result = await doExtractMemories(transcripts, getActiveApiKey);
+        if (result.memories) {
+            extractedMemories = result.memories;
+            showMemoriesPanel = true;
+        } else {
+            extractError = result.error;
+            setTimeout(() => (extractError = null), 3000);
+        }
+        isExtractingMemories = false;
+    }
 
-        const transcriptText = transcripts
-            .map((t) => `[${t.timestamp}] ${t.speaker}: ${t.text}`)
-            .join("\n");
-
-        const prompt = `Analyze this meeting transcript for memorable moments. Return a JSON object with:
-- keyMoments: array of significant moments or turning points in the conversation
-- personalInsights: array of personal observations or wisdom shared
-- quotes: array of notable quotes with attribution (max 3)
-- emotionShifts: array describing any emotional changes detected (e.g., "Discussion became tense when...")
-
-Transcript:
-${transcriptText}
-
-Return ONLY valid JSON, no markdown, no explanation.`;
-
+    async function handleGenerateGraph() {
+        if (isGeneratingGraph || transcripts.length === 0) return;
+        isGeneratingGraph = true;
+        status = "Generating knowledge graph...";
         try {
-            const apiKey = getActiveApiKey();
-            if (!apiKey) {
-                throw new Error("No API key configured");
-            }
-
-            const response = await fetch(
-                `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
-                {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                        contents: [{ parts: [{ text: prompt }] }],
-                        generationConfig: { temperature: 0.5 },
-                    }),
-                },
+            const result = await extractKnowledgeGraph(
+                transcripts,
+                graphNodes,
+                graphEdges,
+                getActiveApiKey,
             );
-
-            if (!response.ok) {
-                if (response.status === 429) {
-                    keyManager.handleError(429, "Rate limit");
-                }
-                throw new Error(`API Error: ${response.status}`);
-            }
-
-            const data = await response.json();
-            const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
-
-            const jsonMatch = text.match(/\{[\s\S]*\}/);
-            if (jsonMatch) {
-                extractedMemories = JSON.parse(jsonMatch[0]);
-                showMemoriesPanel = true;
-                keyManager.reportSuccess();
+            // Apply quality rules (dedup, merge, orphan removal)
+            const cleaned = applyGraphQualityRules(result.nodes, result.edges);
+            // Store unclustered originals for expand
+            _originalGraphNodes = [...cleaned.nodes];
+            _originalGraphEdges = [...cleaned.edges];
+            // Auto-cluster if large
+            const clustered = autoClusterGraph(
+                cleaned.nodes,
+                cleaned.edges,
+                20,
+            );
+            graphNodes = clustered.nodes;
+            graphEdges = clustered.edges;
+            if (result.error) {
+                showToast(result.error, "warning");
             } else {
-                throw new Error("Invalid response format");
+                showToast(
+                    `Knowledge graph generated: ${graphNodes.length} nodes, ${graphEdges.length} edges`,
+                    "info",
+                );
             }
-        } catch (error: any) {
-            extractError = `Memory extraction failed: ${error.message}`;
-            console.error("Memory extraction error:", error);
+            // Save session with new graph data
+            await saveSession(false);
+        } catch (e: any) {
+            console.error("[Graph] Generation failed:", e);
+            showToast(`Graph generation failed: ${e.message}`, "error");
         } finally {
-            isExtractingMemories = false;
+            isGeneratingGraph = false;
+            status = "Ready";
         }
     }
 
-    // --- CLOSE PANELS ---
-    function closeSummaryPanel() {
-        showSummaryPanel = false;
+    function handleClearGraph() {
+        graphNodes = [];
+        graphEdges = [];
+        _originalGraphNodes = [];
+        _originalGraphEdges = [];
+        showToast("Knowledge graph cleared", "info");
     }
 
-    function closeMemoriesPanel() {
-        showMemoriesPanel = false;
+    function handleToggleCluster(event: CustomEvent<{ nodeId: string }>) {
+        const { nodeId } = event.detail;
+        const origNodes =
+            _originalGraphNodes.length > 0 ? _originalGraphNodes : graphNodes;
+        const origEdges =
+            _originalGraphEdges.length > 0 ? _originalGraphEdges : graphEdges;
+        const result = expandCluster(
+            nodeId,
+            origNodes,
+            origEdges,
+            graphNodes,
+            graphEdges,
+        );
+        graphNodes = result.nodes;
+        graphEdges = result.edges;
     }
 
-    async function loadDevices() {
+    // ============================================================
+    // CONNECTION
+    // ============================================================
+    async function connectGemini() {
+        if (!apiKey) {
+            status = "API Key Required";
+            return;
+        }
+        const result = await doConnectGemini({
+            apiKey,
+            selectedModel,
+            isRunningInTauri,
+        });
+        isGeminiConnected = result.isGeminiConnected;
+        status = result.status;
+        if (isRunningInTauri) initializeSpeakerId();
+    }
+
+    // ============================================================
+    // AUDIO CAPTURE
+    // ============================================================
+    async function pollVolume() {
+        if (!isRecording) return;
         try {
-            devices = await invoke("list_audio_devices");
-        } catch (error) {
-            console.error(error);
-            status = "Error listing devices";
+            let vol = (await invoke("get_current_volume")) as number;
+            currentVolume = currentVolume * 0.3 + vol * 0.7;
+            vadManager.processVolume(currentVolume);
+        } catch {
+            /* ignore */
         }
     }
 
@@ -1251,9 +654,7 @@ Return ONLY valid JSON, no markdown, no explanation.`;
         try {
             await invoke("set_capture_mode", { mode });
             captureMode = mode;
-
             if (isRecording) {
-                console.log("Restarting capture with new mode:", mode);
                 await invoke("stop_audio_capture");
                 await invoke("start_audio_capture");
                 status = `Recording (${mode})...`;
@@ -1263,64 +664,44 @@ Return ONLY valid JSON, no markdown, no explanation.`;
         }
     }
 
-    async function pollVolume() {
-        if (!isRecording) return;
-        try {
-            let vol = (await invoke("get_current_volume")) as number;
-
-            // Apply slight smoothing
-            currentVolume = currentVolume * 0.3 + vol * 0.7;
-
-            // Feed VAD Manager directly
-            vadManager.processVolume(currentVolume);
-        } catch (error) {
-            // Silently ignore volume poll errors
-        }
-    }
-
     async function toggleCapture() {
         try {
             if (isRecording) {
-                // === STOP RECORDING - Start Processing Flow ===
+                // === STOP RECORDING ===
                 await invoke("stop_audio_capture");
+                // Flush: tell backend to process any buffered audio immediately
+                // (don't wait for silence timeout)
+                try {
+                    await invoke("flush_audio_buffer");
+                } catch (e) {
+                    console.warn("[Recording] flush_audio_buffer:", e);
+                }
                 isRecording = false;
                 if (volumeInterval) {
                     clearInterval(volumeInterval);
                     volumeInterval = null;
                 }
                 currentVolume = 0;
-
-                // Stop VAD and get stats
                 vadManager.stop();
-
-                // Stop Auto-save
                 if (autoSaveInterval) {
                     clearInterval(autoSaveInterval);
                     autoSaveInterval = null;
                 }
-
                 const vadStats = vadManager.getStats();
                 console.log(
                     `[VAD] Session stats: ${(vadStats.totalSpeechTime / 1000).toFixed(1)}s speech, ${vadStats.chunksSent} chunks, ${(vadStats.speechRatio * 100).toFixed(0)}% speech ratio`,
                 );
-
-                // Calculate recording duration
                 const duration = recordingStartTime
                     ? Math.floor(
                           (Date.now() - recordingStartTime.getTime()) / 1000,
                       )
                     : 0;
                 recordingStartTime = null;
-
-                // Only process if we recorded for at least 1 second
                 if (duration >= 1) {
                     try {
                         await runProcessingFlow(duration);
-                    } catch (procError) {
-                        console.error(
-                            "[RECORDING] Processing flow error:",
-                            procError,
-                        );
+                    } catch (e) {
+                        console.error("[RECORDING] Processing flow error:", e);
                     }
                 } else {
                     status = "Recording too short (min 1 second)";
@@ -1328,114 +709,108 @@ Return ONLY valid JSON, no markdown, no explanation.`;
                         status = "Ready";
                     }, 2000);
                 }
-
-                // SAFETY NET: Always do a final save + cache refresh after all processing.
-                // This ensures transcripts that arrived during runProcessingFlow are persisted,
-                // even if the processing flow threw an error.
                 if (transcripts.length > 0 || graphNodes.length > 0) {
                     await saveSession(true);
                     console.log("[RECORDING] Safety-net final save complete");
                 }
             } else {
                 // === START RECORDING ===
-                // Save current session to cache before starting a new one
-                saveCurrentSessionToCache();
+                // Session continuation: if the previous session ended recently
+                // and had transcripts, CONTINUE it instead of creating a new one.
+                // This prevents "splitting" when a user quickly stops/starts recording.
+                // If user clicked "New Session", skip continuation and force a new session.
+                const CONTINUE_WINDOW_MS = 120_000; // 2 minutes
+                const canContinue =
+                    !forceNewSession &&
+                    currentSession &&
+                    currentSession.updated_at &&
+                    transcripts.length > 0 &&
+                    Date.now() - new Date(currentSession.updated_at).getTime() <
+                        CONTINUE_WINDOW_MS;
+                forceNewSession = false; // Reset flag after use
 
-                // Reset for new session
-                transcripts = [];
-                graphNodes = [];
-                graphEdges = [];
-                localInsights = [];
-                extractedSummary = null;
-                extractedMemories = null;
-
-                // Create new session object
-                const now = new Date();
-                currentSession = {
-                    id: crypto.randomUUID
-                        ? crypto.randomUUID()
-                        : `session_${Date.now()}`,
-                    created_at: now.toISOString(),
-                    updated_at: now.toISOString(),
-                    transcripts: [],
-                    graph_nodes: [],
-                    graph_edges: [],
-                    metadata: {
-                        title: `Session ${now.toLocaleDateString()} ${now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`,
-                        duration_seconds: 0,
-                        total_transcripts: 0,
-                        total_speakers: 0,
-                        tags: [],
-                    },
-                    summary: null,
-                };
-
-                // ============================================================
-                // IMMEDIATE START: Begin audio capture + waveform FIRST
-                // so the user sees speech detection instantly. Heavy init
-                // (key validation, Whisper, Gemini) runs AFTER.
-                // ============================================================
-
-                // Reset the audio processing loop state for the new session
+                if (canContinue) {
+                    // CONTINUE existing session — add a new part
+                    console.log(
+                        `[RECORDING] Continuing session ${currentSession.id} (${transcripts.length} existing transcripts)`,
+                    );
+                    const partNum = (currentSession.parts?.length || 0) + 1;
+                    if (!currentSession.parts) currentSession.parts = [];
+                    currentSession.parts.push({
+                        partNumber: partNum,
+                        startedAt: new Date().toISOString(),
+                        transcriptStartIndex: transcripts.length,
+                    });
+                    // Don't clear transcripts/graph — keep existing data
+                    localInsights = [];
+                } else {
+                    // NEW session
+                    saveCurrentSessionToCache();
+                    transcripts = [];
+                    graphNodes = [];
+                    graphEdges = [];
+                    localInsights = [];
+                    extractedSummary = null;
+                    extractedMemories = null;
+                    const now = new Date();
+                    currentSession = {
+                        id: crypto.randomUUID
+                            ? crypto.randomUUID()
+                            : `session_${Date.now()}`,
+                        created_at: now.toISOString(),
+                        updated_at: now.toISOString(),
+                        transcripts: [],
+                        graph_nodes: [],
+                        graph_edges: [],
+                        metadata: {
+                            title: `Session ${now.toLocaleDateString()} ${now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`,
+                            duration_seconds: 0,
+                            total_transcripts: 0,
+                            total_speakers: 0,
+                            tags: [],
+                        },
+                        summary: null,
+                        parts: [
+                            {
+                                partNumber: 1,
+                                startedAt: now.toISOString(),
+                                transcriptStartIndex: 0,
+                            },
+                        ],
+                    };
+                }
                 try {
                     await invoke("reset_audio_loop");
-                    console.log("[Recording] Audio loop reset for new session");
                 } catch (e) {
                     console.warn("[Recording] Audio loop reset failed:", e);
                 }
-
-                // Clear Whisper context from previous session to prevent cross-session contamination
                 try {
                     await invoke("clear_whisper_context");
-                    console.log(
-                        "[Recording] Whisper context cleared for new session",
-                    );
                 } catch (e) {
                     console.warn(
                         "[Recording] Whisper context clear failed:",
                         e,
                     );
                 }
-
-                // Ensure currentVolume is 0 before starting (backend also resets it)
                 currentVolume = 0;
-
                 await invoke("start_audio_capture");
                 isRecording = true;
                 recordingStartTime = new Date();
                 status = "Listening for speech...";
-
-                // Start VAD BEFORE polling to ensure clean state before any volume data
                 vadManager.start();
-
-                // Now start polling volume (VAD is already reset and ready)
                 volumeInterval = setInterval(pollVolume, 100);
-
-                // Initialize the knowledge graph with a central Meeting node
-                if (!graphNodes.find((n) => n.id === "Meeting")) {
+                if (!graphNodes.find((n) => n.id === "Start")) {
                     graphNodes = [
                         {
-                            id: "Meeting",
-                            type: "Topic",
-                            label: "Meeting",
+                            id: "Start",
+                            type: "Root",
+                            label: "Start",
                             weight: 3,
                         },
                     ];
                     graphEdges = [];
                 }
-
-                // Start Auto-save (every 30s)
                 autoSaveInterval = setInterval(() => saveSession(false), 30000);
-
-                // ============================================================
-                // INSTANT START: Start audio processing loop IMMEDIATELY
-                // so speech detection begins on the very first syllable.
-                // Whisper, Speaker ID, and Gemini init run in parallel.
-                // ============================================================
-
-                // STEP 0: Start the audio processing loop NOW — before any
-                // model loading or API calls. This reads from the audio
-                // channel right away so no samples are lost.
                 try {
                     await invoke("start_processing_loop");
                     console.log(
@@ -1444,205 +819,73 @@ Return ONLY valid JSON, no markdown, no explanation.`;
                 } catch (e) {
                     console.warn("[Recording] start_processing_loop:", e);
                 }
-
                 if (keyState.keys.length > 0) {
-                    // Don't block recording — run all initialization in background
                     (async () => {
-                        try {
-                            status = "Initializing AI engine...";
-
-                            // STEP 1: Init Whisper + Speaker ID in PARALLEL
-                            // Both are needed for processing but are independent
-                            const [whisperResult, speakerResult] =
-                                await Promise.allSettled([
-                                    (async () => {
-                                        await invoke("initialize_whisper", {
-                                            modelSize: "small",
-                                        });
-                                        await invoke("set_whisper_language", {
-                                            language: "auto",
-                                        });
-                                        console.log(
-                                            "[Recording] Whisper ready (small, auto-detect)",
-                                        );
-                                    })(),
-                                    (async () => {
-                                        await invoke("initialize_speaker_id");
-                                        speakerIdInitialized = true;
-                                        console.log(
-                                            "[Recording] ECAPA-TDNN speaker ID ready",
-                                        );
-                                        await refreshSpeakerIdStatus();
-                                    })(),
-                                ]);
-
-                            if (whisperResult.status === "rejected") {
-                                console.log(
-                                    "[Recording] Whisper already initialized or skipped:",
-                                    whisperResult.reason,
-                                );
-                            }
-                            if (speakerResult.status === "rejected") {
-                                console.warn(
-                                    "[Recording] Speaker ID init failed (non-blocking):",
-                                    speakerResult.reason,
-                                );
-                            }
-
-                            // STEP 2: Get a working API key
-                            const keyResult =
-                                await keyManager.getNextWorkingKeyFast();
-
-                            if (!keyResult.success || !keyResult.key) {
-                                status =
-                                    "Recording (AI offline — check API keys)";
-                                showToast(
-                                    `AI processing unavailable: ${keyResult.message}. Audio is still being captured.`,
-                                    "warning",
-                                );
-                                return;
-                            }
-
-                            isGeminiConnected = true;
-                            apiKey = keyResult.key.key;
-                            console.log(
-                                "[Recording] Ready with key:",
-                                keyResult.key?.name,
-                            );
-
-                            // STEP 3: Set Gemini key (audio loop already running)
-                            try {
-                                await invoke("test_gemini_connection", {
-                                    key: keyResult.key!.key,
-                                    model: selectedModel,
-                                });
-                                console.log(
-                                    `[Recording] Connected with key: ${keyResult.key!.name}`,
-                                );
-                                apiKey = keyResult.key!.key;
-                            } catch (e: any) {
-                                const errMsg = e?.message || String(e);
-                                console.warn(
-                                    `[Recording] Backend test warning: ${errMsg}`,
-                                );
-                                apiKey = keyResult.key!.key;
-
-                                // Try to silently rotate to next key
-                                const nextKey = keyManager.rotateToNextKey();
-                                if (nextKey) {
-                                    try {
-                                        await invoke("update_gemini_key", {
-                                            key: nextKey.key,
-                                        });
-                                        apiKey = nextKey.key;
-                                        console.log(
-                                            `[Recording] Rotated to ${nextKey.name} after initial test failure`,
-                                        );
-                                    } catch (_) {
-                                        /* ignore */
-                                    }
-                                }
-                            }
-
-                            status = "Listening for speech...";
-                        } catch (initErr) {
-                            console.error(
-                                "[Recording] Background init error:",
-                                initErr,
-                            );
-                            status = "Recording (AI init failed)";
-                        }
+                        status = "Initializing AI engine...";
+                        const initResult = await backgroundRecordingInit({
+                            selectedModel,
+                            onSpeakerIdReady: () => {
+                                speakerIdInitialized = true;
+                            },
+                            onSpeakerIdStatusRefresh: doRefreshSpeakerIdStatus,
+                        });
+                        isGeminiConnected = initResult.isGeminiConnected;
+                        if (initResult.apiKey) apiKey = initResult.apiKey;
+                        status = initResult.status;
+                        if (initResult.error)
+                            showToast(initResult.error, "warning");
                     })();
                 }
-
-                // Play start sound (browser notification)
                 try {
                     new Audio(
                         "data:audio/wav;base64,UklGRnoGAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAGAACBhYqFbF1fdJivrJBhNjVgodDbq2EcBj+a2teleicAV63E25NbIACf08HmjFgT",
                     ).play();
-                } catch (e) {
-                    /* ignore audio errors */
+                } catch {
+                    /* ignore */
                 }
             }
         } catch (error: any) {
             console.error("Capture error:", error);
-            const errorMessage = error?.message || String(error);
-            status = `Capture Error: ${errorMessage}`;
-            processingError = errorMessage;
+            status = `Capture Error: ${error?.message || String(error)}`;
+            processingError = error?.message || String(error);
             isRecording = false;
         }
     }
 
+    // ============================================================
+    // PROCESSING FLOW
+    // ============================================================
     async function runProcessingFlow(duration: number) {
         isProcessing = true;
         processingStep = 0;
         processingError = null;
         status = "Processing recording...";
-
         try {
-            // ============================================================
-            // Step 1: Save recording
-            // ============================================================
+            // Step 1: Save
             processingStep = 1;
             status = "Saving recording...";
-            console.log("[PROCESSING] Step 1: Saving recording...");
             await saveSession(true);
-            console.log("[PROCESSING] Step 1 complete.");
 
-            // ============================================================
-            // Step 2: Transcription - wait for backend Whisper+Gemini
-            // to finish processing any remaining buffered audio.
-            // This is the REAL wait - the backend's smart_audio_loop
-            // needs time to flush remaining audio through Whisper.
-            // ============================================================
+            // Step 2: Wait for transcription
             processingStep = 2;
             status = "Waiting for transcription to complete...";
-            console.log("[PROCESSING] Step 2: Waiting for transcription...");
-
             if (isGeminiConnected) {
-                const transcriptCountBefore = transcripts.length;
-                let lastTranscriptCount = transcriptCountBefore;
-                let stableTime = 0;
-                const waitStart = Date.now();
-                // Short wait: max 10s or half the recording duration, hard cap 20s
-                const maxWait = Math.min(
-                    Math.max(8000, (duration * 1000) / 2),
-                    20000,
+                const countBefore = transcripts.length;
+                await waitForTranscriptions(
+                    duration,
+                    () => transcripts.length,
+                    countBefore,
+                    (s) => {
+                        status = s;
+                    },
                 );
-                // Need 4s of no new transcripts to consider it done
-                // (must exceed backend's 2.5s silence timeout + Whisper processing latency)
-                const stabilityThreshold = 4000;
-
-                while (
-                    stableTime < stabilityThreshold &&
-                    Date.now() - waitStart < maxWait
-                ) {
-                    await new Promise((r) => setTimeout(r, 300));
-                    if (transcripts.length > lastTranscriptCount) {
-                        lastTranscriptCount = transcripts.length;
-                        stableTime = 0; // Reset - new transcript arrived
-                        const newCount =
-                            transcripts.length - transcriptCountBefore;
-                        status = `Transcribing... (${newCount} segment${newCount > 1 ? "s" : ""} received)`;
-                    } else {
-                        stableTime += 300;
-                    }
-                }
-
                 lastRequestTime = new Date().toLocaleTimeString();
-                const newTranscripts =
-                    transcripts.length - transcriptCountBefore;
-                console.log(
-                    `[PROCESSING] Step 2 complete. New transcripts: ${newTranscripts} (waited ${((Date.now() - waitStart) / 1000).toFixed(1)}s)`,
-                );
             } else {
-                // Not connected - add a placeholder
                 await new Promise((r) => setTimeout(r, 1000));
-                const id = `rec_${Date.now()}`;
                 transcripts = [
                     ...transcripts,
                     {
-                        id,
+                        id: `rec_${Date.now()}`,
                         timestamp: new Date().toLocaleTimeString([], {
                             hour: "2-digit",
                             minute: "2-digit",
@@ -1655,12 +898,9 @@ Return ONLY valid JSON, no markdown, no explanation.`;
                     },
                 ];
             }
-
-            // If no transcripts at all, still save and skip remaining steps
             if (transcripts.length === 0) {
                 processingStep = 7;
                 status = "No speech detected in recording.";
-                // Save even with 0 transcripts so disk stays consistent
                 await saveSession(true);
                 setTimeout(() => {
                     isProcessing = false;
@@ -1670,286 +910,107 @@ Return ONLY valid JSON, no markdown, no explanation.`;
                 return;
             }
 
-            // ============================================================
-            // Step 3: Vocal Topography Analysis
-            // Analyze tone distribution, speech patterns across transcripts
-            // ============================================================
+            // Step 3: Tone analysis
             processingStep = 3;
             status = "Analyzing vocal topography...";
-            console.log("[PROCESSING] Step 3: Vocal Topography Analysis...");
-
-            // Compute tone/stress metrics from actual transcript data
-            let toneDistribution: Record<string, number> = {};
-            for (const t of transcripts) {
-                const tone = t.tone || "NEUTRAL";
-                toneDistribution[tone] = (toneDistribution[tone] || 0) + 1;
-            }
-            const totalTones = Object.values(toneDistribution).reduce(
-                (a, b) => a + b,
-                0,
-            );
-            if (totalTones > 0) {
-                const stressTones =
-                    (toneDistribution["URGENT"] || 0) +
-                    (toneDistribution["FRUSTRATED"] || 0);
-                stressLevel = stressTones / totalTones;
-                const positiveTones =
-                    (toneDistribution["POSITIVE"] || 0) +
-                    (toneDistribution["EXCITED"] || 0) +
-                    (toneDistribution["EMPATHETIC"] || 0);
-                engagementLevel = Math.min(
-                    1,
-                    (positiveTones + totalTones * 0.3) / totalTones,
-                );
-                const urgentCount = toneDistribution["URGENT"] || 0;
-                urgencyLevel = urgentCount / totalTones;
-                const avgConfidence =
-                    transcripts.reduce(
-                        (sum, t) => sum + (t.confidence || 0.5),
-                        0,
-                    ) / transcripts.length;
-                clarityLevel = avgConfidence;
-            }
-            console.log(
-                "[PROCESSING] Step 3 complete. Tone distribution:",
-                toneDistribution,
-            );
-            // Yield to UI so step 3 renders
+            const tones = analyzeToneDistribution(transcripts);
+            stressLevel = tones.stressLevel;
+            engagementLevel = tones.engagementLevel;
+            urgencyLevel = tones.urgencyLevel;
+            clarityLevel = tones.clarityLevel;
             await new Promise((r) => setTimeout(r, 100));
 
-            // ============================================================
-            // Step 4: Knowledge Graph Building
-            // Build the graph from ALL transcripts (real data)
-            // ============================================================
+            // Step 4: Knowledge graph (enhanced with Gemini extraction)
             processingStep = 4;
             status = "Building knowledge graph...";
-            console.log("[PROCESSING] Step 4: Building Knowledge Graph...");
+            // First build basic graph from transcript data
+            const basicGraph = buildGraphFromTranscripts(
+                transcripts,
+                graphNodes,
+                graphEdges,
+                (c, t) => {
+                    if (transcripts.length > 5)
+                        status = `Building knowledge graph... (${c}/${t})`;
+                },
+            );
+            graphNodes = basicGraph.nodes;
+            graphEdges = basicGraph.edges;
 
-            // Ensure root Meeting node exists
-            if (!graphNodes.find((n) => n.id === "Meeting")) {
-                graphNodes = [
-                    {
-                        id: "Meeting",
-                        type: "Topic",
-                        label: "Meeting",
-                        weight: 3,
-                    },
-                ];
-            }
-
-            // Build knowledge graph from all transcripts
-            let graphBuildCount = 0;
-            for (const t of transcripts) {
-                // Add speaker nodes with connections
-                const speakerNode = t.speaker || "Speaker";
-                if (!graphNodes.find((n) => n.id === speakerNode)) {
-                    graphNodes = [
-                        ...graphNodes,
-                        {
-                            id: speakerNode,
-                            type: "Speaker",
-                            label: speakerNode,
-                            weight: 2,
-                        },
-                    ];
-                    graphEdges = [
-                        ...graphEdges,
-                        {
-                            from: "Meeting",
-                            to: speakerNode,
-                            relation: "participant",
-                        },
-                    ];
-                }
-
-                // Add category nodes with proper edges
-                if (t.category) {
-                    for (const cat of t.category) {
-                        if (cat !== "INFO") {
-                            if (!graphNodes.find((n) => n.id === cat)) {
-                                graphNodes = [
-                                    ...graphNodes,
-                                    {
-                                        id: cat,
-                                        type: "Category",
-                                        label: cat,
-                                        weight: 1.5,
-                                    },
-                                ];
-                                graphEdges = [
-                                    ...graphEdges,
-                                    {
-                                        from: "Meeting",
-                                        to: cat,
-                                        relation: "contains",
-                                    },
-                                ];
-                            }
-                            graphEdges = [
-                                ...graphEdges,
-                                {
-                                    from: speakerNode,
-                                    to: cat,
-                                    relation: "raised",
-                                },
-                            ];
-                        }
-                    }
-                }
-
-                // Add tone nodes connected to speaker
-                if (t.tone && t.tone !== "NEUTRAL") {
-                    const toneId = `tone_${t.tone}`;
-                    if (!graphNodes.find((n) => n.id === toneId)) {
-                        graphNodes = [
-                            ...graphNodes,
-                            {
-                                id: toneId,
-                                type: "Tone",
-                                label: t.tone,
-                                weight: 1.2,
-                            },
-                        ];
-                    }
-                    graphEdges = [
-                        ...graphEdges,
-                        {
-                            from: speakerNode,
-                            to: toneId,
-                            relation: "expressed",
-                        },
-                    ];
-                }
-
-                // Extract key topics from transcript text for graph
-                const words = t.text.split(/\s+/);
-                const keyPhrases = words.filter(
-                    (w: string) =>
-                        w.length > 4 &&
-                        w[0] === w[0].toUpperCase() &&
-                        w[0] !== w[0].toLowerCase() &&
-                        ![
-                            "Speaker",
-                            "Meeting",
-                            "The",
-                            "This",
-                            "That",
-                            "There",
-                            "Their",
-                            "These",
-                            "Those",
-                            "With",
-                            "From",
-                            "About",
-                            "Would",
-                            "Could",
-                            "Should",
-                        ].includes(w),
+            // Then enhance with Gemini-powered entity/relationship extraction
+            try {
+                status = "Extracting knowledge graph entities...";
+                const getApiKey = () => keyManager.getCurrentKey()?.key || null;
+                const extractedGraph = await extractKnowledgeGraph(
+                    transcripts,
+                    graphNodes,
+                    graphEdges,
+                    getApiKey,
                 );
-
-                // Add unique proper nouns as entity nodes
-                const addedEntities = new Set<string>();
-                for (const phrase of keyPhrases.slice(0, 3)) {
-                    const clean = phrase.replace(/[.,!?;:'"]/g, "").trim();
-                    if (clean.length < 3 || addedEntities.has(clean)) continue;
-                    addedEntities.add(clean);
-
-                    if (!graphNodes.find((n) => n.id === clean)) {
-                        graphNodes = [
-                            ...graphNodes,
-                            {
-                                id: clean,
-                                type: "Entity",
-                                label: clean,
-                                weight: 1.0,
-                            },
-                        ];
-                    }
-                    graphEdges = [
-                        ...graphEdges,
-                        {
-                            from: speakerNode,
-                            to: clean,
-                            relation: "mentioned",
-                        },
-                    ];
+                graphNodes = extractedGraph.nodes;
+                graphEdges = extractedGraph.edges;
+                if (extractedGraph.error) {
+                    console.warn(
+                        `[PROCESSING] Graph extraction note: ${extractedGraph.error}`,
+                    );
                 }
-
-                graphBuildCount++;
-                // Update status with progress for large transcript sets
-                if (transcripts.length > 5) {
-                    status = `Building knowledge graph... (${graphBuildCount}/${transcripts.length})`;
-                }
+            } catch (e) {
+                console.warn(
+                    "[PROCESSING] Enhanced graph extraction failed, using basic graph:",
+                    e,
+                );
             }
-
+            // Apply quality rules and auto-clustering
+            {
+                const cleaned = applyGraphQualityRules(graphNodes, graphEdges);
+                _originalGraphNodes = [...cleaned.nodes];
+                _originalGraphEdges = [...cleaned.edges];
+                const clustered = autoClusterGraph(
+                    cleaned.nodes,
+                    cleaned.edges,
+                    20,
+                );
+                graphNodes = clustered.nodes;
+                graphEdges = clustered.edges;
+            }
             console.log(
                 `[PROCESSING] Step 4 complete. Graph: ${graphNodes.length} nodes, ${graphEdges.length} edges`,
             );
-            // Yield to UI so step 4 renders
             await new Promise((r) => setTimeout(r, 100));
 
-            // ============================================================
-            // Step 5: Intelligence Extraction (uses enabled filters)
-            // This does REAL extraction work via the intelligenceExtractor
-            // ============================================================
+            // Step 5: Intelligence extraction
             processingStep = 5;
             status = "Extracting intelligence insights...";
-            console.log("[PROCESSING] Step 5: Intelligence Extraction...");
-
             if (transcripts.length > 0) {
                 try {
-                    const freshInsights =
-                        await intelligenceExtractor.extractFromTranscript(
-                            transcripts.map((t) => ({
-                                ...t,
-                                speakerId: t.speakerId || 1,
-                            })),
-                        );
-                    if (freshInsights) {
-                        console.log(
-                            `[PROCESSING] Step 5 complete. Insights extracted successfully`,
-                        );
-                    }
+                    await intelligenceExtractor.extractFromTranscript(
+                        transcripts.map((t) => ({
+                            ...t,
+                            speakerId: t.speakerId || 1,
+                        })),
+                    );
                 } catch (e) {
                     console.error("Intelligence extraction failed:", e);
                 }
-            } else {
-                console.log("[PROCESSING] Step 5 skipped (no transcripts)");
             }
-            // Yield to UI so step 5 renders
             await new Promise((r) => setTimeout(r, 100));
 
-            // ============================================================
-            // Step 6: Finalization - final save with all data
-            // ============================================================
+            // Step 6: Final save
             processingStep = 6;
             status = "Saving final session data...";
-            console.log("[PROCESSING] Step 6: Finalization...");
             await saveSession(true);
-            console.log("[PROCESSING] Step 6 complete. Session saved.");
-            // Yield to UI so step 6 renders
             await new Promise((r) => setTimeout(r, 100));
 
-            // ============================================================
             // Step 7: Complete
-            // ============================================================
             processingStep = 7;
             status = "Processing complete!";
-            console.log("[PROCESSING] Step 7: Complete!");
-
-            // Auto-scroll to transcript tab
             activeTab = "transcript";
-
-            // Play completion sound
             try {
                 new Audio(
                     "data:audio/wav;base64,UklGRl8GAABXQVZFZm10IBAAAAABAAEAIlYAAEAfAAACABAAAABkYXRhPQYAAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAIA/",
                 ).play();
-            } catch (e) {
+            } catch {
                 /* ignore */
             }
-
-            // Clear processing state after delay
             setTimeout(() => {
                 isProcessing = false;
                 processingStep = 0;
@@ -1957,96 +1018,15 @@ Return ONLY valid JSON, no markdown, no explanation.`;
             }, 3000);
         } catch (error: any) {
             console.error("Processing error:", error);
-            const errorMessage = error?.message || String(error);
-            processingError = `Processing failed: ${errorMessage}`;
+            processingError = `Processing failed: ${error?.message || String(error)}`;
             status = `Error: ${processingError}`;
             isProcessing = false;
         }
     }
 
-    function dismissProcessing() {
-        isProcessing = false;
-        processingStep = 0;
-        processingError = null;
-        status = "Ready";
-    }
-
-    function retryProcessing() {
-        runProcessingFlow(5); // Retry with default duration
-    }
-
-    function openSettings() {
-        showSettingsModal = true;
-    }
-
-    function closeSettings() {
-        showSettingsModal = false;
-    }
-
-    async function connectGemini() {
-        console.log("[CONNECT] Starting connection sequence...");
-        if (!apiKey) {
-            status = "API Key Required";
-            console.warn("[CONNECT] No API Key found");
-            return;
-        }
-
-        localStorage.setItem("gemini_api_key", apiKey);
-        localStorage.setItem("gemini_model", selectedModel);
-
-        if (!isRunningInTauri) {
-            status = "Browser Mode - Cannot connect";
-            return;
-        }
-
-        try {
-            if (isRunningInTauri) {
-                try {
-                    await invoke("initialize_whisper", { modelSize: "small" });
-                    await invoke("set_whisper_language", { language: "auto" }); // Auto-detect: English + Urdu
-                    console.log(
-                        "[WHISPER] Initialized with auto language detection",
-                    );
-                } catch (e) {
-                    console.warn("[WHISPER] Initialization failed:", e);
-                }
-
-                // Initialize ECAPA-TDNN speaker identification (non-blocking)
-                initializeSpeakerId();
-            }
-            status = "Connecting to " + selectedModel + "...";
-            console.log(
-                `[CONNECT] Invoking test_gemini_connection with key length ${apiKey.length}`,
-            );
-
-            const result = await invoke("test_gemini_connection", {
-                key: apiKey,
-                model: selectedModel,
-            });
-
-            console.log("[CONNECT] Result:", result);
-            status = "Connected to Intelligence Engine";
-            isGeminiConnected = true;
-
-            // Force state update
-            await new Promise((r) => setTimeout(r, 100));
-            console.log("[CONNECT] isGeminiConnected set to true");
-        } catch (error) {
-            console.error("[CONNECT] Failed:", error);
-            status = "Connection issue: " + error + " - will retry";
-            // Always mark as connected - the audio loop handles retries internally
-            console.warn(
-                "[CONNECT] Creating connection despite error - audio loop handles retries",
-            );
-            isGeminiConnected = true;
-        }
-    }
-
-    function handleSettingsChange(settings: any) {
-        console.log("Settings updated:", settings);
-    }
-
-    // --- EVENTS ---
+    // ============================================================
+    // EVENT LISTENERS + LIFECYCLE
+    // ============================================================
     let unlistenStatus: () => void;
     let unlistenTranscript: () => void;
     let unlistenIntelligence: () => void;
@@ -2056,122 +1036,119 @@ Return ONLY valid JSON, no markdown, no explanation.`;
         const savedKey = localStorage.getItem("gemini_api_key");
         const savedModel = localStorage.getItem("gemini_model");
         if (savedKey) apiKey = savedKey;
-
         const validModels = [
             "gemini-2.0-flash",
             "gemini-2.0-flash-lite",
             "gemini-2.5-flash-preview-04-17",
             "gemini-1.5-flash",
         ];
-        if (savedModel && validModels.includes(savedModel)) {
+        if (savedModel && validModels.includes(savedModel))
             selectedModel = savedModel;
-        } else {
+        else {
             selectedModel = "gemini-2.0-flash";
             localStorage.setItem("gemini_model", selectedModel);
         }
 
-        // TAURI DETECTION: Simple and reliable for Tauri v2
-        // In Tauri v2, the runtime injects __TAURI_INTERNALS__ on the window object.
-        // This is the ONLY reliable way to detect if we're in a Tauri webview.
         isRunningInTauri = !!(
             typeof window !== "undefined" && (window as any).__TAURI_INTERNALS__
         );
-        console.log(
-            "[INIT] Tauri detection:",
-            isRunningInTauri,
-            "(__TAURI_INTERNALS__:",
-            !!(
-                typeof window !== "undefined" &&
-                (window as any).__TAURI_INTERNALS__
-            ),
-            ")",
-        );
-
-        // If detection says yes, verify with a test invoke
+        console.log("[INIT] Tauri detection:", isRunningInTauri);
         if (isRunningInTauri) {
             try {
-                const devs = await invoke("list_audio_devices");
-                console.log("[INIT] Tauri invoke confirmed, devices:", devs);
-            } catch (e: any) {
-                console.warn(
-                    "[INIT] Invoke test failed but Tauri is present:",
-                    e,
-                );
-                // Still keep isRunningInTauri = true since the runtime is present
+                await invoke("list_audio_devices");
+            } catch (e) {
+                console.warn("[INIT] Invoke test failed:", e);
             }
         }
 
-        console.log(
-            "[INIT] === FINAL Tauri detection result:",
-            isRunningInTauri,
-            "===",
-        );
-
         try {
-            console.log("[INIT] Loading audio devices...");
             await loadDevices();
-
-            // Load API keys and settings
-            console.log("[INIT] Loading API keys...");
             loadApiKeysFromStorage();
 
-            // NEW: Automated Connection on Startup
             if (isRunningInTauri) {
                 status = "Initializing Intelligence...";
-                console.log("[INIT] Running key validation...");
                 const connectionResult = await keyManager.validateOnStartup();
                 if (connectionResult.success) {
                     isGeminiConnected = true;
                     apiKey = connectionResult.key?.key || "";
                     status = "Connected to Intelligence Engine";
-                    console.log("[STARTUP] Auto-connected successfully");
-                    // Sync with backend - await to ensure Whisper model is loaded
                     await connectGemini();
                 } else {
                     isGeminiConnected = false;
                     status = "Offline - Click settings to add API key";
-                    console.warn(
-                        "[STARTUP] Auto-connection failed:",
-                        connectionResult.message,
-                    );
                 }
             } else {
                 status = "Browser Mode - Settings disabled";
             }
 
-            // Load past sessions and restore latest state
-            console.log("[INIT] Loading initial data...");
             await loadInitialData();
 
-            console.log("[INIT] Setting up subscriptions...");
-            setupKeyManagerSubscription();
-            setupVADSubscription();
+            // Setup subscriptions
+            setupKeyManagerSubscription({
+                onStateUpdate: (state) => {
+                    keyState = state;
+                    isRateLimited = state.keys.some((k) => k.rateLimited);
+                    const activeKey = state.keys.find((k) => k.isActive);
+                    if (activeKey) apiKey = activeKey.key;
+                },
+                onKeySwitch: (key, message) => {
+                    apiKey = key.key;
+                    showToast(message, "warning");
+                    if (isRecording)
+                        invoke("update_gemini_key", { key: key.key }).catch(
+                            console.error,
+                        );
+                },
+                onAllExhausted: () =>
+                    showToast(
+                        "All keys exhausted – add more in Settings",
+                        "error",
+                    ),
+                isRecording: () => isRecording,
+            });
+
+            const vadSubs = setupVADSubscription({
+                onVADStateUpdate: (state, rec, proc) => {
+                    vadState = state;
+                    if (rec && !proc) {
+                        if (state.status === "buffering")
+                            status = "Speaking detected – analyzing live...";
+                        else if (state.status === "sending")
+                            status = "Sending chunk to Intelligence Engine...";
+                        else if (state.isSpeaking)
+                            status = "Speaking detected – analyzing live...";
+                        else status = "Listening for speech...";
+                    }
+                },
+                onChunk: (_chunk, rec) => {
+                    if (rec) status = "Analyzing speech...";
+                },
+                getRecordingState: () => ({ isRecording, isProcessing }),
+            });
+            vadUnsubscribe = vadSubs.vadUnsubscribe;
+            chunkUnsubscribe = vadSubs.chunkUnsubscribe;
 
             if (isRunningInTauri) {
-                console.log("[INIT] Setting up Tauri event listeners...");
-                unlistenBackendErrors = await setupBackendEventListeners();
-
-                unlistenStatus = await listen("cognivox:status", (event) => {
-                    const s = event.payload as string;
-                    status = s;
+                unlistenBackendErrors = await setupBackendEventListeners({
+                    onKeyRotated: (msg) => showToast(msg, "warning"),
+                    onAllExhausted: () =>
+                        showToast(
+                            "Service disrupted: All keys exhausted",
+                            "error",
+                        ),
                 });
 
-                // Speaker identification events (ECAPA-TDNN)
+                unlistenStatus = await listen("cognivox:status", (event) => {
+                    status = event.payload as string;
+                });
+
                 await listen("cognivox:speaker_identified", (event) => {
-                    const payload = event.payload as {
-                        speaker_id: string;
-                        speaker_label: string;
-                        confidence: number;
-                        is_new: boolean;
-                    };
+                    const payload = event.payload as any;
                     lastIdentifiedSpeaker = payload;
                     console.log(
                         `[SPEAKER-ID] ${payload.speaker_label} (confidence: ${payload.confidence.toFixed(3)}, new: ${payload.is_new})`,
                     );
-                    // Refresh profiles when a new speaker is detected
-                    if (payload.is_new) {
-                        refreshSpeakerIdStatus();
-                    }
+                    if (payload.is_new) doRefreshSpeakerIdStatus();
                 });
 
                 unlistenTranscript = await listen(
@@ -2179,7 +1156,14 @@ Return ONLY valid JSON, no markdown, no explanation.`;
                     async (event) => {
                         debugEventCount++;
                         debugLastEvent = new Date().toLocaleTimeString();
-
+                        const payload = event.payload as {
+                            transcript: string;
+                            speaker?: string;
+                            intelligence: string;
+                        };
+                        debugLastTranscript =
+                            (payload?.transcript || "").substring(0, 50) +
+                            "...";
                         console.log(
                             "[GEMINI] === RECEIVED INTELLIGENCE EVENT ===",
                         );
@@ -2188,181 +1172,9 @@ Return ONLY valid JSON, no markdown, no explanation.`;
                             JSON.stringify(event.payload, null, 2),
                         );
 
-                        const payload = event.payload as {
-                            transcript: string;
-                            speaker?: string;
-                            intelligence: string;
-                        };
-
-                        // Get raw values
-                        const rawIntel = payload?.intelligence || "";
-                        let transcriptText = payload?.transcript || "";
-                        // Use backend speaker tag (from ECAPA-TDNN voice biometric) as PRIMARY source
-                        // This is the authoritative speaker identity — Gemini's label is secondary
-                        let backendSpeaker = payload?.speaker || "";
-                        // Check if ECAPA-TDNN identified speaker(s)
-                        const isTwoSpeakers = backendSpeaker.includes("+"); // e.g. "Speaker 1+Speaker 2"
-                        const isEcapaIdentified =
-                            isTwoSpeakers ||
-                            (backendSpeaker.startsWith("Speaker ") &&
-                                backendSpeaker !== "Speaker");
-                        // For two-speaker tags, extract individual labels
-                        const ecapaSpeakers = isTwoSpeakers
-                            ? backendSpeaker.split("+")
-                            : [backendSpeaker];
-
-                        // Update debug state
-                        debugLastTranscript =
-                            transcriptText.substring(0, 50) + "...";
-
-                        console.log(
-                            "[GEMINI] Transcript from payload:",
-                            transcriptText,
-                        );
-                        console.log(
-                            "[GEMINI] Intelligence from payload:",
-                            rawIntel.substring(0, 200),
-                        );
-
-                        // Parse Gemini intelligence JSON - supports both single object and array of speaker segments
-                        interface ParsedSegment {
-                            transcript: string;
-                            speaker: string;
-                            tone: string;
-                            confidence: number;
-                            category: string[];
-                            entities: Array<{ name: string; type: string }>;
-                            graph_edges: Array<{
-                                from: string;
-                                to: string;
-                                relation: string;
-                            }>;
-                        }
-
-                        let segments: ParsedSegment[] = [];
-
-                        try {
-                            // Try parsing as JSON array first (new multi-speaker format)
-                            const arrayMatch = rawIntel.match(/\[[\s\S]*\]/);
-                            const objMatch = rawIntel.match(/\{[\s\S]*\}/);
-
-                            if (arrayMatch) {
-                                try {
-                                    const parsed = JSON.parse(arrayMatch[0]);
-                                    if (Array.isArray(parsed)) {
-                                        segments = parsed.map((p: any) => {
-                                            // When ECAPA-TDNN identified the speaker,
-                                            // ALWAYS use the backend label — it's voice-biometric,
-                                            // more reliable than Gemini's text-based guess
-                                            let speaker: string;
-                                            if (isTwoSpeakers) {
-                                                // Two speakers identified by ECAPA-TDNN —
-                                                // Let Gemini's per-segment speaker labels through,
-                                                // but validate they match one of the identified speakers
-                                                const geminiSpeaker =
-                                                    p.speaker || "";
-                                                const matchedEcapa =
-                                                    ecapaSpeakers.find(
-                                                        (s: string) =>
-                                                            geminiSpeaker.includes(
-                                                                s,
-                                                            ) ||
-                                                            s.includes(
-                                                                geminiSpeaker,
-                                                            ),
-                                                    );
-                                                speaker =
-                                                    matchedEcapa ||
-                                                    p.speaker ||
-                                                    ecapaSpeakers[0];
-                                            } else if (isEcapaIdentified) {
-                                                speaker = backendSpeaker;
-                                            } else {
-                                                speaker =
-                                                    p.speaker ||
-                                                    backendSpeaker ||
-                                                    "Speaker";
-                                            }
-                                            return {
-                                                transcript:
-                                                    p.transcript ||
-                                                    transcriptText,
-                                                speaker,
-                                                tone: p.tone || "NEUTRAL",
-                                                confidence:
-                                                    p.confidence || 0.85,
-                                                category: p.category || [
-                                                    "INFO",
-                                                ],
-                                                entities: p.entities || [],
-                                                graph_edges:
-                                                    p.graph_edges || [],
-                                            };
-                                        });
-                                        console.log(
-                                            `[GEMINI] Parsed ${segments.length} speaker segments from array (ECAPA=${isEcapaIdentified}, backend=${backendSpeaker})`,
-                                        );
-                                    }
-                                } catch {
-                                    // Array parse failed, try single object
-                                }
-                            }
-
-                            // Fallback: try single object format
-                            if (segments.length === 0 && objMatch) {
-                                const parsed = JSON.parse(objMatch[0]);
-                                // ECAPA-TDNN label always wins when available
-                                const speaker = isEcapaIdentified
-                                    ? backendSpeaker
-                                    : backendSpeaker &&
-                                        backendSpeaker !== "auto"
-                                      ? backendSpeaker
-                                      : parsed.speaker || "Speaker";
-                                segments = [
-                                    {
-                                        transcript:
-                                            parsed.transcript || transcriptText,
-                                        speaker,
-                                        tone: parsed.tone || "NEUTRAL",
-                                        confidence: parsed.confidence || 0.85,
-                                        category: parsed.category || ["INFO"],
-                                        entities: parsed.entities || [],
-                                        graph_edges: parsed.graph_edges || [],
-                                    },
-                                ];
-                            }
-                        } catch (e) {
-                            console.log(
-                                "[GEMINI] JSON parse error (using raw transcript):",
-                                e,
-                            );
-                        }
-
-                        // If no segments parsed, create one from raw transcript
-                        if (segments.length === 0) {
-                            const speaker = isEcapaIdentified
-                                ? backendSpeaker
-                                : backendSpeaker && backendSpeaker !== "auto"
-                                  ? backendSpeaker
-                                  : "Speaker 1";
-                            segments = [
-                                {
-                                    transcript: transcriptText,
-                                    speaker,
-                                    tone: "NEUTRAL",
-                                    confidence: 0.7,
-                                    category: ["INFO"],
-                                    entities: [],
-                                    graph_edges: [],
-                                },
-                            ];
-                        }
-
-                        // Process each speaker segment
+                        const segments = parseGeminiPayload(payload);
                         const startTime = performance.now();
                         isTyping = true;
-
-                        // Remove any partial transcripts
                         transcripts = transcripts.filter((t) => !t.isPartial);
 
                         for (const seg of segments) {
@@ -2371,260 +1183,48 @@ Return ONLY valid JSON, no markdown, no explanation.`;
                                 seg.transcript.trim().length === 0
                             )
                                 continue;
-
                             console.log(
                                 `[GEMINI] Adding segment: speaker=${seg.speaker}, tone=${seg.tone}, text="${seg.transcript.substring(0, 60)}..."`,
                             );
-
-                            const newTranscript = {
-                                id: `t_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
-                                timestamp: new Date().toLocaleTimeString([], {
-                                    hour: "2-digit",
-                                    minute: "2-digit",
-                                }),
-                                speaker: seg.speaker,
-                                speakerId: (() => {
-                                    const s = seg.speaker || "Speaker 1";
-                                    // Extract speaker number from label like "Speaker 1", "Speaker 2", etc.
-                                    const numMatch = s.match(/(\d+)/);
-                                    if (numMatch)
-                                        return parseInt(numMatch[1], 10);
-                                    if (s === "You") return 1;
-                                    return 1;
-                                })(),
-                                text: seg.transcript,
-                                tone: seg.tone,
-                                category: seg.category,
-                                confidence: seg.confidence,
-                                isPartial: false,
-                            };
-
-                            transcripts = [...transcripts, newTranscript];
-
-                            // ======================================
-                            // BUILD KNOWLEDGE GRAPH FOR THIS SEGMENT
-                            // ======================================
-
-                            const segSpeaker = seg.speaker;
-                            const segTone = seg.tone;
-                            const segCategories = seg.category;
-                            const segEntities = seg.entities;
-                            const segGraphEdges = seg.graph_edges;
-
-                            // Ensure root "Meeting" node exists
-                            if (!graphNodes.find((n) => n.id === "Meeting")) {
-                                graphNodes = [
-                                    ...graphNodes,
-                                    {
-                                        id: "Meeting",
-                                        type: "Topic",
-                                        label: "Meeting",
-                                        weight: 3,
-                                    },
-                                ];
-                            }
-
-                            // 1. Add speaker node and connect to Meeting
-                            const speakerNodeId = segSpeaker || "Speaker";
-                            if (
-                                !graphNodes.find((n) => n.id === speakerNodeId)
-                            ) {
-                                graphNodes = [
-                                    ...graphNodes,
-                                    {
-                                        id: speakerNodeId,
-                                        type: "Speaker",
-                                        label: speakerNodeId,
-                                        weight: 2,
-                                    },
-                                ];
-                                graphEdges = [
-                                    ...graphEdges,
-                                    {
-                                        from: "Meeting",
-                                        to: speakerNodeId,
-                                        relation: "participant",
-                                    },
-                                ];
-                            }
-
-                            // 2. Add tone node and connect speaker to tone
-                            if (segTone && segTone !== "NEUTRAL") {
-                                const toneId = `tone_${segTone}`;
-                                if (!graphNodes.find((n) => n.id === toneId)) {
-                                    graphNodes = [
-                                        ...graphNodes,
-                                        {
-                                            id: toneId,
-                                            type: "Tone",
-                                            label: segTone,
-                                            weight: 1.2,
-                                        },
-                                    ];
-                                }
-                                graphEdges = [
-                                    ...graphEdges,
-                                    {
-                                        from: speakerNodeId,
-                                        to: toneId,
-                                        relation: "expressed",
-                                    },
-                                ];
-                            }
-
-                            // 3. Add category nodes and connect speaker to categories
-                            if (segCategories && segCategories.length > 0) {
-                                for (const cat of segCategories) {
-                                    if (cat !== "INFO") {
-                                        if (
-                                            !graphNodes.find(
-                                                (n) => n.id === cat,
-                                            )
-                                        ) {
-                                            graphNodes = [
-                                                ...graphNodes,
-                                                {
-                                                    id: cat,
-                                                    type: "Category",
-                                                    label: cat,
-                                                    weight: 1.5,
-                                                },
-                                            ];
-                                            graphEdges = [
-                                                ...graphEdges,
-                                                {
-                                                    from: "Meeting",
-                                                    to: cat,
-                                                    relation: "contains",
-                                                },
-                                            ];
-                                        }
-                                        graphEdges = [
-                                            ...graphEdges,
-                                            {
-                                                from: speakerNodeId,
-                                                to: cat,
-                                                relation: "raised",
-                                            },
-                                        ];
-                                    }
-                                }
-                            }
-
-                            // 4. Add entity nodes from Gemini extraction
-                            if (segEntities.length > 0) {
-                                for (const entity of segEntities) {
-                                    const entityId = entity.name.trim();
-                                    if (!entityId || entityId.length === 0)
-                                        continue;
-
-                                    if (
-                                        !graphNodes.find(
-                                            (n) => n.id === entityId,
-                                        )
-                                    ) {
-                                        graphNodes = [
-                                            ...graphNodes,
-                                            {
-                                                id: entityId,
-                                                type: entity.type || "Entity",
-                                                label: entityId,
-                                                weight: 1.3,
-                                            },
-                                        ];
-                                        graphEdges = [
-                                            ...graphEdges,
-                                            {
-                                                from: "Meeting",
-                                                to: entityId,
-                                                relation: "mentions",
-                                            },
-                                        ];
-                                    }
-                                    graphEdges = [
-                                        ...graphEdges,
-                                        {
-                                            from: speakerNodeId,
-                                            to: entityId,
-                                            relation: "mentioned",
-                                        },
-                                    ];
-                                }
-                            }
-
-                            // 5. Add Gemini-extracted graph edges
-                            if (segGraphEdges.length > 0) {
-                                for (const edge of segGraphEdges) {
-                                    const fromId = edge.from?.trim();
-                                    const toId = edge.to?.trim();
-                                    const relation = edge.relation?.trim();
-                                    if (!fromId || !toId || !relation) continue;
-
-                                    if (
-                                        !graphNodes.find((n) => n.id === fromId)
-                                    ) {
-                                        graphNodes = [
-                                            ...graphNodes,
-                                            {
-                                                id: fromId,
-                                                type: "Entity",
-                                                label: fromId,
-                                                weight: 1.0,
-                                            },
-                                        ];
-                                    }
-                                    if (
-                                        !graphNodes.find((n) => n.id === toId)
-                                    ) {
-                                        graphNodes = [
-                                            ...graphNodes,
-                                            {
-                                                id: toId,
-                                                type: "Entity",
-                                                label: toId,
-                                                weight: 1.0,
-                                            },
-                                        ];
-                                    }
-                                    graphEdges = [
-                                        ...graphEdges,
-                                        {
-                                            from: fromId,
-                                            to: toId,
-                                            relation: relation,
-                                        },
-                                    ];
-                                }
-                            }
-                        } // end for (const seg of segments)
-
+                            transcripts = [
+                                ...transcripts,
+                                createTranscriptEntry(seg),
+                            ];
+                            const graphUpdate = buildGraphFromSegment(
+                                seg,
+                                graphNodes,
+                                graphEdges,
+                            );
+                            // Apply light dedup on live updates
+                            const cleaned = applyGraphQualityRules(
+                                graphUpdate.nodes,
+                                graphUpdate.edges,
+                            );
+                            graphNodes = cleaned.nodes;
+                            graphEdges = cleaned.edges;
+                        }
                         console.log(
-                            "[GRAPH] Updated: ",
+                            "[GRAPH] Updated:",
                             graphNodes.length,
                             "nodes,",
                             graphEdges.length,
                             "edges",
                         );
-
                         latencyMs = Math.round(performance.now() - startTime);
 
-                        // --- LOCAL INTELLIGENCE EXTRACTION ---
                         try {
                             const freshInsights =
                                 await intelligenceExtractor.extractFromTranscript(
                                     transcripts.slice(-5),
                                 );
-
-                            if (freshInsights && Array.isArray(freshInsights)) {
+                            if (freshInsights && Array.isArray(freshInsights))
                                 localInsights = [
                                     ...localInsights,
                                     ...freshInsights,
                                 ];
-                            }
                         } catch (e) {
                             console.error("Live extraction error:", e);
                         }
-
                         setTimeout(() => {
                             isTyping = false;
                             partialText = "";
@@ -2640,20 +1240,13 @@ Return ONLY valid JSON, no markdown, no explanation.`;
                             "[WHISPER] === RECEIVED TRANSCRIPTION ===",
                             intel,
                         );
-
-                        // Show whisper transcription in status
                         if (intel?.text && intel.text.trim().length > 0) {
-                            // Use speaker from backend diarization
                             const whisperSpeaker = intel?.speaker || "You";
                             status = `Whisper (${intel.language}): "${intel.text.substring(0, 50)}..."`;
-
-                            // Also add as a partial transcript immediately for live feedback
-                            // (will be replaced/updated when gemini_intelligence arrives)
                             const existingPartial = transcripts.find(
                                 (t) => t.isPartial,
                             );
                             if (existingPartial) {
-                                // Update existing partial
                                 transcripts = transcripts.map((t) =>
                                     t.isPartial
                                         ? {
@@ -2664,31 +1257,9 @@ Return ONLY valid JSON, no markdown, no explanation.`;
                                         : t,
                                 );
                             } else {
-                                // Add new partial transcript for immediate feedback
-                                const partialTranscript = {
-                                    id: `partial_${Date.now()}`,
-                                    timestamp: new Date().toLocaleTimeString(
-                                        [],
-                                        {
-                                            hour: "2-digit",
-                                            minute: "2-digit",
-                                        },
-                                    ),
-                                    speaker: whisperSpeaker,
-                                    speakerId:
-                                        whisperSpeaker === "You" ||
-                                        whisperSpeaker.includes("1")
-                                            ? 1
-                                            : 0,
-                                    text: intel.text,
-                                    tone: "NEUTRAL",
-                                    category: ["INFO"],
-                                    confidence: intel.confidence || 0.85,
-                                    isPartial: true,
-                                };
                                 transcripts = [
                                     ...transcripts,
-                                    partialTranscript,
+                                    createPartialTranscript(intel),
                                 ];
                                 console.log(
                                     "[WHISPER] Added partial transcript, total:",
@@ -2702,44 +1273,44 @@ Return ONLY valid JSON, no markdown, no explanation.`;
                 await listen("tray:record", () => {
                     if (!isRecording) toggleCapture();
                 });
-
                 await listen("tray:stop", () => {
                     if (isRecording) toggleCapture();
                 });
-                // === CLOSE HANDLER: Save session on app close ===
-                // Tauri's onCloseRequested CAN await async operations,
-                // unlike browser's beforeunload
+
                 const appWindow = getCurrentWindow();
-                await appWindow.onCloseRequested(async (event) => {
+                await appWindow.onCloseRequested(async () => {
                     console.log(
                         "[CLOSE] App close requested — saving session to disk...",
                     );
                     try {
                         const snapshot = saveCurrentSessionToCache();
-                        if (snapshot && isRunningInTauri) {
+                        if (snapshot) {
                             await invoke("save_session", {
                                 sessionJson: JSON.stringify(snapshot),
                             });
-                            console.log(
-                                "[CLOSE] Session saved to disk successfully",
-                            );
+                            console.log("[CLOSE] Session saved");
                         }
                     } catch (e) {
-                        console.error(
-                            "[CLOSE] Failed to save session on close:",
-                            e,
-                        );
+                        console.error("[CLOSE] Failed to save:", e);
                     }
                 });
-            } // Close if (isRunningInTauri)
+            }
         } catch (error) {
             console.error("Failed to initialize Tauri listeners:", error);
             status = "Tauri Init Error: " + error;
         }
-
         document.addEventListener("keydown", handleKeyDown);
         window.addEventListener("beforeunload", handleBeforeUnload);
     });
+
+    async function loadDevices() {
+        try {
+            devices = await invoke("list_audio_devices");
+        } catch (error) {
+            console.error(error);
+            status = "Error listing devices";
+        }
+    }
 
     function handleKeyDown(e: KeyboardEvent) {
         if (e.ctrlKey && e.shiftKey) {
@@ -2766,9 +1337,21 @@ Return ONLY valid JSON, no markdown, no explanation.`;
                     break;
             }
         }
-
-        if (e.key === "Escape" && isRecording) {
+        if (e.key === "Escape" && isRecording)
             console.log("[HOTKEY] Escape pressed during recording");
+    }
+
+    function handleBeforeUnload() {
+        const snapshot = saveCurrentSessionToCache();
+        if (snapshot) {
+            try {
+                localStorage.setItem(
+                    "cognivox_pending_save",
+                    JSON.stringify(snapshot),
+                );
+            } catch {
+                /* ignore */
+            }
         }
     }
 
@@ -2780,89 +1363,17 @@ Return ONLY valid JSON, no markdown, no explanation.`;
         document.removeEventListener("keydown", handleKeyDown);
         window.removeEventListener("beforeunload", handleBeforeUnload);
     });
-
-    // Save session on app close/refresh to prevent data loss
-    // Uses localStorage as synchronous backup since beforeunload can't await async ops
-    function handleBeforeUnload() {
-        const snapshot = saveCurrentSessionToCache();
-        if (snapshot) {
-            try {
-                localStorage.setItem(
-                    "cognivox_pending_save",
-                    JSON.stringify(snapshot),
-                );
-                console.log("[CLOSE] Saved session backup to localStorage");
-            } catch (e) {
-                console.warn("[CLOSE] localStorage backup failed:", e);
-            }
-        }
-    }
-
-    // Computed display text for transcription
-    $: displayText =
-        transcripts.length > 0
-            ? transcripts[transcripts.length - 1].text
-            : "No transcripts yet. Start recording to begin.";
 </script>
 
 <!-- === DEBUG / STATUS BAR === -->
-{#if !isRunningInTauri}
-    <div
-        class="fixed top-0 left-0 right-0 z-[9999] bg-orange-600 text-white p-4 font-mono text-sm"
-    >
-        <div class="text-center">
-            <strong>BROWSER MODE — Features Disabled</strong>
-            <p class="mt-1 text-xs">
-                You're viewing this in a browser. Close this tab and use the <strong
-                    >Cognivox desktop window</strong
-                > instead.
-            </p>
-            <p class="mt-1 text-xs">
-                To launch: run <code class="bg-black/30 px-1 rounded"
-                    >npx tauri dev</code
-                > in the project directory and use the native window that opens.
-            </p>
-        </div>
-    </div>
-    <div class="h-20"></div>
-{:else if debugMode}
-    <div
-        class="fixed top-0 left-0 right-0 z-[9999] bg-green-800 text-white p-3 font-mono text-xs"
-    >
-        <div class="flex flex-wrap gap-4 items-center justify-center">
-            <span>Tauri: <strong>YES</strong></span>
-            <span>|</span>
-            <span
-                >Events: <strong class="text-yellow-300"
-                    >{debugEventCount}</strong
-                ></span
-            >
-            <span>|</span>
-            <span
-                >Transcripts: <strong class="text-yellow-300"
-                    >{transcripts.length}</strong
-                ></span
-            >
-            <span>|</span>
-            <span
-                >Last: <strong class="text-green-300"
-                    >{debugLastEvent || "none"}</strong
-                ></span
-            >
-            <span>|</span>
-            <span
-                >Connected: <strong>{isGeminiConnected ? "YES" : "NO"}</strong
-                ></span
-            >
-        </div>
-        {#if transcripts.length > 0}
-            <div class="mt-1 text-center text-xs bg-green-700 p-1 rounded">
-                LATEST: "{transcripts[transcripts.length - 1]?.text || "empty"}"
-            </div>
-        {/if}
-    </div>
-    <div class="h-12"></div>
-{/if}
+<DebugBar
+    {isRunningInTauri}
+    {debugMode}
+    {debugEventCount}
+    {transcripts}
+    {debugLastEvent}
+    {isGeminiConnected}
+/>
 
 <!-- === RECORDING OVERLAY (Fixed at top during recording) === -->
 <RecordingOverlay
@@ -2902,362 +1413,47 @@ Return ONLY valid JSON, no markdown, no explanation.`;
     on:openSettings={openSettings}
 />
 
+<!-- === TOAST NOTIFICATION === -->
+<ToastNotification message={toastMessage} type={toastType} />
+
 <div
     class="h-screen w-screen flex bg-[#0a0c0f] font-sans overflow-hidden {isRecording
         ? 'pt-20'
         : ''} pb-8"
 >
     <!-- SIDEBAR -->
-    <div class="w-72 sidebar flex flex-col">
-        <!-- Brand Header -->
-        <div class="p-5 border-b border-cyan-500/10">
-            <div>
-                <h1 class="text-xl font-bold text-slate-100 tracking-tight">
-                    Meeting Mind
-                </h1>
-                <p class="text-xs text-cyan-400 mt-0.5">Intelligence Engine</p>
-            </div>
-        </div>
-
-        <!-- Recent Missions Section -->
-        <div class="p-4 border-b border-cyan-500/10 h-72 flex flex-col">
-            <div class="section-header mb-4">
-                <span class="section-title">Recent Missions</span>
-                <button
-                    class="text-[10px] text-cyan-400 uppercase tracking-widest hover:text-cyan-300"
-                    onclick={refreshSessionList}>Refresh</button
-                >
-            </div>
-
-            <div class="flex-1 overflow-y-auto space-y-2 pr-2 custom-scrollbar">
-                {#if pastSessions.length === 0}
-                    <div class="text-center py-8 opacity-40">
-                        <p class="text-[10px] uppercase tracking-tighter">
-                            No past records
-                        </p>
-                    </div>
-                {:else}
-                    {#each pastSessions as session}
-                        <div class="relative group">
-                            <button
-                                class="w-full text-left p-3 rounded-lg border transition-all duration-300 {currentSession?.id ===
-                                session.id
-                                    ? 'bg-cyan-500/10 border-cyan-500/40 shadow-lg shadow-cyan-500/10'
-                                    : 'bg-[#0d1117] border-cyan-500/5 hover:border-cyan-500/20'}"
-                                onclick={() => handleSessionLoad(session)}
-                            >
-                                <div
-                                    class="flex justify-between items-start mb-1"
-                                >
-                                    <span
-                                        class="text-xs font-bold text-slate-200 truncate pr-6"
-                                    >
-                                        {session.metadata.title ||
-                                            "Untitled Mission"}
-                                    </span>
-                                    <span
-                                        class="text-[9px] font-mono text-cyan-500"
-                                    >
-                                        {Math.floor(
-                                            session.metadata.duration_seconds /
-                                                60,
-                                        )}m
-                                    </span>
-                                </div>
-                                <div
-                                    class="flex justify-between items-center text-[9px] text-slate-500 font-mono"
-                                >
-                                    <span
-                                        >{new Date(
-                                            session.created_at,
-                                        ).toLocaleDateString()}</span
-                                    >
-                                    <span
-                                        >{session.metadata.total_transcripts} tags</span
-                                    >
-                                </div>
-                            </button>
-                            <!-- Delete button -->
-                            <button
-                                class="absolute top-2 right-2 p-1 rounded opacity-0 group-hover:opacity-100 transition-opacity bg-red-500/10 hover:bg-red-500/30 text-red-400 hover:text-red-300 border border-red-500/20"
-                                onclick={(e) =>
-                                    handleSessionDelete(session.id, e)}
-                                title="Delete session"
-                            >
-                                <svg
-                                    class="w-3 h-3"
-                                    viewBox="0 0 24 24"
-                                    fill="none"
-                                    stroke="currentColor"
-                                    stroke-width="2"
-                                    ><polyline points="3 6 5 6 21 6" /><path
-                                        d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"
-                                    /></svg
-                                >
-                            </button>
-                        </div>
-                    {/each}
-                {/if}
-            </div>
-        </div>
-
-        <!-- Knowledge Graph Section (DYNAMIC - not static image) -->
-        <div class="p-4 flex-1">
-            <div class="section-header">
-                <span class="section-title">Knowledge Graph</span>
-                <span class="text-[10px] text-cyan-400"
-                    >{graphNodes.length} • {graphEdges.length}</span
-                >
-            </div>
-
-            <div class="sidebar-card h-48 overflow-hidden">
-                <KnowledgeGraph
-                    nodes={graphNodes}
-                    edges={graphEdges}
-                    compact={true}
-                />
-            </div>
-        </div>
-
-        <!-- Navigation Icons -->
-        <div class="p-4 flex justify-center gap-4 border-t border-cyan-500/10">
-            <button
-                class="nav-icon {activeTab === 'transcript' ? 'active' : ''}"
-                onclick={() => (activeTab = "transcript")}
-                aria-label="Transcription Tab"
-            >
-                <svg
-                    xmlns="http://www.w3.org/2000/svg"
-                    width="20"
-                    height="20"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="2"
-                >
-                    <polyline points="4 17 10 11 4 5"></polyline>
-                    <line x1="12" y1="19" x2="20" y2="19"></line>
-                </svg>
-            </button>
-            <button
-                class="nav-icon {activeTab === 'graph' ? 'active' : ''}"
-                onclick={() => (activeTab = "graph")}
-                aria-label="Knowledge Graph Tab"
-            >
-                <svg
-                    xmlns="http://www.w3.org/2000/svg"
-                    width="20"
-                    height="20"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="2"
-                >
-                    <polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
-                    <polyline points="2 17 12 22 22 17"></polyline>
-                    <polyline points="2 12 12 17 22 12"></polyline>
-                </svg>
-            </button>
-            <button
-                class="nav-icon {activeTab === 'analytics' ? 'active' : ''}"
-                onclick={() => (activeTab = "analytics")}
-                aria-label="Analytics Tab"
-            >
-                <svg
-                    xmlns="http://www.w3.org/2000/svg"
-                    width="20"
-                    height="20"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="2"
-                >
-                    <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"
-                    ></polyline>
-                </svg>
-            </button>
-            <button
-                class="nav-icon {activeTab === 'speakers' ? 'active' : ''}"
-                onclick={() => (activeTab = "speakers")}
-                aria-label="Speaker ID Tab"
-                title="Speaker Identification (ECAPA-TDNN)"
-            >
-                <svg
-                    xmlns="http://www.w3.org/2000/svg"
-                    width="20"
-                    height="20"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="2"
-                >
-                    <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
-                    <circle cx="9" cy="7" r="4"></circle>
-                    <path d="M23 21v-2a4 4 0 0 0-3-3.87"></path>
-                    <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
-                </svg>
-                {#if speakerIdInitialized}
-                    <span
-                        class="absolute -top-1 -right-1 w-2 h-2 bg-green-400 rounded-full"
-                    ></span>
-                {/if}
-            </button>
-        </div>
-
-        <!-- Intelligence Insights Panel -->
-        <div class="p-4 border-t border-cyan-500/10 flex-1 overflow-y-auto">
-            <InsightsPanel />
-        </div>
-
-        <!-- Session Manager -->
-        <div class="p-4 border-t border-cyan-500/10">
-            <SessionManager
-                {currentSession}
-                onSessionLoad={handleSessionLoad}
-            />
-        </div>
-    </div>
+    <Sidebar
+        {pastSessions}
+        {currentSession}
+        {graphNodes}
+        {graphEdges}
+        {activeTab}
+        {speakerIdInitialized}
+        on:sessionLoad={(e) => handleSessionLoad(e.detail)}
+        on:sessionDelete={(e) =>
+            handleSessionDelete(e.detail.sessionId, e.detail.event)}
+        on:refreshSessions={refreshSessionList}
+        on:tabChange={(e) => (activeTab = e.detail)}
+        on:toggleCluster={handleToggleCluster}
+    />
 
     <!-- MAIN CONTENT -->
     <div class="flex-1 flex flex-col min-w-0">
         <!-- HEADER BAR -->
-        <div
-            class="h-16 px-6 flex items-center justify-between border-b border-cyan-500/10 bg-[#0d1117]/50"
-        >
-            <!-- Left: Status -->
-            <div class="flex items-center gap-4">
-                <div class="flex items-center gap-2">
-                    <span
-                        class="status-dot {isRecording
-                            ? 'status-dot-recording'
-                            : isGeminiConnected
-                              ? 'status-dot-ready'
-                              : 'bg-slate-500'}"
-                    ></span>
-                    <span class="text-sm font-medium text-slate-300"
-                        >{status}</span
-                    >
-                </div>
-
-                {#if isRecording}
-                    <span
-                        class="badge-error text-xs px-2 py-1 rounded animate-pulse flex items-center gap-1"
-                        ><span class="w-2 h-2 rounded-full bg-red-500"></span> LIVE</span
-                    >
-                {:else if isProcessing}
-                    <span
-                        class="badge-cyan text-xs px-2 py-1 rounded animate-pulse"
-                        >PROCESSING</span
-                    >
-                {:else if isGeminiConnected}
-                    <span
-                        class="badge-success text-xs px-2 py-1 rounded flex items-center gap-1"
-                    >
-                        <svg
-                            class="w-3 h-3"
-                            viewBox="0 0 24 24"
-                            fill="none"
-                            stroke="currentColor"
-                            stroke-width="3"
-                            ><polyline points="20 6 9 17 4 12" /></svg
-                        >
-                        {#if keyState.keys.length > 1}
-                            Key {keyState.currentIndex + 1}/{keyState.keys
-                                .length}
-                        {:else}
-                            AI Connected
-                        {/if}
-                    </span>
-                {:else if keyState.keys.length > 0}
-                    <button
-                        type="button"
-                        class="badge-cyan text-xs px-2 py-1 rounded cursor-pointer flex items-center gap-1 border-0"
-                        onclick={openSettings}
-                    >
-                        <svg
-                            class="w-3 h-3"
-                            viewBox="0 0 24 24"
-                            fill="none"
-                            stroke="currentColor"
-                            stroke-width="2"
-                            ><path
-                                d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"
-                            /></svg
-                        >
-                        {keyState.keys.length} Key{keyState.keys.length > 1
-                            ? "s"
-                            : ""} Ready
-                    </button>
-                {:else}
-                    <button
-                        type="button"
-                        class="badge-warning text-xs px-2 py-1 rounded cursor-pointer border-0"
-                        onclick={openSettings}
-                    >
-                        Setup
-                    </button>
-                {/if}
-            </div>
-
-            <!-- Right: Actions -->
-            <div class="flex items-center gap-3">
-                <!-- Settings Quick Access -->
-                <button
-                    class="icon-btn"
-                    onclick={openSettings}
-                    aria-label="Settings"
-                >
-                    <svg
-                        xmlns="http://www.w3.org/2000/svg"
-                        width="18"
-                        height="18"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        stroke-width="2"
-                    >
-                        <circle cx="12" cy="12" r="3"></circle>
-                        <path
-                            d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"
-                        ></path>
-                    </svg>
-                </button>
-
-                <!-- Record Button -->
-                <button
-                    class="{isRecording
-                        ? 'btn-recording'
-                        : 'btn-primary'} flex items-center gap-2"
-                    onclick={toggleCapture}
-                    disabled={isProcessing}
-                >
-                    {#if isRecording}
-                        <svg
-                            xmlns="http://www.w3.org/2000/svg"
-                            width="16"
-                            height="16"
-                            viewBox="0 0 24 24"
-                            fill="currentColor"
-                        >
-                            <rect x="6" y="6" width="12" height="12" rx="2"
-                            ></rect>
-                        </svg>
-                        Stop Recording
-                    {:else}
-                        <svg
-                            xmlns="http://www.w3.org/2000/svg"
-                            width="16"
-                            height="16"
-                            viewBox="0 0 24 24"
-                            fill="currentColor"
-                        >
-                            <circle cx="12" cy="12" r="10"></circle>
-                        </svg>
-                        Start Recording
-                    {/if}
-                </button>
-            </div>
-        </div>
+        <MainHeader
+            {status}
+            {isRecording}
+            {isProcessing}
+            {isGeminiConnected}
+            {keyState}
+            {forceNewSession}
+            hasExistingSession={!!currentSession && transcripts.length > 0}
+            on:openSettings={openSettings}
+            on:toggleCapture={toggleCapture}
+            on:newSession={() => {
+                forceNewSession = true;
+            }}
+        />
 
         <!-- CONTENT AREA -->
         <div class="flex-1 overflow-auto p-6">
@@ -3318,8 +1514,6 @@ Return ONLY valid JSON, no markdown, no explanation.`;
                     bind:clarityLevel
                 />
 
-                <!-- VAD Waveform now integrated into LiveRecordingPanel -->
-
                 <!-- Search Bar -->
                 <div class="flex gap-3">
                     <div class="flex-1 relative">
@@ -3351,1116 +1545,90 @@ Return ONLY valid JSON, no markdown, no explanation.`;
                 </div>
 
                 {#if activeTab === "transcript"}
-                    <!-- DEBUG PANEL (only when debug mode is on) -->
-                    {#if debugMode}
-                        <div
-                            class="bg-yellow-500/20 border border-yellow-500/50 rounded-lg p-3 mb-4"
-                        >
-                            <div
-                                class="flex items-center gap-4 text-xs font-mono"
-                            >
-                                <span class="text-yellow-400">DEBUG:</span>
-                                <span class="text-slate-300"
-                                    >Events: <strong class="text-cyan-400"
-                                        >{debugEventCount}</strong
-                                    ></span
-                                >
-                                <span class="text-slate-300"
-                                    >Transcripts: <strong class="text-cyan-400"
-                                        >{transcripts.length}</strong
-                                    ></span
-                                >
-                                <span class="text-slate-300"
-                                    >Last: <strong class="text-green-400"
-                                        >{debugLastEvent || "none"}</strong
-                                    ></span
-                                >
-                            </div>
-                            {#if debugLastTranscript}
-                                <div
-                                    class="mt-2 text-xs text-slate-400 truncate"
-                                >
-                                    Last text: "{debugLastTranscript}"
-                                </div>
-                            {/if}
-                        </div>
-                    {/if}
-
-                    <!-- The Gemini Conduit Card -->
-                    <div class="content-card">
-                        <div class="content-card-header">
-                            <span class="text-sm font-medium text-slate-200"
-                                >The Gemini Conduit</span
-                            >
-                            <button class="icon-btn" aria-label="More options">
-                                <svg
-                                    xmlns="http://www.w3.org/2000/svg"
-                                    width="16"
-                                    height="16"
-                                    viewBox="0 0 24 24"
-                                    fill="none"
-                                    stroke="currentColor"
-                                    stroke-width="2"
-                                >
-                                    <circle cx="12" cy="12" r="1"></circle>
-                                    <circle cx="19" cy="12" r="1"></circle>
-                                    <circle cx="5" cy="12" r="1"></circle>
-                                </svg>
-                            </button>
-                        </div>
-                        <img
-                            src="/gemini_conduit.png"
-                            alt="Gemini Conduit"
-                            class="content-card-image"
-                        />
-                    </div>
-
-                    <!-- Psychosomatic Engine - Transcription -->
-                    <div
-                        class="content-card {isCollapsed
-                            ? 'max-h-32 overflow-hidden'
-                            : ''}"
-                    >
-                        <div class="content-card-header">
-                            <span class="text-sm font-medium text-slate-200"
-                                >Transcription</span
-                            >
-                            <span class="text-xs text-slate-500"
-                                >{transcripts.length} entries</span
-                            >
-                        </div>
-
-                        <div class="p-6">
-                            {#if transcripts.length === 0}
-                                <!-- Empty State -->
-                                <div class="text-center py-12">
-                                    <svg
-                                        class="w-16 h-16 mx-auto mb-4 opacity-30 text-cyan-500"
-                                        viewBox="0 0 24 24"
-                                        fill="none"
-                                        stroke="currentColor"
-                                        stroke-width="1.5"
-                                        ><path
-                                            d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"
-                                        /><path
-                                            d="M19 10v2a7 7 0 0 1-14 0v-2"
-                                        /><line
-                                            x1="12"
-                                            y1="19"
-                                            x2="12"
-                                            y2="22"
-                                        /></svg
-                                    >
-                                    <p class="text-lg text-slate-400 mb-2">
-                                        No transcripts yet
-                                    </p>
-                                    <p class="text-sm text-slate-500">
-                                        Click "Start Recording" to begin
-                                        capturing audio
-                                    </p>
-                                </div>
-                            {:else if isCollapsed}
-                                <!-- Collapsed View - Highlights Only -->
-                                <div class="text-center text-slate-400 py-4">
-                                    <p class="text-sm">
-                                        {transcripts.length} transcript entries
-                                    </p>
-                                    <p class="text-xs text-slate-500 mt-1">
-                                        Click "Expand" to view full transcripts
-                                    </p>
-                                </div>
-                            {:else}
-                                <!-- Full Transcript View - Beautiful Bubbles -->
-                                <div
-                                    class="space-y-3 max-h-[500px] overflow-y-auto pr-2"
-                                >
-                                    {#each transcripts
-                                        .slice(-15)
-                                        .reverse() as t, i (t.id)}
-                                        {@const speakerNum =
-                                            t.speaker?.includes("1") ||
-                                            t.speaker === "You"
-                                                ? 1
-                                                : 2}
-                                        {@const isYou = speakerNum === 1}
-                                        <div
-                                            class="flex {isYou
-                                                ? 'justify-end'
-                                                : 'justify-start'} animate-fadeIn"
-                                        >
-                                            <div
-                                                class="max-w-[80%] {isYou
-                                                    ? 'order-2'
-                                                    : 'order-1'}"
-                                            >
-                                                <!-- Speaker info -->
-                                                <div
-                                                    class="flex items-center gap-2 mb-1 {isYou
-                                                        ? 'justify-end'
-                                                        : 'justify-start'}"
-                                                >
-                                                    <span
-                                                        class="text-xs {isYou
-                                                            ? 'text-cyan-400'
-                                                            : 'text-purple-400'} font-medium"
-                                                    >
-                                                        {isYou
-                                                            ? "You"
-                                                            : t.speaker ||
-                                                              "Speaker 2"}
-                                                    </span>
-                                                    <span
-                                                        class="text-xs text-slate-600"
-                                                        >{t.timestamp}</span
-                                                    >
-                                                </div>
-                                                <!-- Message bubble -->
-                                                <div
-                                                    class="p-3 rounded-2xl {isYou
-                                                        ? 'bg-cyan-500/20 border border-cyan-500/30 rounded-tr-sm'
-                                                        : 'bg-purple-500/10 border border-purple-500/20 rounded-tl-sm'}"
-                                                >
-                                                    <p
-                                                        class="text-sm text-slate-200 leading-relaxed"
-                                                    >
-                                                        {t.text}
-                                                    </p>
-                                                </div>
-                                                <!-- Sentiment/tone indicator -->
-                                                {#if t.tone}
-                                                    <div
-                                                        class="flex {isYou
-                                                            ? 'justify-end'
-                                                            : 'justify-start'} mt-1"
-                                                    >
-                                                        <span
-                                                            class="text-xs px-2 py-0.5 rounded-full {t.tone ===
-                                                            'POSITIVE'
-                                                                ? 'bg-green-500/20 text-green-400'
-                                                                : t.tone ===
-                                                                    'NEGATIVE'
-                                                                  ? 'bg-red-500/20 text-red-400'
-                                                                  : t.tone ===
-                                                                      'URGENT'
-                                                                    ? 'bg-orange-500/20 text-orange-400'
-                                                                    : 'bg-slate-500/20 text-slate-400'}"
-                                                            >{t.tone.toLowerCase()}</span
-                                                        >
-                                                    </div>
-                                                {/if}
-                                            </div>
-                                            <!-- Avatar -->
-                                            <div
-                                                class="{isYou
-                                                    ? 'order-3 ml-2'
-                                                    : 'order-0 mr-2'} flex-shrink-0"
-                                            >
-                                                <div
-                                                    class="w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold {isYou
-                                                        ? 'bg-cyan-500/30 text-cyan-300'
-                                                        : 'bg-purple-500/30 text-purple-300'}"
-                                                >
-                                                    {isYou ? "Y" : "S2"}
-                                                </div>
-                                            </div>
-                                        </div>
-                                    {/each}
-                                </div>
-                            {/if}
-                        </div>
-                    </div>
-
-                    <!-- === SUMMARY PANEL (shows after extraction) === -->
-                    {#if showSummaryPanel && extractedSummary}
-                        <div
-                            class="content-card border-green-500/30 animate-fadeIn"
-                        >
-                            <div class="content-card-header">
-                                <span
-                                    class="text-sm font-medium text-green-400 flex items-center gap-2"
-                                    ><svg
-                                        class="w-4 h-4"
-                                        viewBox="0 0 24 24"
-                                        fill="none"
-                                        stroke="currentColor"
-                                        stroke-width="2"
-                                        ><path
-                                            d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"
-                                        /><rect
-                                            x="8"
-                                            y="2"
-                                            width="8"
-                                            height="4"
-                                            rx="1"
-                                            ry="1"
-                                        /></svg
-                                    > Meeting Summary</span
-                                >
-                                <button
-                                    class="icon-btn text-slate-400 hover:text-white"
-                                    onclick={closeSummaryPanel}
-                                    aria-label="Close summary panel"
-                                >
-                                    <svg
-                                        class="w-4 h-4"
-                                        fill="none"
-                                        stroke="currentColor"
-                                        viewBox="0 0 24 24"
-                                    >
-                                        <path
-                                            stroke-linecap="round"
-                                            stroke-linejoin="round"
-                                            stroke-width="2"
-                                            d="M6 18L18 6M6 6l12 12"
-                                        />
-                                    </svg>
-                                </button>
-                            </div>
-                            <div class="p-6 space-y-4">
-                                {#if extractedSummary.topics?.length > 0}
-                                    <div>
-                                        <h4
-                                            class="text-xs text-slate-400 uppercase tracking-wider mb-2"
-                                        >
-                                            Topics Discussed
-                                        </h4>
-                                        <div class="flex flex-wrap gap-2">
-                                            {#each extractedSummary.topics as topic}
-                                                <span
-                                                    class="px-2 py-1 text-sm rounded bg-cyan-500/20 text-cyan-400"
-                                                    >{topic}</span
-                                                >
-                                            {/each}
-                                        </div>
-                                    </div>
-                                {/if}
-                                {#if extractedSummary.decisions?.length > 0}
-                                    <div>
-                                        <h4
-                                            class="text-xs text-slate-400 uppercase tracking-wider mb-2"
-                                        >
-                                            Decisions Made
-                                        </h4>
-                                        <ul class="space-y-1">
-                                            {#each extractedSummary.decisions as decision}
-                                                <li
-                                                    class="text-sm text-slate-300 flex items-start gap-2"
-                                                >
-                                                    <svg
-                                                        class="w-3 h-3 text-green-400 flex-shrink-0 mt-0.5"
-                                                        viewBox="0 0 24 24"
-                                                        fill="none"
-                                                        stroke="currentColor"
-                                                        stroke-width="3"
-                                                        ><polyline
-                                                            points="20 6 9 17 4 12"
-                                                        /></svg
-                                                    >
-                                                    {decision}
-                                                </li>
-                                            {/each}
-                                        </ul>
-                                    </div>
-                                {/if}
-                                {#if extractedSummary.actionItems?.length > 0}
-                                    <div>
-                                        <h4
-                                            class="text-xs text-slate-400 uppercase tracking-wider mb-2"
-                                        >
-                                            Action Items
-                                        </h4>
-                                        <ul class="space-y-1">
-                                            {#each extractedSummary.actionItems as action}
-                                                <li
-                                                    class="text-sm text-slate-300 flex items-start gap-2"
-                                                >
-                                                    <span
-                                                        class="text-yellow-400"
-                                                        >→</span
-                                                    >
-                                                    {action}
-                                                </li>
-                                            {/each}
-                                        </ul>
-                                    </div>
-                                {/if}
-                                {#if extractedSummary.keyPoints?.length > 0}
-                                    <div>
-                                        <h4
-                                            class="text-xs text-slate-400 uppercase tracking-wider mb-2"
-                                        >
-                                            Key Takeaways
-                                        </h4>
-                                        <ul class="space-y-1">
-                                            {#each extractedSummary.keyPoints as point}
-                                                <li
-                                                    class="text-sm text-slate-300 flex items-start gap-2"
-                                                >
-                                                    <span class="text-blue-400"
-                                                        >•</span
-                                                    >
-                                                    {point}
-                                                </li>
-                                            {/each}
-                                        </ul>
-                                    </div>
-                                {/if}
-                            </div>
-                        </div>
-                    {/if}
-
-                    <!-- === MEMORIES PANEL (shows after extraction) === -->
-                    {#if showMemoriesPanel && extractedMemories}
-                        <div
-                            class="content-card border-purple-500/30 animate-fadeIn"
-                        >
-                            <div class="content-card-header">
-                                <span
-                                    class="text-sm font-medium text-purple-400 flex items-center gap-2"
-                                    ><svg
-                                        class="w-4 h-4"
-                                        viewBox="0 0 24 24"
-                                        fill="none"
-                                        stroke="currentColor"
-                                        stroke-width="2"
-                                        ><path
-                                            d="M12 3l1.5 4.5L18 9l-4.5 1.5L12 15l-1.5-4.5L6 9l4.5-1.5z"
-                                        /></svg
-                                    > Extracted Memories</span
-                                >
-                                <button
-                                    class="icon-btn text-slate-400 hover:text-white"
-                                    onclick={closeMemoriesPanel}
-                                    aria-label="Close memories panel"
-                                >
-                                    <svg
-                                        class="w-4 h-4"
-                                        fill="none"
-                                        stroke="currentColor"
-                                        viewBox="0 0 24 24"
-                                    >
-                                        <path
-                                            stroke-linecap="round"
-                                            stroke-linejoin="round"
-                                            stroke-width="2"
-                                            d="M6 18L18 6M6 6l12 12"
-                                        />
-                                    </svg>
-                                </button>
-                            </div>
-                            <div class="p-6 space-y-4">
-                                {#if extractedMemories.keyMoments?.length > 0}
-                                    <div>
-                                        <h4
-                                            class="text-xs text-slate-400 uppercase tracking-wider mb-2"
-                                        >
-                                            Key Moments
-                                        </h4>
-                                        <ul class="space-y-2">
-                                            {#each extractedMemories.keyMoments as moment}
-                                                <li
-                                                    class="text-sm text-slate-300 p-2 rounded bg-purple-500/10 border-l-2 border-purple-500"
-                                                >
-                                                    {moment}
-                                                </li>
-                                            {/each}
-                                        </ul>
-                                    </div>
-                                {/if}
-                                {#if extractedMemories.quotes?.length > 0}
-                                    <div>
-                                        <h4
-                                            class="text-xs text-slate-400 uppercase tracking-wider mb-2"
-                                        >
-                                            Notable Quotes
-                                        </h4>
-                                        <div class="space-y-2">
-                                            {#each extractedMemories.quotes as quote}
-                                                <blockquote
-                                                    class="text-sm text-slate-300 italic border-l-2 border-cyan-500 pl-3 py-1"
-                                                >
-                                                    "{quote}"
-                                                </blockquote>
-                                            {/each}
-                                        </div>
-                                    </div>
-                                {/if}
-                                {#if extractedMemories.personalInsights?.length > 0}
-                                    <div>
-                                        <h4
-                                            class="text-xs text-slate-400 uppercase tracking-wider mb-2"
-                                        >
-                                            Personal Insights
-                                        </h4>
-                                        <ul class="space-y-1">
-                                            {#each extractedMemories.personalInsights as insight}
-                                                <li
-                                                    class="text-sm text-slate-300 flex items-start gap-2"
-                                                >
-                                                    <span
-                                                        class="text-yellow-400"
-                                                        >•</span
-                                                    >
-                                                    {insight}
-                                                </li>
-                                            {/each}
-                                        </ul>
-                                    </div>
-                                {/if}
-                                {#if extractedMemories.emotionShifts?.length > 0}
-                                    <div>
-                                        <h4
-                                            class="text-xs text-slate-400 uppercase tracking-wider mb-2"
-                                        >
-                                            Emotion Shifts
-                                        </h4>
-                                        <ul class="space-y-1">
-                                            {#each extractedMemories.emotionShifts as shift}
-                                                <li
-                                                    class="text-sm text-slate-300 flex items-start gap-2"
-                                                >
-                                                    <span
-                                                        class="text-orange-400"
-                                                        >↗</span
-                                                    >
-                                                    {shift}
-                                                </li>
-                                            {/each}
-                                        </ul>
-                                    </div>
-                                {/if}
-                            </div>
-                        </div>
-                    {/if}
+                    <TranscriptView
+                        {transcripts}
+                        {isCollapsed}
+                        {debugMode}
+                        {debugEventCount}
+                        {debugLastEvent}
+                        {debugLastTranscript}
+                    />
+                    <SummaryPanel
+                        show={showSummaryPanel}
+                        {extractedSummary}
+                        on:close={closeSummaryPanel}
+                    />
+                    <MemoriesPanel
+                        show={showMemoriesPanel}
+                        {extractedMemories}
+                        on:close={closeMemoriesPanel}
+                    />
                 {:else if activeTab === "graph"}
-                    <div
-                        class="content-card"
-                        style="height: calc(100vh - 220px); min-height: 500px;"
-                    >
-                        <div class="content-card-header">
-                            <span class="text-sm font-medium text-slate-200"
-                                >Knowledge Graph Visualization</span
-                            >
-                            <span class="text-xs text-slate-500"
-                                >{graphNodes.length} nodes • {graphEdges.length}
-                                edges</span
-                            >
-                        </div>
-                        <div class="h-full p-2">
-                            <KnowledgeGraph
-                                nodes={graphNodes}
-                                edges={graphEdges}
-                                compact={false}
-                            />
-                        </div>
-                    </div>
+                    <GraphTab
+                        {graphNodes}
+                        {graphEdges}
+                        {transcripts}
+                        isGenerating={isGeneratingGraph}
+                        on:generateGraph={handleGenerateGraph}
+                        on:clearGraph={handleClearGraph}
+                        on:toggleCluster={handleToggleCluster}
+                    />
                 {:else if activeTab === "alerts"}
-                    <div class="content-card">
-                        <div class="content-card-header">
-                            <span
-                                class="text-sm font-medium text-slate-200 flex items-center gap-2"
-                                ><svg
-                                    class="w-4 h-4"
-                                    viewBox="0 0 24 24"
-                                    fill="none"
-                                    stroke="currentColor"
-                                    stroke-width="2"
-                                    ><path
-                                        d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"
-                                    /><path
-                                        d="M13.73 21a2 2 0 0 1-3.46 0"
-                                    /></svg
-                                > Intelligence Alerts</span
-                            >
-                            <button
-                                class="btn-ghost text-xs"
-                                onclick={() => (alerts = [])}>Clear All</button
-                            >
-                        </div>
-                        <div class="p-6 space-y-3 max-h-96 overflow-y-auto">
-                            {#if alerts.length === 0}
-                                <div class="text-center py-12 text-slate-500">
-                                    <svg
-                                        class="w-12 h-12 mx-auto mb-4 text-slate-500 opacity-30"
-                                        viewBox="0 0 24 24"
-                                        fill="none"
-                                        stroke="currentColor"
-                                        stroke-width="1.5"
-                                        ><path
-                                            d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"
-                                        /><line
-                                            x1="1"
-                                            y1="1"
-                                            x2="23"
-                                            y2="23"
-                                        /></svg
-                                    >
-                                    <p>
-                                        No alerts yet. Alerts appear when
-                                        important events are detected.
-                                    </p>
-                                </div>
-                            {:else}
-                                {#each alerts as alert}
-                                    <div
-                                        class="glass-card p-4 {alert.severity ===
-                                        'critical'
-                                            ? 'border-red-500/30'
-                                            : alert.severity === 'warning'
-                                              ? 'border-yellow-500/30'
-                                              : 'border-cyan-500/30'}"
-                                    >
-                                        <div class="flex items-start gap-3">
-                                            <svg
-                                                class="w-5 h-5 {alert.severity ===
-                                                'critical'
-                                                    ? 'text-red-500'
-                                                    : alert.severity ===
-                                                        'warning'
-                                                      ? 'text-yellow-500'
-                                                      : 'text-cyan-500'}"
-                                                viewBox="0 0 24 24"
-                                                fill="none"
-                                                stroke="currentColor"
-                                                stroke-width="2"
-                                                ><circle
-                                                    cx="12"
-                                                    cy="12"
-                                                    r="10"
-                                                /><line
-                                                    x1="12"
-                                                    y1="8"
-                                                    x2="12"
-                                                    y2="12"
-                                                /><line
-                                                    x1="12"
-                                                    y1="16"
-                                                    x2="12.01"
-                                                    y2="16"
-                                                /></svg
-                                            >
-                                            <div class="flex-1">
-                                                <div
-                                                    class="flex justify-between"
-                                                >
-                                                    <span
-                                                        class="font-medium text-slate-200"
-                                                        >{alert.type}</span
-                                                    >
-                                                    <span
-                                                        class="text-xs text-slate-500"
-                                                        >{alert.timestamp}</span
-                                                    >
-                                                </div>
-                                                <p
-                                                    class="text-sm text-slate-400 mt-1"
-                                                >
-                                                    {alert.message}
-                                                </p>
-                                            </div>
-                                        </div>
-                                    </div>
-                                {/each}
-                            {/if}
-                        </div>
-                    </div>
+                    <AlertsTab {alerts} on:clearAlerts={() => (alerts = [])} />
                 {:else if activeTab === "analytics"}
-                    <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
-                        <div class="glass-card p-4 text-center">
-                            <div class="text-3xl font-bold text-cyan-400">
-                                {transcripts.length}
-                            </div>
-                            <div class="text-xs text-slate-500 mt-1">
-                                Transcripts
-                            </div>
-                        </div>
-                        <div class="glass-card p-4 text-center">
-                            <div class="text-3xl font-bold text-cyan-400">
-                                {graphNodes.length}
-                            </div>
-                            <div class="text-xs text-slate-500 mt-1">
-                                Entities
-                            </div>
-                        </div>
-                        <div class="glass-card p-4 text-center">
-                            <div class="text-3xl font-bold text-green-400">
-                                {transcripts.filter((t) =>
-                                    t.category?.includes("TASK"),
-                                ).length}
-                            </div>
-                            <div class="text-xs text-slate-500 mt-1">
-                                Tasks Found
-                            </div>
-                        </div>
-                        <div class="glass-card p-4 text-center">
-                            <div class="text-3xl font-bold text-blue-400">
-                                {transcripts.filter((t) =>
-                                    t.category?.includes("DECISION"),
-                                ).length}
-                            </div>
-                            <div class="text-xs text-slate-500 mt-1">
-                                Decisions
-                            </div>
-                        </div>
-                    </div>
-
-                    <div class="glass-card p-6">
-                        <h4 class="text-sm font-medium text-slate-200 mb-4">
-                            Performance Metrics
-                        </h4>
-                        <div class="grid grid-cols-3 gap-4 text-center">
-                            <div>
-                                <div class="text-2xl font-bold text-green-400">
-                                    {latencyMs}ms
-                                </div>
-                                <div class="text-xs text-slate-500">
-                                    Current Latency
-                                </div>
-                            </div>
-                            <div>
-                                <div
-                                    class="text-2xl font-bold {isGeminiConnected
-                                        ? 'text-green-400'
-                                        : 'text-red-400'}"
-                                >
-                                    <svg
-                                        class="w-6 h-6 {isGeminiConnected
-                                            ? 'text-green-400'
-                                            : 'text-red-400'}"
-                                        viewBox="0 0 24 24"
-                                        fill="none"
-                                        stroke="currentColor"
-                                        stroke-width="2.5"
-                                        >{#if isGeminiConnected}<polyline
-                                                points="20 6 9 17 4 12"
-                                            />{:else}<line
-                                                x1="18"
-                                                y1="6"
-                                                x2="6"
-                                                y2="18"
-                                            /><line
-                                                x1="6"
-                                                y1="6"
-                                                x2="18"
-                                                y2="18"
-                                            />{/if}</svg
-                                    >
-                                </div>
-                                <div class="text-xs text-slate-500">
-                                    API Connected
-                                </div>
-                            </div>
-                            <div>
-                                <div
-                                    class="text-2xl font-bold {isRecording
-                                        ? 'text-red-400'
-                                        : 'text-slate-500'}"
-                                >
-                                    <span
-                                        class="w-4 h-4 rounded-full {isRecording
-                                            ? 'bg-red-500 animate-pulse'
-                                            : 'bg-slate-600'}"
-                                    ></span>
-                                </div>
-                                <div class="text-xs text-slate-500">
-                                    Recording
-                                </div>
-                            </div>
-                        </div>
-                    </div>
+                    <AnalyticsTab
+                        {transcripts}
+                        {graphNodes}
+                        {latencyMs}
+                        {isGeminiConnected}
+                        {isRecording}
+                    />
                 {:else if activeTab === "settings"}
-                    <div class="glass-card p-6">
-                        <h3 class="text-lg font-medium text-slate-200 mb-6">
-                            Audio & Processing Controls
-                        </h3>
-
-                        <!-- Model Selection -->
-                        <div class="mb-6">
-                            <label
-                                for="model-select"
-                                class="block text-xs text-slate-400 mb-2"
-                                >AI Model</label
-                            >
-                            <select
-                                id="model-select"
-                                bind:value={selectedModel}
-                                class="select-field w-full"
-                            >
-                                {#each availableModels as model}
-                                    <option value={model.id}
-                                        >{model.name}</option
-                                    >
-                                {/each}
-                            </select>
-                        </div>
-
-                        <!-- API Key -->
-                        <div class="mb-6">
-                            <label
-                                for="api-key-input"
-                                class="block text-xs text-slate-400 mb-2"
-                                >Gemini API Key</label
-                            >
-                            <div class="flex gap-2">
-                                <input
-                                    id="api-key-input"
-                                    type="password"
-                                    bind:value={apiKey}
-                                    class="input-field flex-1"
-                                    placeholder="AIza..."
-                                />
-                                <button
-                                    class="btn-secondary"
-                                    onclick={connectGemini}
-                                    disabled={isGeminiConnected}
-                                >
-                                    {isGeminiConnected
-                                        ? "Connected"
-                                        : "Connect"}
-                                </button>
-                            </div>
-                        </div>
-
-                        <!-- Capture Source -->
-                        <div class="mb-6">
-                            <span class="block text-xs text-slate-400 mb-2"
-                                >Capture Source</span
-                            >
-                            <div class="flex gap-2">
-                                <button
-                                    class="{captureMode === 'mic'
-                                        ? 'btn-primary'
-                                        : 'btn-secondary'} flex-1"
-                                    onclick={() => setCaptureMode("mic")}
-                                    aria-label="Set Mic Only"
-                                >
-                                    <svg
-                                        class="w-4 h-4 inline mr-1"
-                                        viewBox="0 0 24 24"
-                                        fill="none"
-                                        stroke="currentColor"
-                                        stroke-width="2"
-                                        ><path
-                                            d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"
-                                        /><path
-                                            d="M19 10v2a7 7 0 0 1-14 0v-2"
-                                        /></svg
-                                    > Mic
-                                </button>
-                                <button
-                                    class="{captureMode === 'system'
-                                        ? 'btn-primary'
-                                        : 'btn-secondary'} flex-1"
-                                    onclick={() => setCaptureMode("system")}
-                                    aria-label="Set System Audio Only"
-                                >
-                                    System
-                                </button>
-                                <button
-                                    class="{captureMode === 'both'
-                                        ? 'btn-primary'
-                                        : 'btn-secondary'} flex-1"
-                                    onclick={() => setCaptureMode("both")}
-                                    aria-label="Set Both Audio Sources"
-                                >
-                                    Both
-                                </button>
-                            </div>
-                        </div>
-
-                        <!-- Audio Level -->
-                        <div class="mb-6">
-                            <span class="block text-xs text-slate-400 mb-2"
-                                >Audio Level</span
-                            >
-                            <div class="space-y-2">
-                                {#if currentVolume !== undefined}
-                                    <div
-                                        class="h-3 bg-dark-700 rounded-full overflow-hidden"
-                                        role="progressbar"
-                                        aria-valuenow={Math.min(
-                                            Math.max(currentVolume * 10, 0),
-                                            1,
-                                        ) * 100}
-                                        aria-valuemin="0"
-                                        aria-valuemax="100"
-                                    >
-                                        <div
-                                            class="h-full transition-all duration-75 {currentVolume >
-                                            0.15
-                                                ? 'bg-red-500'
-                                                : currentVolume > 0.05
-                                                  ? 'bg-green-500'
-                                                  : currentVolume > 0.01
-                                                    ? 'bg-cyan-500'
-                                                    : 'bg-slate-600'}"
-                                            style="width: {Math.min(
-                                                Math.max(currentVolume * 10, 0),
-                                                1,
-                                            ) * 100}%"
-                                        ></div>
-                                    </div>
-                                    <div
-                                        class="flex justify-between text-xs text-slate-500 mt-1"
-                                    >
-                                        <span class="flex items-center gap-1">
-                                            <span
-                                                class="w-2 h-2 rounded-full {isRecording
-                                                    ? currentVolume > 0.02
-                                                        ? 'bg-green-500 animate-pulse'
-                                                        : 'bg-cyan-500'
-                                                    : 'bg-slate-600'}"
-                                            ></span>
-                                            {isRecording ? "Listening" : "Idle"}
-                                        </span>
-                                        <span
-                                            >{isRecording
-                                                ? currentVolume > 0.0001
-                                                    ? (
-                                                          20 *
-                                                          Math.log10(
-                                                              currentVolume,
-                                                          )
-                                                      ).toFixed(0) + " dB"
-                                                    : "-∞ dB"
-                                                : "--"}</span
-                                        >
-                                    </div>
-                                {/if}
-                            </div>
-                        </div>
-
-                        <CognivoxControls
-                            onSettingsChange={handleSettingsChange}
-                        />
-                    </div>
+                    <SettingsTab
+                        bind:selectedModel
+                        {availableModels}
+                        bind:apiKey
+                        {isGeminiConnected}
+                        {captureMode}
+                        {currentVolume}
+                        {isRecording}
+                        on:connectGemini={connectGemini}
+                        on:setCaptureMode={(e) => setCaptureMode(e.detail)}
+                        on:settingsChange={(e) =>
+                            handleSettingsChange(e.detail)}
+                    />
                 {:else if activeTab === "diagnostics"}
                     <Diagnostics {isRecording} {isGeminiConnected} />
                 {:else if activeTab === "speakers"}
-                    <!-- ECAPA-TDNN Speaker Identification Panel -->
-                    <div class="p-4 space-y-4">
-                        <div class="flex items-center justify-between">
-                            <h3 class="text-lg font-semibold text-cyan-300">
-                                Speaker Identification
-                            </h3>
-                            <span
-                                class="text-xs px-2 py-1 rounded {speakerIdInitialized
-                                    ? 'bg-green-500/20 text-green-400'
-                                    : 'bg-yellow-500/20 text-yellow-400'}"
-                            >
-                                {speakerIdInitialized
-                                    ? "ECAPA-TDNN Active"
-                                    : "Not Initialized"}
-                            </span>
-                        </div>
-
-                        <div class="text-xs text-gray-400 space-y-1">
-                            <p>
-                                Model: ECAPA-TDNN (192-dim embeddings, ~95%
-                                accuracy)
-                            </p>
-                            <p>
-                                Method: Voice biometric comparison via cosine
-                                similarity
-                            </p>
-                            {#if speakerIdStatus}
-                                <p>
-                                    Known speakers: {speakerIdStatus.speaker_count}
-                                    | Threshold: {speakerIdStatus.threshold.toFixed(
-                                        2,
-                                    )}
-                                </p>
-                            {/if}
-                        </div>
-
-                        {#if !speakerIdInitialized}
-                            <button
-                                class="px-4 py-2 rounded bg-cyan-500/20 border border-cyan-500/30 text-cyan-300 hover:bg-cyan-500/30 transition text-sm"
-                                onclick={initializeSpeakerId}
-                            >
-                                Initialize Speaker ID
-                            </button>
-                            <p class="text-xs text-gray-500">
-                                Requires ONNX model. Run: <code
-                                    class="text-cyan-400"
-                                    >python scripts/export_ecapa_tdnn.py</code
-                                >
-                            </p>
-                        {/if}
-
-                        {#if lastIdentifiedSpeaker}
-                            <div
-                                class="p-3 rounded bg-cyan-500/10 border border-cyan-500/20"
-                            >
-                                <p class="text-sm text-cyan-300">
-                                    Last identified: <strong
-                                        >{lastIdentifiedSpeaker.speaker_label}</strong
-                                    >
-                                </p>
-                                <p class="text-xs text-gray-400">
-                                    Confidence: {(
-                                        lastIdentifiedSpeaker.confidence * 100
-                                    ).toFixed(1)}% | {lastIdentifiedSpeaker.is_new
-                                        ? "New speaker"
-                                        : "Known speaker"}
-                                </p>
-                            </div>
-                        {/if}
-
-                        {#if speakerProfiles.length > 0}
-                            <div class="space-y-2">
-                                <h4 class="text-sm font-medium text-gray-300">
-                                    Known Speakers ({speakerProfiles.length})
-                                </h4>
-                                {#each speakerProfiles as profile}
-                                    <div
-                                        class="flex items-center justify-between p-2 rounded bg-gray-800/50 border border-gray-700/50"
-                                    >
-                                        <div>
-                                            <span class="text-sm text-cyan-300"
-                                                >{profile.label}</span
-                                            >
-                                            <span
-                                                class="text-xs text-gray-500 ml-2"
-                                                >({profile.sample_count} segments)</span
-                                            >
-                                        </div>
-                                        <div class="flex gap-2">
-                                            <button
-                                                class="text-xs px-2 py-1 rounded bg-blue-500/20 text-blue-300 hover:bg-blue-500/30"
-                                                onclick={() => {
-                                                    const name = prompt(
-                                                        "New name for " +
-                                                            profile.label +
-                                                            ":",
-                                                    );
-                                                    if (name)
-                                                        renameSpeaker(
-                                                            profile.id,
-                                                            name,
-                                                        );
-                                                }}>Rename</button
-                                            >
-                                        </div>
-                                    </div>
-                                {/each}
-                                <button
-                                    class="text-xs px-3 py-1.5 rounded bg-red-500/20 border border-red-500/30 text-red-400 hover:bg-red-500/30 mt-2"
-                                    onclick={clearSpeakerProfiles}
-                                    >Clear All Profiles</button
-                                >
-                            </div>
-                        {/if}
-                    </div>
+                    <SpeakersTab
+                        {speakerIdInitialized}
+                        {speakerIdStatus}
+                        {speakerProfiles}
+                        {lastIdentifiedSpeaker}
+                        on:initializeSpeakerId={initializeSpeakerId}
+                        on:clearSpeakerProfiles={clearSpeakerProfiles}
+                        on:renameSpeaker={(e) =>
+                            renameSpeaker(
+                                e.detail.speakerId,
+                                e.detail.newLabel,
+                            )}
+                    />
                 {/if}
             </div>
         </div>
 
         <!-- BOTTOM ACTION BAR -->
-        <div
-            class="h-20 px-6 flex items-center justify-center gap-4 border-t border-cyan-500/10 bg-[#0d1117]/50"
-        >
-            <!-- Error Toast -->
-            {#if extractError}
-                <div
-                    class="absolute top-2 left-1/2 -translate-x-1/2 px-4 py-2 rounded-lg bg-red-500/20 border border-red-500/50 text-red-400 text-sm animate-fadeIn"
-                >
-                    {extractError}
-                </div>
-            {/if}
-
-            <button
-                class="btn-action {isCollapsed ? 'bg-cyan-500/20' : ''}"
-                onclick={toggleCollapseState}
-                disabled={transcripts.length === 0}
-            >
-                <svg
-                    xmlns="http://www.w3.org/2000/svg"
-                    width="18"
-                    height="18"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="2"
-                >
-                    {#if isCollapsed}
-                        <rect x="3" y="3" width="18" height="18" rx="2" ry="2"
-                        ></rect>
-                        <line x1="3" y1="12" x2="21" y2="12"></line>
-                    {:else}
-                        <rect x="3" y="3" width="18" height="18" rx="2" ry="2"
-                        ></rect>
-                        <line x1="9" y1="3" x2="9" y2="21"></line>
-                    {/if}
-                </svg>
-                {isCollapsed ? "Expand Transcript" : "Collapse Transcript"}
-            </button>
-
-            <button
-                class="btn-action {showMemoriesPanel ? 'bg-purple-500/20' : ''}"
-                onclick={extractMemories}
-                disabled={isExtractingMemories || transcripts.length === 0}
-            >
-                {#if isExtractingMemories}
-                    <span class="animate-spin">⏳</span>
-                {:else}
-                    <svg
-                        xmlns="http://www.w3.org/2000/svg"
-                        width="18"
-                        height="18"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        stroke-width="2"
-                    >
-                        <circle cx="12" cy="12" r="3"></circle>
-                        <circle cx="19" cy="5" r="2"></circle>
-                        <circle cx="5" cy="5" r="2"></circle>
-                        <circle cx="19" cy="19" r="2"></circle>
-                        <circle cx="5" cy="19" r="2"></circle>
-                        <line x1="12" y1="9" x2="12" y2="3"></line>
-                        <line x1="14.5" y1="13.5" x2="19" y2="17"></line>
-                        <line x1="9.5" y1="13.5" x2="5" y2="17"></line>
-                        <line x1="14.5" y1="10.5" x2="19" y2="7"></line>
-                        <line x1="9.5" y1="10.5" x2="5" y2="7"></line>
-                    </svg>
-                {/if}
-                {isExtractingMemories ? "Extracting..." : "Extract Memories"}
-            </button>
-
-            <button
-                class="btn-action {showSummaryPanel ? 'bg-green-500/20' : ''}"
-                onclick={extractSummary}
-                disabled={isExtractingSummary || transcripts.length === 0}
-            >
-                {#if isExtractingSummary}
-                    <span class="animate-spin">⏳</span>
-                {:else}
-                    <svg
-                        xmlns="http://www.w3.org/2000/svg"
-                        width="18"
-                        height="18"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        stroke-width="2"
-                    >
-                        <path
-                            d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"
-                        ></path>
-                        <polyline points="14 2 14 8 20 8"></polyline>
-                        <line x1="16" y1="13" x2="8" y2="13"></line>
-                        <line x1="16" y1="17" x2="8" y2="17"></line>
-                        <polyline points="10 9 9 9 8 9"></polyline>
-                    </svg>
-                {/if}
-                {isExtractingSummary ? "Generating..." : "Summary"}
-            </button>
-
-            <!-- Diamond Icon -->
-            <div class="ml-4 diamond-icon">
-                <span class="text-cyan-400">◆</span>
-            </div>
-        </div>
+        <BottomActionBar
+            {extractError}
+            {isCollapsed}
+            {transcripts}
+            {showMemoriesPanel}
+            {showSummaryPanel}
+            {isExtractingMemories}
+            {isExtractingSummary}
+            on:toggleCollapse={toggleCollapseState}
+            on:extractMemories={extractMemories}
+            on:extractSummary={extractSummary}
+        />
     </div>
 </div>

@@ -1,0 +1,88 @@
+<script lang="ts">
+    import type { Transcript, GraphNode } from "./types";
+
+    export let transcripts: Transcript[] = [];
+    export let graphNodes: GraphNode[] = [];
+    export let latencyMs = 0;
+    export let isGeminiConnected = false;
+    export let isRecording = false;
+</script>
+
+<div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+    <div class="glass-card p-4 text-center">
+        <div class="text-3xl font-bold text-cyan-400">
+            {transcripts.length}
+        </div>
+        <div class="text-xs text-slate-500 mt-1">Transcripts</div>
+    </div>
+    <div class="glass-card p-4 text-center">
+        <div class="text-3xl font-bold text-cyan-400">
+            {graphNodes.length}
+        </div>
+        <div class="text-xs text-slate-500 mt-1">Entities</div>
+    </div>
+    <div class="glass-card p-4 text-center">
+        <div class="text-3xl font-bold text-green-400">
+            {transcripts.filter((t) => t.category?.includes("TASK")).length}
+        </div>
+        <div class="text-xs text-slate-500 mt-1">Tasks Found</div>
+    </div>
+    <div class="glass-card p-4 text-center">
+        <div class="text-3xl font-bold text-blue-400">
+            {transcripts.filter((t) => t.category?.includes("DECISION")).length}
+        </div>
+        <div class="text-xs text-slate-500 mt-1">Decisions</div>
+    </div>
+</div>
+
+<div class="glass-card p-6">
+    <h4 class="text-sm font-medium text-slate-200 mb-4">Performance Metrics</h4>
+    <div class="grid grid-cols-3 gap-4 text-center">
+        <div>
+            <div class="text-2xl font-bold text-green-400">
+                {latencyMs}ms
+            </div>
+            <div class="text-xs text-slate-500">Current Latency</div>
+        </div>
+        <div>
+            <div
+                class="text-2xl font-bold {isGeminiConnected
+                    ? 'text-green-400'
+                    : 'text-red-400'}"
+            >
+                <svg
+                    class="w-6 h-6 {isGeminiConnected
+                        ? 'text-green-400'
+                        : 'text-red-400'}"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2.5"
+                    >{#if isGeminiConnected}<polyline
+                            points="20 6 9 17 4 12"
+                        />{:else}<line x1="18" y1="6" x2="6" y2="18" /><line
+                            x1="6"
+                            y1="6"
+                            x2="18"
+                            y2="18"
+                        />{/if}</svg
+                >
+            </div>
+            <div class="text-xs text-slate-500">API Connected</div>
+        </div>
+        <div>
+            <div
+                class="text-2xl font-bold {isRecording
+                    ? 'text-red-400'
+                    : 'text-slate-500'}"
+            >
+                <span
+                    class="w-4 h-4 rounded-full {isRecording
+                        ? 'bg-red-500 animate-pulse'
+                        : 'bg-slate-600'}"
+                ></span>
+            </div>
+            <div class="text-xs text-slate-500">Recording</div>
+        </div>
+    </div>
+</div>

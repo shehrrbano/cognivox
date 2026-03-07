@@ -6,10 +6,19 @@
         type: string;
         weight?: number;
         label?: string;
+        collapsed?: boolean;
+        childCount?: number;
+        childIds?: string[];
     }> = [];
     export let edges: Array<{ from: string; to: string; relation: string }> =
         [];
     export let compact: boolean = false;
+
+    // Expand/collapse callback — emitted so parent can update data
+    import { createEventDispatcher } from "svelte";
+    const dispatch = createEventDispatcher<{
+        toggleCluster: { nodeId: string };
+    }>();
 
     // Force-directed layout state
     interface NodePosition {
@@ -269,8 +278,20 @@
         }
     }
 
-    function getNodeColor(type: string): string {
+    function getNodeColor(type: string, collapsed?: boolean): string {
+        // Collapsed cluster nodes get a special gold color
+        if (collapsed) return "#fbbf24";
+
         const colors: Record<string, string> = {
+            Root: "#f59e0b",
+            CONCEPT: "#8b5cf6",
+            THEORY: "#a78bfa",
+            METHOD: "#06b6d4",
+            TECHNIQUE: "#14b8a6",
+            DEFINITION: "#60a5fa",
+            EXAMPLE: "#34d399",
+            FORMULA: "#c084fc",
+            TECHNOLOGY: "#22d3ee",
             TASK: "#00c8ff",
             DECISION: "#4dd2ff",
             PERSON: "#a78bfa",
@@ -279,18 +300,19 @@
             ACTION_ITEM: "#10b981",
             Speaker: "#22d3ee",
             Topic: "#6366f1",
+            TOPIC: "#06b6d4",
             Tone: "#f472b6",
             Category: "#818cf8",
             Entity: "#34d399",
             entity: "#34d399",
             PROJECT: "#f97316",
-            TOPIC: "#06b6d4",
             LOCATION: "#84cc16",
             DATE: "#e879f9",
             ORG: "#fb923c",
             URGENCY: "#dc2626",
             SENTIMENT: "#a855f7",
             QUERY: "#2dd4bf",
+            Cluster: "#fbbf24",
             default: "#00c8ff",
         };
         return colors[type] || colors.default;
@@ -437,38 +459,64 @@
     }
 
     function handleNodeClick(nodeId: string) {
+        const node = nodes.find((n) => n.id === nodeId);
+        // If it's a collapsed cluster, dispatch expand event
+        if (node?.collapsed) {
+            dispatch("toggleCluster", { nodeId });
+            return;
+        }
         selectedNode = selectedNode === nodeId ? null : nodeId;
     }
 
-    // Reactive updates
+    // Track previous SVG element for cleanup
+    let prevSvgElement: SVGSVGElement | null = null;
+
+    // Re-measure container and re-attach wheel listener when SVG element appears/changes
+    function measureAndAttach() {
+        // Detach from previous SVG if it changed
+        if (prevSvgElement && prevSvgElement !== svgElement) {
+            prevSvgElement.removeEventListener("wheel", handleZoom);
+        }
+        // Measure from the container or SVG parent
+        const measurable = containerEl || svgElement?.parentElement;
+        if (measurable) {
+            const rect = measurable.getBoundingClientRect();
+            if (rect.width > 0 && rect.height > 0) {
+                containerWidth = rect.width;
+                containerHeight = rect.height;
+            }
+        }
+        // Attach wheel listener to current SVG
+        if (svgElement && svgElement !== prevSvgElement) {
+            svgElement.addEventListener("wheel", handleZoom, {
+                passive: false,
+            });
+            prevSvgElement = svgElement;
+        }
+    }
+
+    // Reactive updates — fires when nodes change
     $: if (nodes.length > 0) {
-        initializePositions();
-        isSimulating = true;
-        simulationTick = 0;
-        // Auto fit after simulation settles a bit
-        setTimeout(() => fitToView(), 500);
+        // Defer measurement to next tick so the SVG element exists in the DOM
+        setTimeout(() => {
+            measureAndAttach();
+            initializePositions();
+            isSimulating = true;
+            simulationTick = 0;
+            // Auto fit after simulation settles a bit
+            setTimeout(() => fitToView(), 500);
+        }, 0);
     }
 
     onMount(() => {
-        // Get container dimensions
-        if (svgElement?.parentElement) {
-            const rect = svgElement.parentElement.getBoundingClientRect();
-            containerWidth = rect.width || 600;
-            containerHeight = rect.height || 400;
-        }
-
+        // Initial dimension measurement
+        measureAndAttach();
         initializePositions();
         animate();
 
         // Add global mouse handlers
         window.addEventListener("mousemove", handleGlobalMouseMove);
         window.addEventListener("mouseup", handleMouseUp);
-        // Only add wheel listener if svg element exists (won't exist if nodes.length === 0)
-        if (svgElement) {
-            svgElement.addEventListener("wheel", handleZoom, {
-                passive: false,
-            });
-        }
     });
 
     onDestroy(() => {
@@ -772,7 +820,6 @@
                                     text-anchor="middle"
                                     class="font-sans">{edge.relation}</text
                                 >
-                                >
                             {/if}
                         {/each}
                     </g>
@@ -780,6 +827,12 @@
                         {#each nodes as node}
                             {@const pos = positions.get(node.id)}
                             {#if pos}
+                                {@const color = getNodeColor(
+                                    node.type,
+                                    node.collapsed,
+                                )}
+                                {@const isCluster = node.collapsed}
+                                {@const nodeR = isCluster ? 32 : 22}
                                 <g
                                     transform="translate({pos.x}, {pos.y})"
                                     class="cursor-grab transition-transform {draggedNode ===
@@ -793,38 +846,43 @@
                                     tabindex="0"
                                 >
                                     <circle
-                                        r="28"
+                                        r={nodeR + 6}
                                         fill="none"
-                                        stroke={getNodeColor(node.type)}
-                                        stroke-width="1"
+                                        stroke={color}
+                                        stroke-width={isCluster ? 2 : 1}
                                         stroke-opacity={draggedNode === node.id
                                             ? 0.5
                                             : 0.2}
+                                        stroke-dasharray={isCluster
+                                            ? "4 3"
+                                            : "none"}
                                         class={draggedNode === node.id
                                             ? ""
                                             : "animate-pulse"}
                                     />
                                     <circle
-                                        r="22"
-                                        fill={getNodeColor(node.type)}
-                                        fill-opacity={draggedNode === node.id
-                                            ? 0.25
-                                            : 0.1}
-                                        stroke={getNodeColor(node.type)}
+                                        r={nodeR}
+                                        fill={color}
+                                        fill-opacity={isCluster
+                                            ? 0.2
+                                            : draggedNode === node.id
+                                              ? 0.25
+                                              : 0.1}
+                                        stroke={color}
                                         stroke-width={draggedNode === node.id
                                             ? 3
                                             : 2}
                                         filter="url(#glow)"
                                     />
                                     <circle
-                                        r="16"
-                                        fill={getNodeColor(node.type)}
+                                        r={nodeR - 6}
+                                        fill={color}
                                         fill-opacity="0.05"
                                     />
                                     <text
                                         text-anchor="middle"
-                                        dy="4"
-                                        fill={getNodeColor(node.type)}
+                                        dy={isCluster ? "-2" : "4"}
+                                        fill={color}
                                         font-size="10"
                                         font-weight="500"
                                         class="font-sans pointer-events-none select-none"
@@ -833,13 +891,26 @@
                                             12,
                                         )}</text
                                     >
+                                    {#if isCluster && node.childCount}
+                                        <text
+                                            text-anchor="middle"
+                                            dy="12"
+                                            fill={color}
+                                            font-size="9"
+                                            opacity="0.7"
+                                            class="font-sans pointer-events-none select-none"
+                                            >+{node.childCount} nodes</text
+                                        >
+                                    {/if}
                                     <text
                                         text-anchor="middle"
-                                        dy="32"
+                                        dy={isCluster ? "36" : "32"}
                                         fill="#64748b"
                                         font-size="8"
                                         class="font-sans pointer-events-none select-none"
-                                        >{node.type}</text
+                                        >{isCluster
+                                            ? "Cluster"
+                                            : node.type}</text
                                     >
                                     {#if node.weight && node.weight > 1}
                                         <circle
@@ -1259,6 +1330,12 @@
                     {#each nodes as node}
                         {@const pos = positions.get(node.id)}
                         {#if pos}
+                            {@const color = getNodeColor(
+                                node.type,
+                                node.collapsed,
+                            )}
+                            {@const isCluster = node.collapsed}
+                            {@const nodeR = isCluster ? 32 : 22}
                             <g
                                 transform="translate({pos.x}, {pos.y})"
                                 class="cursor-grab transition-transform {draggedNode ===
@@ -1271,38 +1348,43 @@
                                 tabindex="0"
                             >
                                 <circle
-                                    r="28"
+                                    r={nodeR + 6}
                                     fill="none"
-                                    stroke={getNodeColor(node.type)}
-                                    stroke-width="1"
+                                    stroke={color}
+                                    stroke-width={isCluster ? 2 : 1}
                                     stroke-opacity={draggedNode === node.id
                                         ? 0.5
                                         : 0.2}
+                                    stroke-dasharray={isCluster
+                                        ? "4 3"
+                                        : "none"}
                                     class={draggedNode === node.id
                                         ? ""
                                         : "animate-pulse"}
                                 />
                                 <circle
-                                    r="22"
-                                    fill={getNodeColor(node.type)}
-                                    fill-opacity={draggedNode === node.id
-                                        ? 0.25
-                                        : 0.1}
-                                    stroke={getNodeColor(node.type)}
+                                    r={nodeR}
+                                    fill={color}
+                                    fill-opacity={isCluster
+                                        ? 0.2
+                                        : draggedNode === node.id
+                                          ? 0.25
+                                          : 0.1}
+                                    stroke={color}
                                     stroke-width={draggedNode === node.id
                                         ? 3
                                         : 2}
                                     filter="url(#glow)"
                                 />
                                 <circle
-                                    r="16"
-                                    fill={getNodeColor(node.type)}
+                                    r={nodeR - 6}
+                                    fill={color}
                                     fill-opacity="0.05"
                                 />
                                 <text
                                     text-anchor="middle"
-                                    dy="4"
-                                    fill={getNodeColor(node.type)}
+                                    dy={isCluster ? "-2" : "4"}
+                                    fill={color}
                                     font-size={compact ? "8" : "10"}
                                     font-weight="500"
                                     class="font-sans pointer-events-none select-none"
@@ -1312,13 +1394,24 @@
                                         compact ? 8 : 12,
                                     )}
                                 </text>
+                                {#if isCluster && node.childCount}
+                                    <text
+                                        text-anchor="middle"
+                                        dy="12"
+                                        fill={color}
+                                        font-size="9"
+                                        opacity="0.7"
+                                        class="font-sans pointer-events-none select-none"
+                                        >+{node.childCount} nodes</text
+                                    >
+                                {/if}
                                 <text
                                     text-anchor="middle"
-                                    dy="32"
+                                    dy={isCluster ? "36" : "32"}
                                     fill="#64748b"
                                     font-size="8"
                                     class="font-sans pointer-events-none select-none"
-                                    >{node.type}</text
+                                    >{isCluster ? "Cluster" : node.type}</text
                                 >
                                 {#if node.weight && node.weight > 1}
                                     <circle

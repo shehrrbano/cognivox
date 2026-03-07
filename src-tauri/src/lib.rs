@@ -121,6 +121,7 @@ pub fn run() {
             gemini_client::test_gemini_connection,
             gemini_client::update_gemini_key,
             gemini_client::reset_audio_loop,
+            gemini_client::flush_audio_buffer,
             gemini_client::set_gemini_model,
             gemini_client::get_available_models,
             gemini_client::process_transcript_with_gemini,
