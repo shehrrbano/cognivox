@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex as StdMutex, MutexGuard, atomic::{AtomicBool, Orderin
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::time::{Duration, interval, Instant, sleep};
 use crossbeam_channel::Receiver;
-use crate::whisper_client::{WhisperState, transcribe_audio_with_context};
+use crate::whisper_client::{WhisperState, transcribe_audio_with_context, transcribe_audio_via_worker};
 use crate::audio_capture::{TaggedAudio, AudioSource, AudioState};
 use crate::speaker_id::{SpeakerIdState, extract_embedding, identify_or_register_speaker, save_profiles};
 
@@ -34,7 +34,7 @@ const RATE_LIMIT_CODES: [&str; 3] = ["RESOURCE_EXHAUSTED", "RATE_LIMIT_EXCEEDED"
 // AUDIO SEGMENTATION CONFIG (used before Whisper)
 const MIN_SPEECH_SECS: f32 = 1.5;              // Minimum 1.5s of speech before we consider processing
 const SILENCE_TIMEOUT_SECS: f32 = 2.5;         // 2.5s silence = end of utterance (generous to avoid cutting natural pauses)
-const MAX_BATCH_SECS: f32 = 30.0;              // Safety-valve only: process after 30s even if still speaking
+const MAX_BATCH_SECS: f32 = 15.0;              // Safety-valve: process after 15s even if still speaking (30s caused GGML OOM crashes)
 const OVERLAP_SECS: f32 = 0.5;                 // 0.5s overlap between chunks for context continuity
 const SPEECH_THRESHOLD: f32 = 0.003;           // Minimum speech threshold — raised to reject ambient noise
 const SILENCE_THRESHOLD: f32 = 0.0005;         // Below this is silence — raised from near-zero
@@ -682,9 +682,21 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle, alive_flag:
         }
         
         // If processing, store ALL audio in pending buffer so NOTHING is lost
+        // Cap pending buffer at MAX_BATCH_SECS to prevent unbounded growth
+        // during slow (debug-mode) transcription
+        const MAX_PENDING_SAMPLES: usize = (MAX_BATCH_SECS * 16000.0) as usize;
         if is_processing && !new.is_empty() {
             let level = rms(&new);
             if let Ok(mut pb) = pending_buffer.lock() {
+                if pb.len() + new.len() > MAX_PENDING_SAMPLES {
+                    let excess = (pb.len() + new.len()) - MAX_PENDING_SAMPLES;
+                    if excess < pb.len() {
+                        pb.drain(..excess);
+                    } else {
+                        pb.clear();
+                    }
+                    println!("[AUDIO] ⚠ Pending buffer capped at {:.1}s", MAX_BATCH_SECS);
+                }
                 pb.extend(&new);
             }
             if let Ok(mut pst) = pending_source_timeline.lock() {
@@ -1220,15 +1232,6 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle, alive_flag:
                         *poison_lock(&processing_clone) = false;
                         return;
                     }
-                    let whisper_ctx = match poison_lock(&whisper_state.whisper_ctx).clone() {
-                        Some(ctx) => ctx,
-                        None => {
-                            println!("[WHISPER] ✗ Context not initialized - CANNOT TRANSCRIBE");
-                            let _ = app.emit("cognivox:status", "Whisper not initialized");
-                            *poison_lock(&processing_clone) = false;
-                            return;
-                        }
-                    };
                     let language = poison_lock(&whisper_state.language).clone();
                     println!("[WHISPER] Using language: '{}'", language);
                     
@@ -1249,14 +1252,58 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle, alive_flag:
                         }
                     };
                     
-                    // Transcribe with Whisper using cached context (fast - no model reload!)
-                    let transcription = match transcribe_audio_with_context(whisper_ctx, language, audio, context).await {
-                        Ok(result) => {
-                            println!("[WHISPER] ========================================");
-                            println!("[WHISPER] ✓ TRANSCRIPTION SUCCESS:");
-                            println!("[WHISPER]   Text: '{}'", &result.text);
-                            println!("[WHISPER]   Language: {}, Confidence: {:.2}", result.language, result.confidence);
-                            println!("[WHISPER] ========================================");
+                    // Prefer the persistent worker thread (reuses cached state — no 236MB re-alloc).
+                    // Fall back to the spawn-per-call approach only if worker is unavailable.
+                    let worker_tx = poison_lock(&whisper_state.worker_tx).clone();
+                    let transcription = if let Some(ref wtx) = worker_tx {
+                        match transcribe_audio_via_worker(wtx, audio, language, context).await {
+                            Ok(result) => {
+                                println!("[WHISPER] ========================================");
+                                println!("[WHISPER] ✓ TRANSCRIPTION SUCCESS (worker):");
+                                println!("[WHISPER]   Text: '{}'", &result.text);
+                                println!("[WHISPER]   Language: {}, Confidence: {:.2}", result.language, result.confidence);
+                                println!("[WHISPER] ========================================");
+                                
+                                // Update context history for next transcription
+                                let mut history = poison_lock(&whisper_state.context_history);
+                                history.push(result.text.clone());
+                                if history.len() > 5 { history.remove(0); }
+                                drop(history);
+                                
+                                let _ = app.emit("cognivox:whisper_transcription", serde_json::json!({
+                                    "text": result.text.clone(),
+                                    "language": result.language,
+                                    "confidence": result.confidence,
+                                    "source": "whisper",
+                                    "speaker": speaker_tag.clone()
+                                }));
+                                result.text
+                            }
+                            Err(e) => {
+                                println!("[WHISPER] ✗ WORKER TRANSCRIPTION FAILED: {}", e);
+                                let _ = app.emit("cognivox:status", format!("Whisper error: {}", e));
+                                *poison_lock(&processing_clone) = false;
+                                return;
+                            }
+                        }
+                    } else {
+                        // Fallback: use old spawn-per-call approach
+                        let whisper_ctx = match poison_lock(&whisper_state.whisper_ctx).clone() {
+                            Some(ctx) => ctx,
+                            None => {
+                                println!("[WHISPER] ✗ Context not initialized - CANNOT TRANSCRIBE");
+                                let _ = app.emit("cognivox:status", "Whisper not initialized");
+                                *poison_lock(&processing_clone) = false;
+                                return;
+                            }
+                        };
+                        match transcribe_audio_with_context(whisper_ctx, language, audio, context).await {
+                            Ok(result) => {
+                                println!("[WHISPER] ========================================");
+                                println!("[WHISPER] ✓ TRANSCRIPTION SUCCESS (fallback):");
+                                println!("[WHISPER]   Text: '{}'", &result.text);
+                                println!("[WHISPER]   Language: {}, Confidence: {:.2}", result.language, result.confidence);
+                                println!("[WHISPER] ========================================");
                             
                             // Update context history for next transcription
                             let mut history = poison_lock(&whisper_state.context_history);
@@ -1277,12 +1324,13 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle, alive_flag:
                             result.text
                         }
                         Err(e) => {
-                            println!("[WHISPER] ✗ TRANSCRIPTION FAILED: {}", e);
+                            println!("[WHISPER] ✗ TRANSCRIPTION FAILED (fallback): {}", e);
                             let _ = app.emit("cognivox:status", format!("Whisper error: {}", e));
                             *poison_lock(&processing_clone) = false;
                             return;
                         }
-                    };
+                        }// end fallback match
+                    };// end if-else worker/fallback
                     
                     if transcription.trim().is_empty() {
                         println!("[WHISPER] Empty transcription result, skipping Gemini");

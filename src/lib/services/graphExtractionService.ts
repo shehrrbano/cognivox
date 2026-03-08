@@ -395,67 +395,97 @@ export function buildLocalGraph(
         "then", "than", "into", "over", "only", "even", "more", "most",
         "such", "each", "much", "many", "your", "other", "after", "before",
         "still", "because", "through", "between", "those", "does", "have",
-        "meeting", "speaker", "said", "says", "start",
+        "meeting", "speaker", "said", "says", "start", "called", "used",
+        "using", "means", "example", "first", "second", "third", "next",
+        "last", "every", "another", "part", "parts", "thing", "things",
+        "kind", "type", "types", "come", "came", "take", "took", "give",
+        "gave", "look", "looks", "tell", "told", "talk", "talking",
     ]);
+
+    // Helper: add node/edge with dedup
+    const addNode = (id: string, type: string, label: string, weight: number) => {
+        if (!nodeMap.has(id)) {
+            nodeMap.set(id, { id, type, label, weight });
+        }
+    };
+    const addEdge = (from: string, to: string, relation: string) => {
+        const key = `${from}|${to}|${relation}`;
+        if (!edgeSet.has(key)) {
+            edgeSet.add(key);
+            edges.push({ from, to, relation });
+        }
+    };
+
+    // Capitalize a phrase for use as a node label/id
+    const capitalize = (s: string) => s.split(" ").map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(" ");
 
     // Track word frequency for importance weighting
     const wordFrequency = new Map<string, number>();
     const speakerTopics = new Map<string, Set<string>>();
+    // Track concepts found per sentence for co-occurrence edges later
+    const sentenceConcepts: string[][] = [];
 
+    // Combine all transcript text for global strategies
+    const allText = transcripts.map(t => t.text || "").join(". ");
+
+    // === STRATEGY 1: Topic-indicator pattern extraction ===
+    // Catches "such as nouns, verbs", "called adjectives", "types of words" etc.
+    const topicPatterns = [
+        /(?:such as|like|including|for example|e\.g\.|namely)\s+([^.!?]+)/gi,
+        /(?:called|known as|referred to as|termed)\s+([\w\s]+?)(?:[.,;!?]|\s+(?:is|are|was|were|and|which|that))/gi,
+        /(?:types? of|kinds? of|forms? of|categories? of)\s+([\w\s]+?)(?:[.,;!?]|$)/gi,
+        /(?:is a|are|refers to|means|defined as)\s+([\w\s]+?)(?:[.,;!?]|\s+(?:that|which|and))/gi,
+    ];
+    for (const pat of topicPatterns) {
+        let m: RegExpExecArray | null;
+        while ((m = pat.exec(allText)) !== null) {
+            const items = m[1].split(/[,;]|\band\b/).map(s => s.trim()).filter(s => s.length > 2 && s.length < 40);
+            for (const item of items) {
+                const words = item.split(/\s+/).filter(w => !stopWords.has(w.toLowerCase()) && w.length > 2);
+                if (words.length > 0 && words.length <= 4) {
+                    const conceptId = capitalize(words.join(" "));
+                    const entityType = classifyEntityType(conceptId);
+                    addNode(conceptId, entityType, conceptId, 2);
+                    addEdge("Start", conceptId, "topic");
+                }
+            }
+        }
+    }
+
+    // === STRATEGY 2: Academic/domain term detection (suffix-based) ===
+    const suffixPattern = /\b(\w{5,}(?:tion|sion|ment|ence|ance|ity|ism|ist|ogy|ics|ure|ness|ive|ous|ful|able|ible))\b/gi;
+    let suffixMatch: RegExpExecArray | null;
+    while ((suffixMatch = suffixPattern.exec(allText)) !== null) {
+        const word = suffixMatch[1];
+        if (!stopWords.has(word.toLowerCase())) {
+            const conceptId = capitalize(word);
+            addNode(conceptId, "CONCEPT", conceptId, 1.5);
+            addEdge("Start", conceptId, "topic");
+        }
+    }
+
+    // === PER-TRANSCRIPT EXTRACTION ===
     for (const t of transcripts) {
         const speaker = t.speaker || "Speaker";
 
         // Add speaker node
-        if (!nodeMap.has(speaker)) {
-            nodeMap.set(speaker, {
-                id: speaker,
-                type: "Speaker",
-                label: speaker,
-                weight: 2,
-            });
-            const key = `Start|${speaker}|participant`;
-            if (!edgeSet.has(key)) {
-                edgeSet.add(key);
-                edges.push({ from: "Start", to: speaker, relation: "participant" });
-            }
-        }
+        addNode(speaker, "Speaker", speaker, 2);
+        addEdge("Start", speaker, "participant");
 
         // Add tone node
         if (t.tone && t.tone !== "NEUTRAL") {
             const toneId = `tone_${t.tone}`;
-            if (!nodeMap.has(toneId)) {
-                nodeMap.set(toneId, {
-                    id: toneId,
-                    type: "Tone",
-                    label: t.tone,
-                    weight: 1,
-                });
-            }
-            edges.push({ from: speaker, to: toneId, relation: "expressed" });
+            addNode(toneId, "Tone", t.tone || "NEUTRAL", 1);
+            addEdge(speaker, toneId, "expressed");
         }
 
         // Add category nodes
         if (t.category) {
             for (const cat of t.category) {
                 if (cat !== "INFO") {
-                    if (!nodeMap.has(cat)) {
-                        nodeMap.set(cat, {
-                            id: cat,
-                            type: "Category",
-                            label: cat,
-                            weight: 1.5,
-                        });
-                        const key = `Start|${cat}|contains`;
-                        if (!edgeSet.has(key)) {
-                            edgeSet.add(key);
-                            edges.push({ from: "Start", to: cat, relation: "contains" });
-                        }
-                    }
-                    const key2 = `${speaker}|${cat}|raised`;
-                    if (!edgeSet.has(key2)) {
-                        edgeSet.add(key2);
-                        edges.push({ from: speaker, to: cat, relation: "raised" });
-                    }
+                    addNode(cat, "Category", cat, 1.5);
+                    addEdge("Start", cat, "contains");
+                    addEdge(speaker, cat, "raised");
                 }
             }
         }
@@ -463,6 +493,9 @@ export function buildLocalGraph(
         // Extract meaningful phrases using improved heuristics
         const text = t.text || "";
         const words = text.split(/\s+/);
+
+        // Track concepts found in this transcript for co-occurrence
+        const thisTranscriptConcepts: string[] = [];
 
         // Extract multi-word proper nouns (consecutive capitalized words)
         const phrases: string[] = [];
@@ -524,57 +557,63 @@ export function buildLocalGraph(
             // Determine entity type based on content — extended for concepts
             const entityType = classifyEntityType(phrase);
 
-            if (!nodeMap.has(phrase)) {
-                nodeMap.set(phrase, {
-                    id: phrase,
-                    type: entityType,
-                    label: phrase,
-                    weight: 1,
-                });
-                const key = `Start|${phrase}|mentions`;
-                if (!edgeSet.has(key)) {
-                    edgeSet.add(key);
-                    edges.push({ from: "Start", to: phrase, relation: "mentions" });
-                }
-            }
+            addNode(phrase, entityType, phrase, 1.3);
+            addEdge("Start", phrase, "mentions");
+            thisTranscriptConcepts.push(phrase);
 
             // Connect speaker to entity
             if (!topics.has(phrase)) {
                 topics.add(phrase);
-                const key = `${speaker}|${phrase}|discussed`;
-                if (!edgeSet.has(key)) {
-                    edgeSet.add(key);
-                    edges.push({ from: speaker, to: phrase, relation: "discussed" });
-                }
+                addEdge(speaker, phrase, "discussed");
             }
+        }
+
+        // Also extract concepts from lowercase text (Whisper output is often lowercase)
+        // Use the same suffix/frequency approach per-sentence
+        const sentences = text.split(/[.!?]+/).filter(s => s.trim().length > 5);
+        for (const sentence of sentences) {
+            const sWords = sentence.trim().split(/\s+/)
+                .map(w => w.replace(/[.,!?;:'"()\[\]{}]/g, "").trim())
+                .filter(w => w.length > 3 && !stopWords.has(w.toLowerCase()));
+            // Add individual content words to frequency map
+            for (const w of sWords) {
+                const lower = w.toLowerCase();
+                wordFrequency.set(lower, (wordFrequency.get(lower) || 0) + 1);
+            }
+            // Also extract sentence-level bigrams
+            for (let i = 0; i < sWords.length - 1; i++) {
+                const bigram = `${sWords[i]} ${sWords[i + 1]}`.toLowerCase();
+                wordFrequency.set(bigram, (wordFrequency.get(bigram) || 0) + 1);
+            }
+        }
+
+        if (thisTranscriptConcepts.length > 0) {
+            sentenceConcepts.push(thisTranscriptConcepts);
         }
     }
 
-    // Add high-frequency words/bigrams as topic nodes (mentioned 2+ times)
+    // === STRATEGY 3: Add high-frequency words/bigrams as topic nodes ===
     for (const [word, count] of wordFrequency) {
-        if (count >= 2 && !stopWords.has(word)) {
-            const capitalized = word
-                .split(" ")
-                .map((w: string) => w.charAt(0).toUpperCase() + w.slice(1))
-                .join(" ");
-            if (!nodeMap.has(capitalized)) {
-                const entityType = classifyEntityType(capitalized);
-                nodeMap.set(capitalized, {
-                    id: capitalized,
-                    type: entityType,
-                    label: capitalized,
-                    weight: Math.min(count, 4),
-                });
-                const key = `Start|${capitalized}|topic`;
-                if (!edgeSet.has(key)) {
-                    edgeSet.add(key);
-                    edges.push({ from: "Start", to: capitalized, relation: "topic" });
-                }
+        if (count >= 2 && !stopWords.has(word) && word.length > 3) {
+            const conceptId = capitalize(word);
+            if (!nodeMap.has(conceptId)) {
+                const entityType = classifyEntityType(conceptId);
+                addNode(conceptId, entityType, conceptId, Math.min(count, 4));
+                addEdge("Start", conceptId, "topic");
             }
         }
     }
 
-    // Create cross-concept relationships for concepts sharing speakers
+    // === STRATEGY 4: Co-occurrence edges between concepts found in the same transcript ===
+    for (const concepts of sentenceConcepts) {
+        for (let i = 0; i < concepts.length; i++) {
+            for (let j = i + 1; j < concepts.length && j < i + 4; j++) {
+                addEdge(concepts[i], concepts[j], "related_to");
+            }
+        }
+    }
+
+    // Cross-concept relationships for concepts sharing speakers
     const conceptsBySpeaker = new Map<string, string[]>();
     for (const [spk, topicSet] of speakerTopics) {
         conceptsBySpeaker.set(spk, Array.from(topicSet));
@@ -582,14 +621,12 @@ export function buildLocalGraph(
     for (const [_spk, concepts] of conceptsBySpeaker) {
         for (let i = 0; i < concepts.length; i++) {
             for (let j = i + 1; j < concepts.length && j < i + 3; j++) {
-                const key = `${concepts[i]}|${concepts[j]}|related_to`;
-                if (!edgeSet.has(key)) {
-                    edgeSet.add(key);
-                    edges.push({ from: concepts[i], to: concepts[j], relation: "related_to" });
-                }
+                addEdge(concepts[i], concepts[j], "related_to");
             }
         }
     }
+
+    console.log(`[LocalGraph] Built ${nodeMap.size} nodes, ${edges.length} edges from ${transcripts.length} transcripts`);
 
     return {
         nodes: Array.from(nodeMap.values()),

@@ -2,10 +2,19 @@ use std::sync::{Mutex as StdMutex, Arc};
 use tauri::{AppHandle, Emitter};
 use whisper_rs::{WhisperContext, WhisperContextParameters, FullParams, SamplingStrategy};
 use std::path::PathBuf;
+use crossbeam_channel;
 
 // ============================================================================
 // WHISPER CLIENT - Local Speech-to-Text (v0.13 API)
 // ============================================================================
+
+/// Request sent to the persistent worker thread for transcription
+pub struct WhisperWorkerRequest {
+    audio_samples: Vec<f32>,
+    language: String,
+    previous_context: Option<String>,
+    reply: tokio::sync::oneshot::Sender<Result<TranscriptionResult, String>>,
+}
 
 pub struct WhisperState {
     pub is_initialized: StdMutex<bool>,
@@ -13,6 +22,10 @@ pub struct WhisperState {
     pub language: StdMutex<String>,
     pub context_history: StdMutex<Vec<String>>, // Previous transcriptions for context
     pub whisper_ctx: StdMutex<Option<Arc<WhisperContext>>>, // Cached context - avoids reloading model every time
+    /// Channel to send work to the persistent worker thread.
+    /// The worker creates the WhisperState ONCE (~236MB) and reuses it,
+    /// eliminating the repeated alloc/dealloc cycle that caused GGML OOM crashes.
+    pub worker_tx: StdMutex<Option<crossbeam_channel::Sender<WhisperWorkerRequest>>>,
 }
 
 impl Default for WhisperState {
@@ -23,6 +36,7 @@ impl Default for WhisperState {
             language: StdMutex::new("auto".to_string()), // Auto-detect: supports English + Urdu
             context_history: StdMutex::new(Vec::new()),
             whisper_ctx: StdMutex::new(None),
+            worker_tx: StdMutex::new(None),
         }
     }
 }
@@ -63,8 +77,61 @@ pub async fn initialize_whisper(
         WhisperContextParameters::default(),
     ).map_err(|e| format!("Failed to load Whisper model: {:?}", e))?;
     
-    *state.whisper_ctx.lock().unwrap() = Some(Arc::new(ctx));
+    let ctx = Arc::new(ctx);
+    *state.whisper_ctx.lock().unwrap() = Some(Arc::clone(&ctx));
     *state.model_path.lock().unwrap() = Some(model_path.clone());
+    
+    // === PERSISTENT WORKER THREAD ===
+    // Creates a WhisperState (inference state) ONCE (~236MB of compute buffers)
+    // and reuses it for ALL transcription calls. This eliminates the repeated
+    // malloc/free cycle that caused GGML_ASSERT(ctx->mem_buffer != NULL) crashes
+    // due to heap fragmentation in debug mode.
+    let (tx, rx) = crossbeam_channel::bounded::<WhisperWorkerRequest>(2);
+    
+    let worker_ctx = Arc::clone(&ctx);
+    let worker_handle = std::thread::Builder::new()
+        .name("whisper-worker".into())
+        .stack_size(32 * 1024 * 1024) // 32MB stack for GGML compute graphs
+        .spawn(move || {
+            println!("[WHISPER-WORKER] Creating inference state (one-time ~236MB allocation)...");
+            let mut inference_state = match worker_ctx.create_state() {
+                Ok(s) => {
+                    println!("[WHISPER-WORKER] ✓ Inference state created successfully — will be reused for all calls");
+                    s
+                }
+                Err(e) => {
+                    println!("[WHISPER-WORKER] ✗ Failed to create inference state: {:?}", e);
+                    // Drain channel so senders don't block forever
+                    while let Ok(req) = rx.recv() {
+                        let _ = req.reply.send(Err(format!("Whisper state creation failed: {:?}", e)));
+                    }
+                    return;
+                }
+            };
+            
+            // Process transcription requests serially — state is reused each time
+            while let Ok(req) = rx.recv() {
+                let result = run_transcription_on_state(
+                    &mut inference_state,
+                    &req.audio_samples,
+                    &req.language,
+                    req.previous_context.as_deref(),
+                );
+                let _ = req.reply.send(result);
+            }
+            println!("[WHISPER-WORKER] Worker thread exiting (channel closed)");
+        });
+    
+    match worker_handle {
+        Ok(_) => {
+            println!("[WHISPER-WORKER] ✓ Persistent worker thread spawned");
+            *state.worker_tx.lock().unwrap() = Some(tx);
+        }
+        Err(e) => {
+            return Err(format!("Failed to spawn whisper worker thread: {}", e));
+        }
+    }
+    
     *state.is_initialized.lock().unwrap() = true;
     
     println!("[WHISPER] ✓ Model loaded: {:?}", model_path);
@@ -120,8 +187,106 @@ pub fn get_whisper_status(state: tauri::State<'_, WhisperState>) -> Result<Strin
 }
 
 // ============================================================================
-// Transcription - Optimized with cached context + spawn_blocking
+// Transcription - via persistent worker thread (cached state, no re-alloc)
 // ============================================================================
+
+/// Internal: run transcription on the cached inference state.
+/// Called only from the persistent worker thread.
+fn run_transcription_on_state(
+    state: &mut whisper_rs::WhisperState,
+    audio_samples: &[f32],
+    language: &str,
+    previous_context: Option<&str>,
+) -> Result<TranscriptionResult, String> {
+    let duration_secs = audio_samples.len() as f32 / 16000.0;
+    let start_time = std::time::Instant::now();
+    
+    // Greedy with best_of=2: runs 2 candidates and picks the best.
+    let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 2 });
+    
+    // Language handling
+    if language == "auto" {
+        params.set_language(None);
+    } else {
+        params.set_language(Some(language));
+    }
+    params.set_translate(false);
+    params.set_print_special(false);
+    params.set_print_progress(false);
+    params.set_print_realtime(false);
+    params.set_print_timestamps(false);
+    params.set_single_segment(false);    // Allow multiple segments
+    // Use more threads for CPU-only transcription to reduce latency
+    let cpu_threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .min(8);   // Cap at 8 to avoid contention
+    params.set_n_threads(cpu_threads as i32);
+    
+    // Accuracy-tuned settings
+    params.set_temperature(0.0);
+    params.set_temperature_inc(0.2);
+    params.set_no_speech_thold(0.7);
+    params.set_entropy_thold(2.0);
+    params.set_logprob_thold(-0.5);
+    params.set_suppress_blank(true);
+    
+    // Prompt for better word accuracy
+    let base_prompt = "Transcribe the following speech exactly as spoken. The speech may be in English, Urdu, or a mix of both (code-switching). For English parts use correct English words and proper nouns. For Urdu parts write in Roman Urdu (Latin script transliteration e.g. 'kya haal hai' not 'کیا حال ہے'). Do not hallucinate or invent words.";
+    
+    let full_prompt = if let Some(context) = previous_context {
+        let context_snippet = if context.len() > 150 {
+            &context[context.len() - 150..]
+        } else {
+            context
+        };
+        format!("{} Previous: {}", base_prompt, context_snippet)
+    } else {
+        base_prompt.to_string()
+    };
+    
+    params.set_initial_prompt(&full_prompt);
+    
+    // Run transcription on the REUSED state (no create_state() — no 236MB alloc!)
+    state.full(params, audio_samples)
+        .map_err(|e| format!("Transcription failed: {:?}", e))?;
+    
+    // Collect results
+    let num_segments = state.full_n_segments()
+        .map_err(|e| format!("Failed to get segments: {:?}", e))?;
+    
+    let mut full_result = String::new();
+    let mut segment_count = 0;
+    for i in 0..num_segments {
+        if let Ok(seg) = state.full_get_segment_text(i) {
+            let trimmed = seg.trim();
+            if !trimmed.is_empty() {
+                if !full_result.is_empty() && !full_result.ends_with(' ') {
+                    full_result.push(' ');
+                }
+                full_result.push_str(trimmed);
+                segment_count += 1;
+            }
+        }
+    }
+    
+    let elapsed = start_time.elapsed();
+    println!("[WHISPER] Processed {} segments from {:.1}s audio in {:.1}s (speedup: {:.1}x)", 
+             segment_count, duration_secs, elapsed.as_secs_f32(),
+             duration_secs / elapsed.as_secs_f32().max(0.001));
+    
+    let confidence = 0.85;
+    
+    println!("[WHISPER] ✓ Transcription: '{}' (confidence: {:.2})", 
+             if full_result.len() > 80 { &full_result[..80] } else { &full_result },
+             confidence);
+    
+    Ok(TranscriptionResult {
+        text: full_result.trim().to_string(),
+        language: language.to_string(),
+        confidence,
+    })
+}
 
 pub async fn transcribe_audio_with_context(
     ctx: Arc<WhisperContext>,
@@ -132,112 +297,106 @@ pub async fn transcribe_audio_with_context(
     let duration_secs = audio_samples.len() as f32 / 16000.0;
     println!("[WHISPER] Transcribing {:.1}s of audio ({} samples)...", duration_secs, audio_samples.len());
     
-    // Run CPU-intensive transcription in a blocking thread pool with a timeout.
-    // CPU-only Whisper can take ~10-20x real-time on a typical machine.
-    // For 30s audio that could be 5-10 minutes, so scale timeout generously.
+    // Truncate to 15s to prevent extremely long transcriptions
+    let max_samples = 16000 * 15; // 15 seconds
+    let audio_samples = if audio_samples.len() > max_samples {
+        println!("[WHISPER] ⚠ Audio too long ({:.1}s), truncating to 15s", duration_secs);
+        audio_samples[..max_samples].to_vec()
+    } else {
+        audio_samples
+    };
+    let duration_secs = audio_samples.len() as f32 / 16000.0;
+    
     let timeout_secs = (duration_secs * 30.0).max(90.0).min(600.0) as u64;
-    let task = tokio::task::spawn_blocking(move || {
-        let start_time = std::time::Instant::now();
-        
-        // Create inference state from the CACHED context (fast - no model reload!)
-        let mut state = ctx.create_state()
-            .map_err(|e| format!("Failed to create Whisper state: {:?}", e))?;
-        
-        // Greedy with best_of=2: runs 2 candidates and picks the best.
-        // Nearly same speed as best_of=1 (parallel internally) but catches
-        // misheard words that single-pass misses.
-        let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 2 });
-        
-        // Language handling
-        if language == "auto" {
-            params.set_language(None);
-        } else {
-            params.set_language(Some(&language));
-        }
-        params.set_translate(false);
-        params.set_print_special(false);
-        params.set_print_progress(false);
-        params.set_print_realtime(false);
-        params.set_print_timestamps(false);
-        params.set_single_segment(false);    // Allow multiple segments
-        // Use more threads for CPU-only transcription to reduce latency
-        let cpu_threads = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(4)
-            .min(8);   // Cap at 8 to avoid contention
-        params.set_n_threads(cpu_threads as i32);
-        
-        // Accuracy-tuned settings (no speed cost — these are decoder filters)
-        params.set_temperature(0.0);          // Deterministic first pass
-        params.set_temperature_inc(0.2);      // Fallback increment if first pass fails
-        params.set_no_speech_thold(0.7);      // Stricter: reject segments Whisper thinks are not speech (raised from 0.6)
-        params.set_entropy_thold(2.0);        // Tighter: reject garbled/uncertain segments (was 2.2)
-        params.set_logprob_thold(-0.5);       // Reject low-confidence tokens more aggressively (was -0.8)
-        params.set_suppress_blank(true);
-        
-        // Richer prompt for better word accuracy, with bilingual English/Urdu support
-        // Whisper may output Urdu in Arabic script — Gemini will convert to Roman Urdu later
-        let base_prompt = "Transcribe the following speech exactly as spoken. The speech may be in English, Urdu, or a mix of both (code-switching). For English parts use correct English words and proper nouns. For Urdu parts write in Roman Urdu (Latin script transliteration e.g. 'kya haal hai' not 'کیا حال ہے'). Do not hallucinate or invent words.";
-        
-        let full_prompt = if let Some(ref context) = previous_context {
-            let context_snippet = if context.len() > 150 {
-                &context[context.len() - 150..]
-            } else {
-                context.as_str()
-            };
-            format!("{} Previous: {}", base_prompt, context_snippet)
-        } else {
-            base_prompt.to_string()
-        };
-        
-        params.set_initial_prompt(&full_prompt);
-        
-        // Run transcription
-        state.full(params, &audio_samples)
-            .map_err(|e| format!("Transcription failed: {:?}", e))?;
-        
-        // Collect results
-        let num_segments = state.full_n_segments()
-            .map_err(|e| format!("Failed to get segments: {:?}", e))?;
-        
-        let mut full_result = String::new();
-        let mut segment_count = 0;
-        for i in 0..num_segments {
-            if let Ok(seg) = state.full_get_segment_text(i) {
-                let trimmed = seg.trim();
-                if !trimmed.is_empty() {
-                    if !full_result.is_empty() && !full_result.ends_with(' ') {
-                        full_result.push(' ');
-                    }
-                    full_result.push_str(trimmed);
-                    segment_count += 1;
-                }
-            }
-        }
-        
-        let elapsed = start_time.elapsed();
-        println!("[WHISPER] Processed {} segments from {:.1}s audio in {:.1}s (speedup: {:.1}x)", 
-                 segment_count, duration_secs, elapsed.as_secs_f32(),
-                 duration_secs / elapsed.as_secs_f32().max(0.001));
-        
-        let confidence = 0.85;
-        
-        println!("[WHISPER] ✓ Transcription: '{}' (confidence: {:.2})", 
-                 if full_result.len() > 80 { &full_result[..80] } else { &full_result },
-                 confidence);
-        
-        Ok(TranscriptionResult {
-            text: full_result.trim().to_string(),
-            language: language.to_string(),
-            confidence,
-        })
+    
+    // Try to use the persistent worker thread (preferred — no 236MB re-alloc)
+    // The worker_tx is set during initialize_whisper()
+    // We need to access it through the WhisperState, but we only have the ctx Arc here.
+    // Fall back to spawn approach if worker is unavailable.
+    // NOTE: The caller in gemini_client.rs should prefer the worker path.
+    
+    // Fallback: spawn a new thread (old approach, kept for transcribe_audio_chunk command)
+    let (tx, rx) = tokio::sync::oneshot::channel::<Result<TranscriptionResult, String>>();
+    let thread_result = std::thread::Builder::new()
+        .name("whisper-transcribe".into())
+        .stack_size(32 * 1024 * 1024) // 32MB stack
+        .spawn(move || {
+            let start_time = std::time::Instant::now();
+            
+            // Create inference state from the CACHED context
+            let mut state = ctx.create_state()
+                .map_err(|e| format!("Failed to create Whisper state: {:?}", e))?;
+            
+            let result = run_transcription_on_state(
+                &mut state,
+                &audio_samples,
+                &language,
+                previous_context.as_deref(),
+            );
+            
+            result
+        });
+
+    if let Err(e) = thread_result {
+        return Err(format!("Failed to spawn whisper thread: {}", e));
+    }
+
+    let handle = thread_result.unwrap();
+    
+    let join_future = tokio::task::spawn_blocking(move || {
+        handle.join().map_err(|_| "Whisper thread panicked".to_string())
     });
 
-    match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), task).await {
-        Ok(join_result) => join_result.map_err(|e| format!("Transcription task join error: {}", e))?,
+    match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), join_future).await {
+        Ok(Ok(Ok(result))) => result,
+        Ok(Ok(Err(thread_err))) => Err(thread_err),
+        Ok(Err(join_err)) => Err(format!("Transcription task join error: {}", join_err)),
         Err(_) => {
             println!("[WHISPER] ⚠ Transcription timed out after {}s for {:.1}s audio", timeout_secs, duration_secs);
             Err(format!("Transcription timed out after {}s (CPU-only mode is slow — try shorter speech segments)", timeout_secs))
+        }
+    }
+}
+
+/// Transcribe audio using the persistent worker thread.
+/// This is the preferred path — reuses the cached inference state (no 236MB re-alloc).
+/// Returns Err if the worker is not available (e.g., not yet initialized).
+pub async fn transcribe_audio_via_worker(
+    worker_tx: &crossbeam_channel::Sender<WhisperWorkerRequest>,
+    audio_samples: Vec<f32>,
+    language: String,
+    previous_context: Option<String>,
+) -> Result<TranscriptionResult, String> {
+    let duration_secs = audio_samples.len() as f32 / 16000.0;
+    println!("[WHISPER] Transcribing {:.1}s of audio ({} samples) via worker...", duration_secs, audio_samples.len());
+    
+    // Truncate to 15s
+    let max_samples = 16000 * 15;
+    let audio_samples = if audio_samples.len() > max_samples {
+        println!("[WHISPER] ⚠ Audio too long ({:.1}s), truncating to 15s", duration_secs);
+        audio_samples[..max_samples].to_vec()
+    } else {
+        audio_samples
+    };
+    let duration_secs = audio_samples.len() as f32 / 16000.0;
+    
+    let timeout_secs = (duration_secs * 30.0).max(90.0).min(600.0) as u64;
+    
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    
+    worker_tx.send(WhisperWorkerRequest {
+        audio_samples,
+        language,
+        previous_context,
+        reply: reply_tx,
+    }).map_err(|_| "Whisper worker thread not available (channel closed)".to_string())?;
+    
+    match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), reply_rx).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(_)) => Err("Whisper worker dropped the reply channel".to_string()),
+        Err(_) => {
+            println!("[WHISPER] ⚠ Worker transcription timed out after {}s for {:.1}s audio", timeout_secs, duration_secs);
+            Err(format!("Transcription timed out after {}s", timeout_secs))
         }
     }
 }

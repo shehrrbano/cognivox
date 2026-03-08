@@ -197,6 +197,9 @@
     let isGeneratingGraph = false;
     let extractError: string | null = null;
     let localInsights: any[] = [];
+    // Timer for promoting partial transcripts when Gemini is unresponsive
+    let partialPromotionTimer: ReturnType<typeof setTimeout> | null = null;
+    const PARTIAL_PROMOTION_DELAY_MS = 15_000; // 15 seconds
 
     // ============================================================
     // REACTIVE STATEMENTS
@@ -299,6 +302,58 @@
     }
     function retryProcessing() {
         runProcessingFlow(5);
+    }
+
+    /**
+     * Promote partial (Whisper-only) transcripts to final transcripts.
+     * Called when Gemini is unresponsive (rate-limited / 429) so that
+     * graph building and post-processing can still use the text.
+     */
+    function promotePartialTranscripts(): number {
+        let promoted = 0;
+        transcripts = transcripts.map((t) => {
+            if (t.isPartial) {
+                promoted++;
+                return { ...t, isPartial: false };
+            }
+            return t;
+        });
+        if (promoted > 0) {
+            console.log(
+                `[PARTIAL-PROMO] Promoted ${promoted} partial transcripts to final`,
+            );
+        }
+        return promoted;
+    }
+
+    /**
+     * Schedule a timer to promote partials if Gemini doesn't respond.
+     * Resets on each new Whisper event so we only promote after sustained silence from Gemini.
+     */
+    function schedulePartialPromotion() {
+        if (partialPromotionTimer) clearTimeout(partialPromotionTimer);
+        partialPromotionTimer = setTimeout(() => {
+            const partials = transcripts.filter((t) => t.isPartial);
+            if (partials.length > 0) {
+                console.log(
+                    `[PARTIAL-PROMO] Gemini silent for ${PARTIAL_PROMOTION_DELAY_MS / 1000}s — promoting ${partials.length} partials`,
+                );
+                promotePartialTranscripts();
+                // Build a quick local graph from the promoted transcripts
+                const localGraph = buildGraphFromTranscripts(
+                    transcripts,
+                    graphNodes,
+                    graphEdges,
+                );
+                const cleaned = applyGraphQualityRules(
+                    localGraph.nodes,
+                    localGraph.edges,
+                );
+                graphNodes = cleaned.nodes;
+                graphEdges = cleaned.edges;
+            }
+            partialPromotionTimer = null;
+        }, PARTIAL_PROMOTION_DELAY_MS);
     }
 
     // ============================================================
@@ -898,6 +953,19 @@
                     },
                 ];
             }
+            // Promote any remaining partial transcripts before processing
+            const promoted = promotePartialTranscripts();
+            if (promoted > 0) {
+                console.log(
+                    `[PROCESSING] Promoted ${promoted} partial transcripts before processing`,
+                );
+            }
+            // Clear the promotion timer since we've handled it
+            if (partialPromotionTimer) {
+                clearTimeout(partialPromotionTimer);
+                partialPromotionTimer = null;
+            }
+
             if (transcripts.length === 0) {
                 processingStep = 7;
                 status = "No speech detected in recording.";
@@ -971,6 +1039,36 @@
                 );
                 graphNodes = clustered.nodes;
                 graphEdges = clustered.edges;
+            }
+            // Fallback: if graph is still very thin after all extraction attempts,
+            // force a local-only rebuild from raw transcript text
+            const nonRootNodes = graphNodes.filter(
+                (n) => n.type !== "Root" && n.type !== "Speaker",
+            );
+            if (nonRootNodes.length < 3 && transcripts.length > 0) {
+                console.log(
+                    "[PROCESSING] Graph too thin — forcing local-only rebuild",
+                );
+                status = "Building local knowledge graph...";
+                const localResult = await extractKnowledgeGraph(
+                    transcripts,
+                    [{ id: "Start", type: "Root", label: "Start", weight: 3 }],
+                    [],
+                    () => null, // Force local extraction by passing no API key
+                );
+                const localCleaned = applyGraphQualityRules(
+                    localResult.nodes,
+                    localResult.edges,
+                );
+                _originalGraphNodes = [...localCleaned.nodes];
+                _originalGraphEdges = [...localCleaned.edges];
+                const localClustered = autoClusterGraph(
+                    localCleaned.nodes,
+                    localCleaned.edges,
+                    20,
+                );
+                graphNodes = localClustered.nodes;
+                graphEdges = localClustered.edges;
             }
             console.log(
                 `[PROCESSING] Step 4 complete. Graph: ${graphNodes.length} nodes, ${graphEdges.length} edges`,
@@ -1266,6 +1364,10 @@
                                     transcripts.length,
                                 );
                             }
+                            // Schedule promotion in case Gemini never responds (rate-limited)
+                            if (isRecording) {
+                                schedulePartialPromotion();
+                            }
                         }
                     },
                 );
@@ -1360,6 +1462,7 @@
         if (unlistenTranscript) unlistenTranscript();
         if (unlistenIntelligence) unlistenIntelligence();
         if (unlistenBackendErrors) unlistenBackendErrors();
+        if (partialPromotionTimer) clearTimeout(partialPromotionTimer);
         document.removeEventListener("keydown", handleKeyDown);
         window.removeEventListener("beforeunload", handleBeforeUnload);
     });
