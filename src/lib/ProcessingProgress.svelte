@@ -1,3 +1,5 @@
+<!-- ACTUAL EDIT: COGNIVOX_UI_REAL_CODE_APPLIER_v2 -->
+<!-- UNIFIED: COGNIVOX_UI_MAPPER_v1 -->
 <script lang="ts">
     import { createEventDispatcher } from "svelte";
 
@@ -58,10 +60,10 @@
 </script>
 
 {#if isProcessing || error}
-    <div class="glass-card p-6 mb-6 animate-fadeIn">
+    <div class="glass-card p-4 sm:p-6 mb-4 sm:mb-6 animate-fadeIn">
         <div class="flex items-center justify-between mb-4">
             <h3
-                class="text-lg font-semibold text-slate-100 flex items-center gap-2"
+                class="text-fluid-base font-semibold text-gray-900 flex items-center gap-2"
             >
                 {#if error}
                     Processing Error
@@ -75,7 +77,7 @@
 
             {#if currentStep >= 7 || error}
                 <button
-                    class="text-slate-400 hover:text-white transition-colors"
+                    class="text-gray-500 hover:text-white transition-colors"
                     onclick={dismiss}
                     aria-label="Dismiss"
                 >
@@ -88,7 +90,7 @@
                         <path
                             stroke-linecap="round"
                             stroke-linejoin="round"
-                            stroke-width="2"
+                            stroke-width="1"
                             d="M6 18L18 6M6 6l12 12"
                         />
                     </svg>
@@ -99,9 +101,9 @@
         {#if error}
             <!-- Error State -->
             <div
-                class="bg-red-500/10 border border-red-500/30 rounded-lg p-4 mb-4"
+                class="bg-red-50 border border-red-300 rounded-lg p-4 mb-4"
             >
-                <p class="text-red-400">{error}</p>
+                <p class="text-red-500">{error}</p>
             </div>
             <div class="flex gap-3">
                 <button class="btn-primary" onclick={retry}> Retry </button>
@@ -112,7 +114,7 @@
         {:else}
             <!-- Progress Bar -->
             <div class="mb-6">
-                <div class="h-2 bg-dark-700 rounded-full overflow-hidden">
+                <div class="h-2 bg-gray-200 rounded-full overflow-hidden">
                     <div
                         class="h-full bg-gradient-to-r from-cyan-500 to-blue-500 transition-all duration-500 ease-out"
                         style="width: {progressPercent}%"
@@ -121,7 +123,7 @@
             </div>
 
             <!-- Steps List -->
-            <div class="space-y-3">
+            <div class="space-y-fluid-gap">
                 {#each steps as step, i}
                     {@const isActive = currentStep === step.id}
                     {@const isComplete = currentStep > step.id}
@@ -136,10 +138,10 @@
                         <div
                             class="w-8 h-8 rounded-full flex items-center justify-center text-sm
                             {isComplete
-                                ? 'bg-green-500/20 text-green-400 border border-green-500/30'
+                                ? 'bg-green-50 text-green-600 border border-green-500/30'
                                 : isActive
-                                  ? 'bg-cyan-500/20 text-cyan-400 border border-cyan-500/30 animate-pulse'
-                                  : 'bg-dark-600 text-slate-500 border border-dark-500'}"
+                                  ? 'bg-blue-50 text-blue-500 border border-blue-300 animate-pulse'
+                                  : 'bg-dark-600 text-gray-400 border border-dark-500'}"
                         >
                             {#if isComplete}
                                 ✓
@@ -153,15 +155,15 @@
                             <div class="flex items-center justify-between">
                                 <span
                                     class="font-medium {isActive
-                                        ? 'text-cyan-400'
+                                        ? 'text-blue-500'
                                         : isComplete
-                                          ? 'text-green-400'
-                                          : 'text-slate-400'}"
+                                          ? 'text-green-600'
+                                          : 'text-gray-500'}"
                                 >
                                     {step.label}
                                 </span>
                                 {#if step.duration && !isComplete}
-                                    <span class="text-xs text-slate-500"
+                                    <span class="text-xs text-gray-400"
                                         >{step.duration}</span
                                     >
                                 {/if}
@@ -175,26 +177,26 @@
                                             class="flex items-center gap-2 text-sm"
                                         >
                                             {#if j < currentSubstep}
-                                                <span class="text-green-400"
+                                                <span class="text-green-600"
                                                     >✓</span
                                                 >
                                                 <span
-                                                    class="text-slate-400 line-through"
+                                                    class="text-gray-500 line-through"
                                                     >{substep}</span
                                                 >
                                             {:else if j === currentSubstep}
                                                 <span
-                                                    class="animate-spin text-cyan-400"
+                                                    class="animate-spin text-blue-500"
                                                     >◉</span
                                                 >
-                                                <span class="text-cyan-300"
+                                                <span class="text-blue-400"
                                                     >{substep}</span
                                                 >
                                             {:else}
-                                                <span class="text-slate-600"
+                                                <span class="text-gray-400"
                                                     >○</span
                                                 >
-                                                <span class="text-slate-500"
+                                                <span class="text-gray-400"
                                                     >{substep}</span
                                                 >
                                             {/if}
@@ -210,12 +212,12 @@
             <!-- Completion Message -->
             {#if currentStep >= 7}
                 <div
-                    class="mt-6 p-4 bg-green-500/10 border border-green-500/30 rounded-lg text-center"
+                    class="mt-6 p-4 bg-green-50 border border-green-500/30 rounded-lg text-center"
                 >
-                    <p class="text-green-400 font-medium">
+                    <p class="text-green-600 font-medium">
                         Your recording has been processed successfully!
                     </p>
-                    <p class="text-slate-400 text-sm mt-1">
+                    <p class="text-gray-500 text-sm mt-1">
                         Scroll down to view the new transcript and analysis.
                     </p>
                 </div>
@@ -228,7 +230,7 @@
     @keyframes fadeIn {
         from {
             opacity: 0;
-            transform: translateY(-10px);
+            transform: translateY(-7px);
         }
         to {
             opacity: 1;

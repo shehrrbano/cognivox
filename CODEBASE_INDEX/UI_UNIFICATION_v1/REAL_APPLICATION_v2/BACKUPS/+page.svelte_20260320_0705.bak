@@ -1,0 +1,1738 @@
+<!-- UNIFIED: COGNIVOX_UI_MAPPER_v1 -->
+<script lang="ts">
+    import { invoke } from "@tauri-apps/api/core";
+    import { listen } from "@tauri-apps/api/event";
+    import { getCurrentWindow } from "@tauri-apps/api/window";
+    import { onMount, onDestroy } from "svelte";
+    import Diagnostics from "$lib/Diagnostics.svelte";
+    import RecordingOverlay from "$lib/RecordingOverlay.svelte";
+    import ProcessingProgress from "$lib/ProcessingProgress.svelte";
+    import SettingsModal from "$lib/SettingsModal.svelte";
+    import LiveRecordingPanel from "$lib/LiveRecordingPanel.svelte";
+    import StatusBar from "$lib/StatusBar.svelte";
+    import { vadManager, type VADState } from "$lib/vadManager";
+    import {
+        intelligenceExtractor,
+        type ExtractedInsights,
+    } from "$lib/intelligenceExtractor";
+    import { FirestoreSessionManager } from "$lib/firestoreSessionManager";
+    import { getCurrentUser, initFirebase, waitForAuth } from "$lib/firebase";
+    import { keyManager, type KeyManagerState } from "$lib/keyManager";
+
+    // === UI COMPONENTS ===
+    import DebugBar from "$lib/DebugBar.svelte";
+    import Sidebar from "$lib/Sidebar.svelte";
+    import MainHeader from "$lib/MainHeader.svelte";
+    import TranscriptView from "$lib/TranscriptView.svelte";
+    import SummaryPanel from "$lib/SummaryPanel.svelte";
+    import MemoriesPanel from "$lib/MemoriesPanel.svelte";
+    import AlertsTab from "$lib/AlertsTab.svelte";
+    import AnalyticsTab from "$lib/AnalyticsTab.svelte";
+    import SettingsTab from "$lib/SettingsTab.svelte";
+    import SpeakersTab from "$lib/SpeakersTab.svelte";
+    import GraphTab from "$lib/GraphTab.svelte";
+    import BottomActionBar from "$lib/BottomActionBar.svelte";
+    import ToastNotification from "$lib/ToastNotification.svelte";
+
+    // === SERVICE MODULES ===
+    import type {
+        Transcript,
+        GraphNode,
+        GraphEdge,
+        ExtractedSummary,
+        ExtractedMemoriesData,
+        SpeakerIdStatus,
+        SpeakerProfile,
+        IdentifiedSpeaker,
+        RestoredState,
+        SnapshotParams,
+    } from "$lib/types";
+    import {
+        parseGeminiPayload,
+        createTranscriptEntry,
+        buildGraphFromSegment,
+        buildGraphFromTranscripts,
+        analyzeToneDistribution,
+        createPartialTranscript,
+    } from "$lib/services/geminiProcessor";
+    import {
+        buildSessionSnapshot,
+        updatePastSessionsList,
+        persistSnapshotToDisk,
+        loadFullSession,
+        parseSessionIntoState,
+        fetchAllSessions,
+        buildSessionJson,
+        saveSessionToDisk,
+        syncSessionToCloud,
+        deleteSession as deleteSessionService,
+        recoverPendingSave,
+    } from "$lib/services/sessionService";
+    import {
+        extractSummary as doExtractSummary,
+        extractMemories as doExtractMemories,
+    } from "$lib/services/extractionService";
+    import {
+        extractKnowledgeGraph,
+        applyGraphQualityRules,
+        autoClusterGraph,
+        expandCluster,
+    } from "$lib/services/graphExtractionService";
+    import {
+        initializeSpeakerId as doInitSpeakerId,
+        refreshSpeakerIdStatus as doRefreshSpeakerStatus,
+        renameSpeaker as doRenameSpeaker,
+        clearSpeakerProfiles as doClearSpeakerProfiles,
+    } from "$lib/services/speakerService";
+    import {
+        connectGemini as doConnectGemini,
+        setupKeyManagerSubscription,
+        setupBackendEventListeners,
+        setupVADSubscription,
+        backgroundRecordingInit,
+        waitForTranscriptions,
+    } from "$lib/services/connectionService";
+
+    // ============================================================
+    // STATE DECLARATIONS
+    // ============================================================
+    let devices: string[] = [];
+    let status = "Ready";
+    let isRecording = false;
+    let forceNewSession = false;
+    let apiKey = "";
+    let isGeminiConnected = false;
+    let isRunningInTauri = true;
+
+    let selectedModel = "gemini-2.0-flash";
+    let availableModels = [
+        { id: "gemini-2.0-flash", name: "Gemini 2.0 Flash (Stable)" },
+        { id: "gemini-2.0-flash-lite", name: "Gemini 2.0 Flash Lite" },
+        {
+            id: "gemini-2.5-flash-preview-04-17",
+            name: "Gemini 2.5 Flash Preview",
+        },
+        { id: "gemini-1.5-flash", name: "Gemini 1.5 Flash (Fallback)" },
+    ];
+
+    let captureMode = "both";
+    let currentVolume = 0;
+    let volumeInterval: ReturnType<typeof setInterval> | null = null;
+    let autoSaveInterval: ReturnType<typeof setInterval> | null = null;
+    let pastSessions: any[] = [];
+    let sessionCache: Map<string, any> = new Map();
+    let isTyping = false;
+    let partialText = "";
+    let latencyMs = 0;
+    let searchQuery = "";
+    let searchFilter = "all";
+    let transcripts: Transcript[] = [];
+    let stressLevel = 0;
+    let engagementLevel = 0.3;
+    let urgencyLevel = 0;
+    let clarityLevel = 0.4;
+    let alerts: Array<{
+        id: string;
+        type: string;
+        message: string;
+        timestamp: string;
+        severity: "info" | "warning" | "critical";
+    }> = [];
+    let isProcessing = false;
+    let processingStep = 0;
+    let processingError: string | null = null;
+    let showSettingsModal = false;
+    let recordingStartTime: Date | null = null;
+    let speakerIdInitialized = false;
+    let speakerIdStatus: SpeakerIdStatus | null = null;
+    let speakerProfiles: SpeakerProfile[] = [];
+    let lastIdentifiedSpeaker: IdentifiedSpeaker | null = null;
+    let debugEventCount = 0;
+    let debugLastEvent = "";
+    let debugLastTranscript = "";
+    let keyState: KeyManagerState = keyManager.getState();
+    let isRateLimited = false;
+    let lastRequestTime: string | null = null;
+    let debugMode = false;
+    let toastMessage: string | null = null;
+    let toastType: "info" | "warning" | "error" = "info";
+    let vadState: VADState = vadManager.getState();
+    let vadUnsubscribe: (() => void) | null = null;
+    let chunkUnsubscribe: (() => void) | null = null;
+    let activeTab:
+        | "transcript"
+        | "graph"
+        | "alerts"
+        | "analytics"
+        | "settings"
+        | "speakers"
+        | "diagnostics" = "transcript";
+    let graphNodes: GraphNode[] = [];
+    let graphEdges: GraphEdge[] = [];
+    // Keep unclustered originals for expanding clusters
+    let _originalGraphNodes: GraphNode[] = [];
+    let _originalGraphEdges: GraphEdge[] = [];
+    let currentSession: any = {
+        id: crypto.randomUUID ? crypto.randomUUID() : `session_${Date.now()}`,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+        transcripts: [],
+        graph_nodes: [],
+        graph_edges: [],
+        metadata: {
+            title: "Untitled Meeting",
+            duration_seconds: 0,
+            total_transcripts: 0,
+            total_speakers: 0,
+            tags: [],
+        },
+        summary: null,
+    };
+    let isCollapsed = false;
+    let showSummaryPanel = false;
+    let showMemoriesPanel = false;
+    let extractedSummary: ExtractedSummary | null = null;
+    let extractedMemories: ExtractedMemoriesData | null = null;
+    let isExtractingSummary = false;
+    let isExtractingMemories = false;
+    let isGeneratingGraph = false;
+    let extractError: string | null = null;
+    let localInsights: any[] = [];
+    // Timer for promoting partial transcripts when Gemini is unresponsive
+    let partialPromotionTimer: ReturnType<typeof setTimeout> | null = null;
+    const PARTIAL_PROMOTION_DELAY_MS = 15_000; // 15 seconds
+
+    // ============================================================
+    // REACTIVE STATEMENTS
+    // ============================================================
+    $: {
+        if (currentSession) {
+            currentSession.transcripts = transcripts.map((t) => ({
+                timestamp: t.timestamp,
+                speaker_id: t.speaker,
+                text: t.text,
+                tone: t.tone || null,
+                category: t.category || null,
+                confidence: t.confidence || 0.5,
+            }));
+            currentSession.graph_nodes = graphNodes.map((n) => ({
+                id: n.id,
+                node_type: n.type,
+                metadata: {},
+            }));
+            currentSession.graph_edges = graphEdges.map((e) => ({
+                from: e.from,
+                to: e.to,
+                relation: e.relation,
+                weight: 1.0,
+            }));
+            currentSession.metadata.total_transcripts = transcripts.length;
+            currentSession.updated_at = new Date().toISOString();
+            currentSession.psychosomatic = {
+                stress: stressLevel || 0,
+                engagement: engagementLevel || 0,
+                urgency: urgencyLevel || 0,
+                clarity: clarityLevel || 0,
+            };
+            currentSession.insights = extractedSummary
+                ? {
+                      topics: extractedSummary.topics || [],
+                      decisions: extractedSummary.decisions || [],
+                      action_items: extractedSummary.actionItems || [],
+                      key_points: extractedSummary.keyPoints || [],
+                  }
+                : null;
+        }
+    }
+
+    $: displayText =
+        transcripts.length > 0
+            ? transcripts[transcripts.length - 1].text
+            : "No transcripts yet. Start recording to begin.";
+
+    // ============================================================
+    // UTILITY FUNCTIONS
+    // ============================================================
+    function showToast(
+        message: string,
+        type: "info" | "warning" | "error" = "info",
+    ) {
+        toastMessage = message;
+        toastType = type;
+        setTimeout(() => {
+            toastMessage = null;
+        }, 5000);
+    }
+
+    function getActiveApiKey(): string | null {
+        return keyManager.getCurrentKey()?.key || null;
+    }
+    function getActiveKeyName(): string {
+        return keyManager.getCurrentKeyInfo()?.name || "";
+    }
+    function getActiveKeyIndex(): number {
+        return keyManager.getCurrentKeyInfo()?.index || 1;
+    }
+    function loadApiKeysFromStorage() {
+        debugMode = localStorage.getItem("debug_mode") === "true";
+        keyState = keyManager.getState();
+    }
+    function openSettings() {
+        showSettingsModal = true;
+    }
+    function closeSettings() {
+        showSettingsModal = false;
+    }
+    function toggleCollapseState() {
+        isCollapsed = !isCollapsed;
+    }
+    function closeSummaryPanel() {
+        showSummaryPanel = false;
+    }
+    function closeMemoriesPanel() {
+        showMemoriesPanel = false;
+    }
+    function handleSettingsChange(settings: any) {
+        console.log("Settings updated:", settings);
+    }
+    function dismissProcessing() {
+        isProcessing = false;
+        processingStep = 0;
+        processingError = null;
+        status = "Ready";
+    }
+    function retryProcessing() {
+        runProcessingFlow(5);
+    }
+
+    /**
+     * Promote partial (Whisper-only) transcripts to final transcripts.
+     * Called when Gemini is unresponsive (rate-limited / 429) so that
+     * graph building and post-processing can still use the text.
+     */
+    function promotePartialTranscripts(): number {
+        let promoted = 0;
+        transcripts = transcripts.map((t) => {
+            if (t.isPartial) {
+                promoted++;
+                return { ...t, isPartial: false };
+            }
+            return t;
+        });
+        if (promoted > 0) {
+            console.log(
+                `[PARTIAL-PROMO] Promoted ${promoted} partial transcripts to final`,
+            );
+        }
+        return promoted;
+    }
+
+    /**
+     * Schedule a timer to promote partials if Gemini doesn't respond.
+     * Resets on each new Whisper event so we only promote after sustained silence from Gemini.
+     */
+    function schedulePartialPromotion() {
+        if (partialPromotionTimer) clearTimeout(partialPromotionTimer);
+        partialPromotionTimer = setTimeout(() => {
+            const partials = transcripts.filter((t) => t.isPartial);
+            if (partials.length > 0) {
+                console.log(
+                    `[PARTIAL-PROMO] Gemini silent for ${PARTIAL_PROMOTION_DELAY_MS / 1000}s — promoting ${partials.length} partials`,
+                );
+                promotePartialTranscripts();
+                // Build a quick local graph from the promoted transcripts
+                const localGraph = buildGraphFromTranscripts(
+                    transcripts,
+                    graphNodes,
+                    graphEdges,
+                );
+                const cleaned = applyGraphQualityRules(
+                    localGraph.nodes,
+                    localGraph.edges,
+                );
+                graphNodes = cleaned.nodes;
+                graphEdges = cleaned.edges;
+            }
+            partialPromotionTimer = null;
+        }, PARTIAL_PROMOTION_DELAY_MS);
+    }
+
+    // ============================================================
+    // STATE HELPERS
+    // ============================================================
+    function getSnapshotParams(): SnapshotParams {
+        return {
+            currentSession,
+            transcripts,
+            graphNodes,
+            graphEdges,
+            stressLevel,
+            engagementLevel,
+            urgencyLevel,
+            clarityLevel,
+            extractedSummary,
+            extractedMemories,
+            showSummaryPanel,
+            showMemoriesPanel,
+        };
+    }
+
+    function applyRestoredState(state: RestoredState) {
+        currentSession = state.currentSession;
+        transcripts = state.transcripts;
+        graphNodes = state.graphNodes;
+        graphEdges = state.graphEdges;
+        stressLevel = state.stressLevel;
+        engagementLevel = state.engagementLevel;
+        urgencyLevel = state.urgencyLevel;
+        clarityLevel = state.clarityLevel;
+        extractedSummary = state.extractedSummary;
+        extractedMemories = state.extractedMemories;
+        showSummaryPanel = state.showSummaryPanel;
+        showMemoriesPanel = state.showMemoriesPanel;
+        activeTab = state.activeTab as any;
+        isCollapsed = state.isCollapsed;
+        status = state.status;
+    }
+
+    // ============================================================
+    // SESSION MANAGEMENT (thin wrappers around sessionService)
+    // ============================================================
+    function saveCurrentSessionToCache(): any | null {
+        const snapshot = buildSessionSnapshot(getSnapshotParams());
+        if (!snapshot) return null;
+        sessionCache.set(currentSession.id, snapshot);
+        if (isRunningInTauri && transcripts.length > 0) {
+            persistSnapshotToDisk(snapshot);
+        }
+        pastSessions = updatePastSessionsList(
+            pastSessions,
+            snapshot,
+            currentSession.id,
+        );
+        return snapshot;
+    }
+
+    async function refreshSessionList(): Promise<void> {
+        const result = await fetchAllSessions(sessionCache);
+        pastSessions = result.pastSessions;
+        sessionCache = result.sessionCache;
+    }
+
+    async function restoreSessionData(fullSession: any) {
+        const { session, updatedCache } = await loadFullSession(
+            fullSession.id,
+            sessionCache,
+            fullSession,
+        );
+        sessionCache = updatedCache;
+        applyRestoredState(parseSessionIntoState(session));
+    }
+
+    async function handleSessionLoad(session: any) {
+        if (!session) return;
+        if (currentSession?.id === session.id) {
+            activeTab = "transcript";
+            return;
+        }
+        console.log(`[RESTORE] === Loading session: ${session.id} ===`);
+        const snapshot = saveCurrentSessionToCache();
+        if (snapshot && isRunningInTauri) {
+            try {
+                await invoke("save_session", {
+                    sessionJson: JSON.stringify(snapshot),
+                });
+            } catch (e) {
+                console.warn("[SESSION-SWITCH] Disk save failed:", e);
+            }
+        }
+        status = "Loading session...";
+        await restoreSessionData(session);
+    }
+
+    async function handleSessionDelete(sessionId: string, event: MouseEvent) {
+        event.stopPropagation();
+        if (!confirm("Delete this session? This cannot be undone.")) return;
+        await deleteSessionService(sessionId);
+        sessionCache.delete(sessionId);
+        if (currentSession?.id === sessionId) {
+            currentSession = null;
+            transcripts = [];
+            graphNodes = [];
+            graphEdges = [];
+            extractedSummary = null;
+        }
+        await refreshSessionList();
+        status = "Session deleted";
+    }
+
+    async function saveSession(isFinal = false) {
+        if (!isRunningInTauri || (!isRecording && !isFinal)) return;
+        if (!currentSession) {
+            console.warn("[PERSISTENCE] No current session to save");
+            return;
+        }
+        try {
+            const sessionObj = buildSessionJson(
+                currentSession,
+                transcripts,
+                graphNodes,
+                graphEdges,
+                stressLevel,
+                engagementLevel,
+                urgencyLevel,
+                clarityLevel,
+                extractedSummary,
+                extractedMemories,
+                showSummaryPanel,
+                showMemoriesPanel,
+            );
+            currentSession = sessionObj;
+            const transcriptCount = sessionObj.transcripts.length;
+            const nodeCount = sessionObj.graph_nodes.length;
+            console.log(
+                `[PERSISTENCE] Saving ${isFinal ? "(Final)" : "(Auto)"}: ${transcriptCount} transcripts, ${nodeCount} nodes`,
+            );
+            saveCurrentSessionToCache();
+            await saveSessionToDisk(JSON.stringify(sessionObj));
+            await syncSessionToCloud(sessionObj);
+            if (isFinal) {
+                await refreshSessionList();
+                status = `Session saved (${transcriptCount} transcripts)`;
+            }
+        } catch (error: any) {
+            const errMsg =
+                typeof error === "string"
+                    ? error
+                    : error?.message || String(error);
+            console.error("[PERSISTENCE] Save FAILED:", errMsg);
+            status = `⚠ Save failed: ${errMsg}`;
+        }
+    }
+
+    async function loadInitialData() {
+        try {
+            if (!isRunningInTauri) return;
+            await recoverPendingSave();
+            try {
+                initFirebase();
+                const user = await waitForAuth();
+                if (user)
+                    console.log(`[RESTORE] Authenticated as: ${user.email}`);
+                else console.log("[RESTORE] Not signed in — local only");
+            } catch (firebaseErr) {
+                console.warn("[RESTORE] Firebase init failed:", firebaseErr);
+            }
+            await refreshSessionList();
+            if (pastSessions.length > 0 && transcripts.length === 0) {
+                const latest = pastSessions[0];
+                console.log(
+                    `[RESTORE] Auto-loading latest session: ${latest.metadata?.title}`,
+                );
+                await restoreSessionData(latest);
+            }
+        } catch (error: any) {
+            const errMsg =
+                typeof error === "string"
+                    ? error
+                    : error?.message || String(error);
+            console.error("[RESTORE] Failed to load sessions:", errMsg);
+            status = `Error loading sessions: ${errMsg}`;
+        }
+    }
+
+    // ============================================================
+    // SPEAKER ID (thin wrappers)
+    // ============================================================
+    async function initializeSpeakerId() {
+        if (!isRunningInTauri) return;
+        speakerIdInitialized = await doInitSpeakerId();
+        if (speakerIdInitialized) await doRefreshSpeakerIdStatus();
+    }
+
+    async function doRefreshSpeakerIdStatus() {
+        if (!isRunningInTauri) return;
+        const result = await doRefreshSpeakerStatus();
+        speakerIdStatus = result.status;
+        speakerProfiles = result.profiles;
+    }
+
+    async function renameSpeaker(speakerId: string, newLabel: string) {
+        if (!isRunningInTauri) return;
+        const result = await doRenameSpeaker(speakerId, newLabel);
+        if (result.success) {
+            await doRefreshSpeakerIdStatus();
+            showToast(result.message, "info");
+        } else showToast(result.message, "error");
+    }
+
+    async function clearSpeakerProfiles() {
+        if (!isRunningInTauri) return;
+        const result = await doClearSpeakerProfiles();
+        if (result.success) {
+            await doRefreshSpeakerIdStatus();
+            showToast(result.message, "info");
+        } else showToast(result.message, "error");
+    }
+
+    // ============================================================
+    // EXTRACTION (thin wrappers)
+    // ============================================================
+    async function extractSummary() {
+        isExtractingSummary = true;
+        extractError = null;
+        const result = await doExtractSummary(transcripts, getActiveApiKey);
+        if (result.summary) {
+            extractedSummary = result.summary;
+            showSummaryPanel = true;
+        } else {
+            extractError = result.error;
+            setTimeout(() => (extractError = null), 3000);
+        }
+        isExtractingSummary = false;
+    }
+
+    async function extractMemories() {
+        isExtractingMemories = true;
+        extractError = null;
+        const result = await doExtractMemories(transcripts, getActiveApiKey);
+        if (result.memories) {
+            extractedMemories = result.memories;
+            showMemoriesPanel = true;
+        } else {
+            extractError = result.error;
+            setTimeout(() => (extractError = null), 3000);
+        }
+        isExtractingMemories = false;
+    }
+
+    async function handleGenerateGraph() {
+        if (isGeneratingGraph || transcripts.length === 0) return;
+        isGeneratingGraph = true;
+        status = "Generating knowledge graph...";
+        try {
+            const result = await extractKnowledgeGraph(
+                transcripts,
+                graphNodes,
+                graphEdges,
+                getActiveApiKey,
+            );
+            // Apply quality rules (dedup, merge, orphan removal)
+            const cleaned = applyGraphQualityRules(result.nodes, result.edges);
+            // Store unclustered originals for expand
+            _originalGraphNodes = [...cleaned.nodes];
+            _originalGraphEdges = [...cleaned.edges];
+            // Auto-cluster if large
+            const clustered = autoClusterGraph(
+                cleaned.nodes,
+                cleaned.edges,
+                20,
+            );
+            graphNodes = clustered.nodes;
+            graphEdges = clustered.edges;
+            if (result.error) {
+                showToast(result.error, "warning");
+            } else {
+                showToast(
+                    `Knowledge graph generated: ${graphNodes.length} nodes, ${graphEdges.length} edges`,
+                    "info",
+                );
+            }
+            // Save session with new graph data
+            await saveSession(false);
+        } catch (e: any) {
+            console.error("[Graph] Generation failed:", e);
+            showToast(`Graph generation failed: ${e.message}`, "error");
+        } finally {
+            isGeneratingGraph = false;
+            status = "Ready";
+        }
+    }
+
+    function handleClearGraph() {
+        graphNodes = [];
+        graphEdges = [];
+        _originalGraphNodes = [];
+        _originalGraphEdges = [];
+        showToast("Knowledge graph cleared", "info");
+    }
+
+    function handleToggleCluster(event: CustomEvent<{ nodeId: string }>) {
+        const { nodeId } = event.detail;
+        const origNodes =
+            _originalGraphNodes.length > 0 ? _originalGraphNodes : graphNodes;
+        const origEdges =
+            _originalGraphEdges.length > 0 ? _originalGraphEdges : graphEdges;
+        const result = expandCluster(
+            nodeId,
+            origNodes,
+            origEdges,
+            graphNodes,
+            graphEdges,
+        );
+        graphNodes = result.nodes;
+        graphEdges = result.edges;
+    }
+
+    // ============================================================
+    // CONNECTION
+    // ============================================================
+    async function connectGemini() {
+        if (!apiKey) {
+            status = "API Key Required";
+            return;
+        }
+        const result = await doConnectGemini({
+            apiKey,
+            selectedModel,
+            isRunningInTauri,
+        });
+        isGeminiConnected = result.isGeminiConnected;
+        status = result.status;
+        if (isRunningInTauri) initializeSpeakerId();
+    }
+
+    // ============================================================
+    // AUDIO CAPTURE
+    // ============================================================
+    async function pollVolume() {
+        if (!isRecording) return;
+        try {
+            let vol = (await invoke("get_current_volume")) as number;
+            currentVolume = currentVolume * 0.3 + vol * 0.7;
+            vadManager.processVolume(currentVolume);
+        } catch {
+            /* ignore */
+        }
+    }
+
+    async function setCaptureMode(mode: string) {
+        try {
+            await invoke("set_capture_mode", { mode });
+            captureMode = mode;
+            if (isRecording) {
+                await invoke("stop_audio_capture");
+                await invoke("start_audio_capture");
+                status = `Recording (${mode})...`;
+            }
+        } catch (error) {
+            console.error("Failed to set capture mode:", error);
+        }
+    }
+
+    async function toggleCapture() {
+        try {
+            if (isRecording) {
+                // === STOP RECORDING ===
+                await invoke("stop_audio_capture");
+                // Flush: tell backend to process any buffered audio immediately
+                // (don't wait for silence timeout)
+                try {
+                    await invoke("flush_audio_buffer");
+                } catch (e) {
+                    console.warn("[Recording] flush_audio_buffer:", e);
+                }
+                isRecording = false;
+                if (volumeInterval) {
+                    clearInterval(volumeInterval);
+                    volumeInterval = null;
+                }
+                currentVolume = 0;
+                vadManager.stop();
+                if (autoSaveInterval) {
+                    clearInterval(autoSaveInterval);
+                    autoSaveInterval = null;
+                }
+                const vadStats = vadManager.getStats();
+                console.log(
+                    `[VAD] Session stats: ${(vadStats.totalSpeechTime / 1000).toFixed(1)}s speech, ${vadStats.chunksSent} chunks, ${(vadStats.speechRatio * 100).toFixed(0)}% speech ratio`,
+                );
+                const duration = recordingStartTime
+                    ? Math.floor(
+                          (Date.now() - recordingStartTime.getTime()) / 1000,
+                      )
+                    : 0;
+                recordingStartTime = null;
+                if (duration >= 1) {
+                    try {
+                        await runProcessingFlow(duration);
+                    } catch (e) {
+                        console.error("[RECORDING] Processing flow error:", e);
+                    }
+                } else {
+                    status = "Recording too short (min 1 second)";
+                    setTimeout(() => {
+                        status = "Ready";
+                    }, 2000);
+                }
+                if (transcripts.length > 0 || graphNodes.length > 0) {
+                    await saveSession(true);
+                    console.log("[RECORDING] Safety-net final save complete");
+                }
+            } else {
+                // === START RECORDING ===
+                // Session continuation: if the previous session ended recently
+                // and had transcripts, CONTINUE it instead of creating a new one.
+                // This prevents "splitting" when a user quickly stops/starts recording.
+                // If user clicked "New Session", skip continuation and force a new session.
+                const CONTINUE_WINDOW_MS = 120_000; // 2 minutes
+                const canContinue =
+                    !forceNewSession &&
+                    currentSession &&
+                    currentSession.updated_at &&
+                    transcripts.length > 0 &&
+                    Date.now() - new Date(currentSession.updated_at).getTime() <
+                        CONTINUE_WINDOW_MS;
+                forceNewSession = false; // Reset flag after use
+
+                if (canContinue) {
+                    // CONTINUE existing session — add a new part
+                    console.log(
+                        `[RECORDING] Continuing session ${currentSession.id} (${transcripts.length} existing transcripts)`,
+                    );
+                    const partNum = (currentSession.parts?.length || 0) + 1;
+                    if (!currentSession.parts) currentSession.parts = [];
+                    currentSession.parts.push({
+                        partNumber: partNum,
+                        startedAt: new Date().toISOString(),
+                        transcriptStartIndex: transcripts.length,
+                    });
+                    // Don't clear transcripts/graph — keep existing data
+                    localInsights = [];
+                } else {
+                    // NEW session
+                    saveCurrentSessionToCache();
+                    transcripts = [];
+                    graphNodes = [];
+                    graphEdges = [];
+                    localInsights = [];
+                    extractedSummary = null;
+                    extractedMemories = null;
+                    const now = new Date();
+                    currentSession = {
+                        id: crypto.randomUUID
+                            ? crypto.randomUUID()
+                            : `session_${Date.now()}`,
+                        created_at: now.toISOString(),
+                        updated_at: now.toISOString(),
+                        transcripts: [],
+                        graph_nodes: [],
+                        graph_edges: [],
+                        metadata: {
+                            title: `Session ${now.toLocaleDateString()} ${now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`,
+                            duration_seconds: 0,
+                            total_transcripts: 0,
+                            total_speakers: 0,
+                            tags: [],
+                        },
+                        summary: null,
+                        parts: [
+                            {
+                                partNumber: 1,
+                                startedAt: now.toISOString(),
+                                transcriptStartIndex: 0,
+                            },
+                        ],
+                    };
+                }
+                try {
+                    await invoke("reset_audio_loop");
+                } catch (e) {
+                    console.warn("[Recording] Audio loop reset failed:", e);
+                }
+                try {
+                    await invoke("clear_whisper_context");
+                } catch (e) {
+                    console.warn(
+                        "[Recording] Whisper context clear failed:",
+                        e,
+                    );
+                }
+                currentVolume = 0;
+                await invoke("start_audio_capture");
+                isRecording = true;
+                recordingStartTime = new Date();
+                status = "Listening for speech...";
+                vadManager.start();
+                volumeInterval = setInterval(pollVolume, 100);
+                if (!graphNodes.find((n) => n.id === "Start")) {
+                    graphNodes = [
+                        {
+                            id: "Start",
+                            type: "Root",
+                            label: "Start",
+                            weight: 3,
+                        },
+                    ];
+                    graphEdges = [];
+                }
+                autoSaveInterval = setInterval(() => saveSession(false), 30000);
+                try {
+                    await invoke("start_processing_loop");
+                    console.log(
+                        "[Recording] Audio processing loop started IMMEDIATELY",
+                    );
+                } catch (e) {
+                    console.warn("[Recording] start_processing_loop:", e);
+                }
+                if (keyState.keys.length > 0) {
+                    (async () => {
+                        status = "Initializing AI engine...";
+                        const initResult = await backgroundRecordingInit({
+                            selectedModel,
+                            onSpeakerIdReady: () => {
+                                speakerIdInitialized = true;
+                            },
+                            onSpeakerIdStatusRefresh: doRefreshSpeakerIdStatus,
+                        });
+                        isGeminiConnected = initResult.isGeminiConnected;
+                        if (initResult.apiKey) apiKey = initResult.apiKey;
+                        status = initResult.status;
+                        if (initResult.error)
+                            showToast(initResult.error, "warning");
+                    })();
+                }
+                try {
+                    new Audio(
+                        "data:audio/wav;base64,UklGRnoGAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAGAACBhYqFbF1fdJivrJBhNjVgodDbq2EcBj+a2teleicAV63E25NbIACf08HmjFgT",
+                    ).play();
+                } catch {
+                    /* ignore */
+                }
+            }
+        } catch (error: any) {
+            console.error("Capture error:", error);
+            status = `Capture Error: ${error?.message || String(error)}`;
+            processingError = error?.message || String(error);
+            isRecording = false;
+        }
+    }
+
+    // ============================================================
+    // PROCESSING FLOW
+    // ============================================================
+    async function runProcessingFlow(duration: number) {
+        isProcessing = true;
+        processingStep = 0;
+        processingError = null;
+        status = "Processing recording...";
+        try {
+            // Step 1: Save
+            processingStep = 1;
+            status = "Saving recording...";
+            await saveSession(true);
+
+            // Step 2: Wait for transcription
+            processingStep = 2;
+            status = "Waiting for transcription to complete...";
+            if (isGeminiConnected) {
+                const countBefore = transcripts.length;
+                await waitForTranscriptions(
+                    duration,
+                    () => transcripts.length,
+                    countBefore,
+                    (s) => {
+                        status = s;
+                    },
+                );
+                lastRequestTime = new Date().toLocaleTimeString();
+            } else {
+                await new Promise((r) => setTimeout(r, 1000));
+                transcripts = [
+                    ...transcripts,
+                    {
+                        id: `rec_${Date.now()}`,
+                        timestamp: new Date().toLocaleTimeString([], {
+                            hour: "2-digit",
+                            minute: "2-digit",
+                        }),
+                        speaker: "Recording",
+                        speakerId: 0,
+                        text: `[${duration}s audio recorded - connect to Gemini AI to transcribe]`,
+                        confidence: 0,
+                        isPartial: false,
+                    },
+                ];
+            }
+            // Promote any remaining partial transcripts before processing
+            const promoted = promotePartialTranscripts();
+            if (promoted > 0) {
+                console.log(
+                    `[PROCESSING] Promoted ${promoted} partial transcripts before processing`,
+                );
+            }
+            // Clear the promotion timer since we've handled it
+            if (partialPromotionTimer) {
+                clearTimeout(partialPromotionTimer);
+                partialPromotionTimer = null;
+            }
+
+            if (transcripts.length === 0) {
+                processingStep = 7;
+                status = "No speech detected in recording.";
+                await saveSession(true);
+                setTimeout(() => {
+                    isProcessing = false;
+                    processingStep = 0;
+                    status = "Ready";
+                }, 3000);
+                return;
+            }
+
+            // Step 3: Tone analysis
+            processingStep = 3;
+            status = "Analyzing vocal topography...";
+            const tones = analyzeToneDistribution(transcripts);
+            stressLevel = tones.stressLevel;
+            engagementLevel = tones.engagementLevel;
+            urgencyLevel = tones.urgencyLevel;
+            clarityLevel = tones.clarityLevel;
+            await new Promise((r) => setTimeout(r, 100));
+
+            // Step 4: Knowledge graph (enhanced with Gemini extraction)
+            processingStep = 4;
+            status = "Building knowledge graph...";
+            // First build basic graph from transcript data
+            const basicGraph = buildGraphFromTranscripts(
+                transcripts,
+                graphNodes,
+                graphEdges,
+                (c, t) => {
+                    if (transcripts.length > 5)
+                        status = `Building knowledge graph... (${c}/${t})`;
+                },
+            );
+            graphNodes = basicGraph.nodes;
+            graphEdges = basicGraph.edges;
+
+            // Then enhance with Gemini-powered entity/relationship extraction
+            try {
+                status = "Extracting knowledge graph entities...";
+                const getApiKey = () => keyManager.getCurrentKey()?.key || null;
+                const extractedGraph = await extractKnowledgeGraph(
+                    transcripts,
+                    graphNodes,
+                    graphEdges,
+                    getApiKey,
+                );
+                graphNodes = extractedGraph.nodes;
+                graphEdges = extractedGraph.edges;
+                if (extractedGraph.error) {
+                    console.warn(
+                        `[PROCESSING] Graph extraction note: ${extractedGraph.error}`,
+                    );
+                }
+            } catch (e) {
+                console.warn(
+                    "[PROCESSING] Enhanced graph extraction failed, using basic graph:",
+                    e,
+                );
+            }
+            // Apply quality rules and auto-clustering
+            {
+                const cleaned = applyGraphQualityRules(graphNodes, graphEdges);
+                _originalGraphNodes = [...cleaned.nodes];
+                _originalGraphEdges = [...cleaned.edges];
+                const clustered = autoClusterGraph(
+                    cleaned.nodes,
+                    cleaned.edges,
+                    20,
+                );
+                graphNodes = clustered.nodes;
+                graphEdges = clustered.edges;
+            }
+            // Fallback: if graph is still very thin after all extraction attempts,
+            // force a local-only rebuild from raw transcript text
+            const nonRootNodes = graphNodes.filter(
+                (n) => n.type !== "Root" && n.type !== "Speaker",
+            );
+            if (nonRootNodes.length < 3 && transcripts.length > 0) {
+                console.log(
+                    "[PROCESSING] Graph too thin — forcing local-only rebuild",
+                );
+                status = "Building local knowledge graph...";
+                const localResult = await extractKnowledgeGraph(
+                    transcripts,
+                    [{ id: "Start", type: "Root", label: "Start", weight: 3 }],
+                    [],
+                    () => null, // Force local extraction by passing no API key
+                );
+                const localCleaned = applyGraphQualityRules(
+                    localResult.nodes,
+                    localResult.edges,
+                );
+                _originalGraphNodes = [...localCleaned.nodes];
+                _originalGraphEdges = [...localCleaned.edges];
+                const localClustered = autoClusterGraph(
+                    localCleaned.nodes,
+                    localCleaned.edges,
+                    20,
+                );
+                graphNodes = localClustered.nodes;
+                graphEdges = localClustered.edges;
+            }
+            console.log(
+                `[PROCESSING] Step 4 complete. Graph: ${graphNodes.length} nodes, ${graphEdges.length} edges`,
+            );
+            await new Promise((r) => setTimeout(r, 100));
+
+            // Step 5: Intelligence extraction
+            processingStep = 5;
+            status = "Extracting intelligence insights...";
+            if (transcripts.length > 0) {
+                try {
+                    await intelligenceExtractor.extractFromTranscript(
+                        transcripts.map((t) => ({
+                            ...t,
+                            speakerId: t.speakerId || 1,
+                        })),
+                    );
+                } catch (e) {
+                    console.error("Intelligence extraction failed:", e);
+                }
+            }
+            await new Promise((r) => setTimeout(r, 100));
+
+            // Step 6: Final save
+            processingStep = 6;
+            status = "Saving final session data...";
+            await saveSession(true);
+            await new Promise((r) => setTimeout(r, 100));
+
+            // Step 7: Complete
+            processingStep = 7;
+            status = "Processing complete!";
+            activeTab = "transcript";
+            try {
+                new Audio(
+                    "data:audio/wav;base64,UklGRl8GAABXQVZFZm10IBAAAAABAAEAIlYAAEAfAAACABAAAABkYXRhPQYAAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAIA/",
+                ).play();
+            } catch {
+                /* ignore */
+            }
+            setTimeout(() => {
+                isProcessing = false;
+                processingStep = 0;
+                status = "Ready";
+            }, 3000);
+        } catch (error: any) {
+            console.error("Processing error:", error);
+            processingError = `Processing failed: ${error?.message || String(error)}`;
+            status = `Error: ${processingError}`;
+            isProcessing = false;
+        }
+    }
+
+    // ============================================================
+    // EVENT LISTENERS + LIFECYCLE
+    // ============================================================
+    let unlistenStatus: () => void;
+    let unlistenTranscript: () => void;
+    let unlistenIntelligence: () => void;
+    let unlistenBackendErrors: () => void;
+
+    onMount(async () => {
+        const savedKey = localStorage.getItem("gemini_api_key");
+        const savedModel = localStorage.getItem("gemini_model");
+        if (savedKey) apiKey = savedKey;
+        const validModels = [
+            "gemini-2.0-flash",
+            "gemini-2.0-flash-lite",
+            "gemini-2.5-flash-preview-04-17",
+            "gemini-1.5-flash",
+        ];
+        if (savedModel && validModels.includes(savedModel))
+            selectedModel = savedModel;
+        else {
+            selectedModel = "gemini-2.0-flash";
+            localStorage.setItem("gemini_model", selectedModel);
+        }
+
+        isRunningInTauri = !!(
+            typeof window !== "undefined" && (window as any).__TAURI_INTERNALS__
+        );
+        console.log("[INIT] Tauri detection:", isRunningInTauri);
+        if (isRunningInTauri) {
+            try {
+                await invoke("list_audio_devices");
+            } catch (e) {
+                console.warn("[INIT] Invoke test failed:", e);
+            }
+        }
+
+        try {
+            await loadDevices();
+            loadApiKeysFromStorage();
+
+            if (isRunningInTauri) {
+                status = "Initializing Intelligence...";
+                const connectionResult = await keyManager.validateOnStartup();
+                if (connectionResult.success) {
+                    isGeminiConnected = true;
+                    apiKey = connectionResult.key?.key || "";
+                    status = "Connected to Intelligence Engine";
+                    await connectGemini();
+                } else {
+                    isGeminiConnected = false;
+                    status = "Offline - Click settings to add API key";
+                }
+            } else {
+                status = "Browser Mode - Settings disabled";
+            }
+
+            await loadInitialData();
+
+            // Setup subscriptions
+            setupKeyManagerSubscription({
+                onStateUpdate: (state) => {
+                    keyState = state;
+                    isRateLimited = state.keys.some((k) => k.rateLimited);
+                    const activeKey = state.keys.find((k) => k.isActive);
+                    if (activeKey) apiKey = activeKey.key;
+                },
+                onKeySwitch: (key, message) => {
+                    apiKey = key.key;
+                    showToast(message, "warning");
+                    if (isRecording)
+                        invoke("update_gemini_key", { key: key.key }).catch(
+                            console.error,
+                        );
+                },
+                onAllExhausted: () =>
+                    showToast(
+                        "All keys exhausted – add more in Settings",
+                        "error",
+                    ),
+                isRecording: () => isRecording,
+            });
+
+            const vadSubs = setupVADSubscription({
+                onVADStateUpdate: (state, rec, proc) => {
+                    vadState = state;
+                    if (rec && !proc) {
+                        if (state.status === "buffering")
+                            status = "Speaking detected – analyzing live...";
+                        else if (state.status === "sending")
+                            status = "Sending chunk to Intelligence Engine...";
+                        else if (state.isSpeaking)
+                            status = "Speaking detected – analyzing live...";
+                        else status = "Listening for speech...";
+                    }
+                },
+                onChunk: (_chunk, rec) => {
+                    if (rec) status = "Analyzing speech...";
+                },
+                getRecordingState: () => ({ isRecording, isProcessing }),
+            });
+            vadUnsubscribe = vadSubs.vadUnsubscribe;
+            chunkUnsubscribe = vadSubs.chunkUnsubscribe;
+
+            if (isRunningInTauri) {
+                unlistenBackendErrors = await setupBackendEventListeners({
+                    onKeyRotated: (msg) => showToast(msg, "warning"),
+                    onAllExhausted: () =>
+                        showToast(
+                            "Service disrupted: All keys exhausted",
+                            "error",
+                        ),
+                });
+
+                unlistenStatus = await listen("cognivox:status", (event) => {
+                    status = event.payload as string;
+                });
+
+                await listen("cognivox:speaker_identified", (event) => {
+                    const payload = event.payload as any;
+                    lastIdentifiedSpeaker = payload;
+                    console.log(
+                        `[SPEAKER-ID] ${payload.speaker_label} (confidence: ${payload.confidence.toFixed(3)}, new: ${payload.is_new})`,
+                    );
+                    if (payload.is_new) doRefreshSpeakerIdStatus();
+                });
+
+                unlistenTranscript = await listen(
+                    "cognivox:gemini_intelligence",
+                    async (event) => {
+                        debugEventCount++;
+                        debugLastEvent = new Date().toLocaleTimeString();
+                        const payload = event.payload as {
+                            transcript: string;
+                            speaker?: string;
+                            intelligence: string;
+                        };
+                        debugLastTranscript =
+                            (payload?.transcript || "").substring(0, 50) +
+                            "...";
+                        console.log(
+                            "[GEMINI] === RECEIVED INTELLIGENCE EVENT ===",
+                        );
+                        console.log(
+                            "[GEMINI] Full payload:",
+                            JSON.stringify(event.payload, null, 2),
+                        );
+
+                        const segments = parseGeminiPayload(payload);
+                        const startTime = performance.now();
+                        isTyping = true;
+                        transcripts = transcripts.filter((t) => !t.isPartial);
+
+                        for (const seg of segments) {
+                            if (
+                                !seg.transcript ||
+                                seg.transcript.trim().length === 0
+                            )
+                                continue;
+                            console.log(
+                                `[GEMINI] Adding segment: speaker=${seg.speaker}, tone=${seg.tone}, text="${seg.transcript.substring(0, 60)}..."`,
+                            );
+                            transcripts = [
+                                ...transcripts,
+                                createTranscriptEntry(seg),
+                            ];
+                            const graphUpdate = buildGraphFromSegment(
+                                seg,
+                                graphNodes,
+                                graphEdges,
+                            );
+                            // Apply light dedup on live updates
+                            const cleaned = applyGraphQualityRules(
+                                graphUpdate.nodes,
+                                graphUpdate.edges,
+                            );
+                            graphNodes = cleaned.nodes;
+                            graphEdges = cleaned.edges;
+                        }
+                        console.log(
+                            "[GRAPH] Updated:",
+                            graphNodes.length,
+                            "nodes,",
+                            graphEdges.length,
+                            "edges",
+                        );
+                        latencyMs = Math.round(performance.now() - startTime);
+
+                        try {
+                            const freshInsights =
+                                await intelligenceExtractor.extractFromTranscript(
+                                    transcripts.slice(-5),
+                                );
+                            if (freshInsights && Array.isArray(freshInsights))
+                                localInsights = [
+                                    ...localInsights,
+                                    ...freshInsights,
+                                ];
+                        } catch (e) {
+                            console.error("Live extraction error:", e);
+                        }
+                        setTimeout(() => {
+                            isTyping = false;
+                            partialText = "";
+                        }, 100);
+                    },
+                );
+
+                unlistenIntelligence = await listen(
+                    "cognivox:whisper_transcription",
+                    (event) => {
+                        const intel = event.payload as any;
+                        console.log(
+                            "[WHISPER] === RECEIVED TRANSCRIPTION ===",
+                            intel,
+                        );
+                        if (intel?.text && intel.text.trim().length > 0) {
+                            const whisperSpeaker = intel?.speaker || "You";
+                            status = `Whisper (${intel.language}): "${intel.text.substring(0, 50)}..."`;
+                            const existingPartial = transcripts.find(
+                                (t) => t.isPartial,
+                            );
+                            if (existingPartial) {
+                                transcripts = transcripts.map((t) =>
+                                    t.isPartial
+                                        ? {
+                                              ...t,
+                                              text: intel.text,
+                                              speaker: whisperSpeaker,
+                                          }
+                                        : t,
+                                );
+                            } else {
+                                transcripts = [
+                                    ...transcripts,
+                                    createPartialTranscript(intel),
+                                ];
+                                console.log(
+                                    "[WHISPER] Added partial transcript, total:",
+                                    transcripts.length,
+                                );
+                            }
+                            // Schedule promotion in case Gemini never responds (rate-limited)
+                            if (isRecording) {
+                                schedulePartialPromotion();
+                            }
+                        }
+                    },
+                );
+
+                await listen("tray:record", () => {
+                    if (!isRecording) toggleCapture();
+                });
+                await listen("tray:stop", () => {
+                    if (isRecording) toggleCapture();
+                });
+
+                const appWindow = getCurrentWindow();
+                await appWindow.onCloseRequested(async () => {
+                    console.log(
+                        "[CLOSE] App close requested — saving session to disk...",
+                    );
+                    try {
+                        const snapshot = saveCurrentSessionToCache();
+                        if (snapshot) {
+                            await invoke("save_session", {
+                                sessionJson: JSON.stringify(snapshot),
+                            });
+                            console.log("[CLOSE] Session saved");
+                        }
+                    } catch (e) {
+                        console.error("[CLOSE] Failed to save:", e);
+                    }
+                });
+            }
+        } catch (error) {
+            console.error("Failed to initialize Tauri listeners:", error);
+            status = "Tauri Init Error: " + error;
+        }
+        document.addEventListener("keydown", handleKeyDown);
+        window.addEventListener("beforeunload", handleBeforeUnload);
+    });
+
+    async function loadDevices() {
+        try {
+            devices = await invoke("list_audio_devices");
+        } catch (error) {
+            console.error(error);
+            status = "Error listing devices";
+        }
+    }
+
+    function handleKeyDown(e: KeyboardEvent) {
+        if (e.ctrlKey && e.shiftKey) {
+            switch (e.key) {
+                case "R":
+                    e.preventDefault();
+                    toggleCapture();
+                    break;
+                case "S":
+                    e.preventDefault();
+                    console.log("[HOTKEY] Save session");
+                    break;
+                case "G":
+                    e.preventDefault();
+                    activeTab = activeTab === "graph" ? "transcript" : "graph";
+                    break;
+                case "A":
+                    e.preventDefault();
+                    activeTab = "alerts";
+                    break;
+                case "T":
+                    e.preventDefault();
+                    activeTab = "transcript";
+                    break;
+            }
+        }
+        if (e.key === "Escape" && isRecording)
+            console.log("[HOTKEY] Escape pressed during recording");
+    }
+
+    function handleBeforeUnload() {
+        const snapshot = saveCurrentSessionToCache();
+        if (snapshot) {
+            try {
+                localStorage.setItem(
+                    "cognivox_pending_save",
+                    JSON.stringify(snapshot),
+                );
+            } catch {
+                /* ignore */
+            }
+        }
+    }
+
+    onDestroy(() => {
+        if (unlistenStatus) unlistenStatus();
+        if (unlistenTranscript) unlistenTranscript();
+        if (unlistenIntelligence) unlistenIntelligence();
+        if (unlistenBackendErrors) unlistenBackendErrors();
+        if (partialPromotionTimer) clearTimeout(partialPromotionTimer);
+        document.removeEventListener("keydown", handleKeyDown);
+        window.removeEventListener("beforeunload", handleBeforeUnload);
+    });
+</script>
+
+<!-- === DEBUG / STATUS BAR === -->
+<DebugBar
+    {isRunningInTauri}
+    {debugMode}
+    {debugEventCount}
+    {transcripts}
+    {debugLastEvent}
+    {isGeminiConnected}
+/>
+
+<!-- === RECORDING OVERLAY (Fixed at top during recording) === -->
+<RecordingOverlay
+    {isRecording}
+    {currentVolume}
+    {isGeminiConnected}
+    on:openSettings={openSettings}
+/>
+
+<!-- === SETTINGS MODAL === -->
+<SettingsModal
+    isOpen={showSettingsModal}
+    on:close={closeSettings}
+    on:save={(e) => {
+        selectedModel = e.detail.selectedModel;
+        debugMode = e.detail.enableDebugMode;
+        loadApiKeysFromStorage();
+    }}
+    on:connected={(e) => {
+        isGeminiConnected = true;
+        apiKey = e.detail.key;
+        status = "Connected to Gemini ✓";
+    }}
+/>
+
+<!-- === STATUS BAR (Fixed at bottom) === -->
+<StatusBar
+    {isGeminiConnected}
+    {isRecording}
+    apiKeyCount={keyState.keys.length}
+    activeKeyName={getActiveKeyName()}
+    activeKeyIndex={getActiveKeyIndex()}
+    {isRateLimited}
+    {lastRequestTime}
+    {debugMode}
+    requestCount={keyState.totalCalls}
+    on:openSettings={openSettings}
+/>
+
+<!-- === TOAST NOTIFICATION === -->
+<ToastNotification message={toastMessage} type={toastType} />
+
+<div
+    class="h-screen w-screen flex bg-[#0a0c0f] font-sans overflow-hidden {isRecording
+        ? 'pt-20'
+        : ''} pb-8"
+>
+    <!-- SIDEBAR -->
+    <Sidebar
+        {pastSessions}
+        {currentSession}
+        {graphNodes}
+        {graphEdges}
+        {activeTab}
+        {speakerIdInitialized}
+        on:sessionLoad={(e) => handleSessionLoad(e.detail)}
+        on:sessionDelete={(e) =>
+            handleSessionDelete(e.detail.sessionId, e.detail.event)}
+        on:refreshSessions={refreshSessionList}
+        on:tabChange={(e) => (activeTab = e.detail)}
+        on:toggleCluster={handleToggleCluster}
+    />
+
+    <!-- MAIN CONTENT -->
+    <div class="flex-1 flex flex-col min-w-0">
+        <!-- HEADER BAR -->
+        <MainHeader
+            {status}
+            {isRecording}
+            {isProcessing}
+            {isGeminiConnected}
+            {keyState}
+            {forceNewSession}
+            hasExistingSession={!!currentSession && transcripts.length > 0}
+            on:openSettings={openSettings}
+            on:toggleCapture={toggleCapture}
+            on:newSession={() => {
+                forceNewSession = true;
+            }}
+        />
+
+        <!-- CONTENT AREA -->
+        <div class="flex-1 overflow-auto p-6">
+            <div class="max-w-5xl mx-auto space-y-6">
+                {#if !isRunningInTauri}
+                    <div
+                        class="glass-card p-4 flex items-center gap-3 border-yellow-500/30"
+                    >
+                        <svg
+                            class="w-6 h-6 text-yellow-400"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            stroke-width="2"
+                            ><path
+                                d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"
+                            /><line x1="12" y1="9" x2="12" y2="13" /><line
+                                x1="12"
+                                y1="17"
+                                x2="12.01"
+                                y2="17"
+                            /></svg
+                        >
+                        <div class="flex-1">
+                            <p class="font-bold text-yellow-400">
+                                Web Preview Mode
+                            </p>
+                            <p class="text-sm text-slate-400">
+                                Native features disabled. Run <code
+                                    class="bg-dark-700 px-1 rounded"
+                                    >npm run tauri dev</code
+                                > for full functionality.
+                            </p>
+                        </div>
+                    </div>
+                {/if}
+
+                <!-- === PROCESSING PROGRESS (shows after recording stops) === -->
+                <ProcessingProgress
+                    {isProcessing}
+                    currentStep={processingStep}
+                    error={processingError}
+                    on:dismiss={dismissProcessing}
+                    on:retry={retryProcessing}
+                />
+
+                <!-- === LIVE RECORDING PANEL (shows during recording) === -->
+                <LiveRecordingPanel
+                    {isRecording}
+                    {currentVolume}
+                    {isGeminiConnected}
+                    {transcripts}
+                    {graphNodes}
+                    {graphEdges}
+                    bind:stressLevel
+                    bind:engagementLevel
+                    bind:urgencyLevel
+                    bind:clarityLevel
+                />
+
+                <!-- Search Bar -->
+                <div class="flex gap-3">
+                    <div class="flex-1 relative">
+                        <svg
+                            class="absolute left-4 top-1/2 -translate-y-1/2 text-slate-500"
+                            xmlns="http://www.w3.org/2000/svg"
+                            width="18"
+                            height="18"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            stroke-width="2"
+                        >
+                            <circle cx="11" cy="11" r="8"></circle>
+                            <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                        </svg>
+                        <input
+                            type="text"
+                            placeholder="Search transcripts..."
+                            bind:value={searchQuery}
+                            class="search-input"
+                        />
+                    </div>
+                    <select bind:value={searchFilter} class="select-field w-28">
+                        <option value="all">All</option>
+                        <option value="speaker">By Speaker</option>
+                        <option value="category">By Category</option>
+                    </select>
+                </div>
+
+                {#if activeTab === "transcript"}
+                    <TranscriptView
+                        {transcripts}
+                        {isCollapsed}
+                        {debugMode}
+                        {debugEventCount}
+                        {debugLastEvent}
+                        {debugLastTranscript}
+                    />
+                    <SummaryPanel
+                        show={showSummaryPanel}
+                        {extractedSummary}
+                        on:close={closeSummaryPanel}
+                    />
+                    <MemoriesPanel
+                        show={showMemoriesPanel}
+                        {extractedMemories}
+                        on:close={closeMemoriesPanel}
+                    />
+                {:else if activeTab === "graph"}
+                    <GraphTab
+                        {graphNodes}
+                        {graphEdges}
+                        {transcripts}
+                        isGenerating={isGeneratingGraph}
+                        on:generateGraph={handleGenerateGraph}
+                        on:clearGraph={handleClearGraph}
+                        on:toggleCluster={handleToggleCluster}
+                    />
+                {:else if activeTab === "alerts"}
+                    <AlertsTab {alerts} on:clearAlerts={() => (alerts = [])} />
+                {:else if activeTab === "analytics"}
+                    <AnalyticsTab
+                        {transcripts}
+                        {graphNodes}
+                        {latencyMs}
+                        {isGeminiConnected}
+                        {isRecording}
+                    />
+                {:else if activeTab === "settings"}
+                    <SettingsTab
+                        bind:selectedModel
+                        {availableModels}
+                        bind:apiKey
+                        {isGeminiConnected}
+                        {captureMode}
+                        {currentVolume}
+                        {isRecording}
+                        on:connectGemini={connectGemini}
+                        on:setCaptureMode={(e) => setCaptureMode(e.detail)}
+                        on:settingsChange={(e) =>
+                            handleSettingsChange(e.detail)}
+                    />
+                {:else if activeTab === "diagnostics"}
+                    <Diagnostics {isRecording} {isGeminiConnected} />
+                {:else if activeTab === "speakers"}
+                    <SpeakersTab
+                        {speakerIdInitialized}
+                        {speakerIdStatus}
+                        {speakerProfiles}
+                        {lastIdentifiedSpeaker}
+                        on:initializeSpeakerId={initializeSpeakerId}
+                        on:clearSpeakerProfiles={clearSpeakerProfiles}
+                        on:renameSpeaker={(e) =>
+                            renameSpeaker(
+                                e.detail.speakerId,
+                                e.detail.newLabel,
+                            )}
+                    />
+                {/if}
+            </div>
+        </div>
+
+        <!-- BOTTOM ACTION BAR -->
+        <BottomActionBar
+            {extractError}
+            {isCollapsed}
+            {transcripts}
+            {showMemoriesPanel}
+            {showSummaryPanel}
+            {isExtractingMemories}
+            {isExtractingSummary}
+            on:toggleCollapse={toggleCollapseState}
+            on:extractMemories={extractMemories}
+            on:extractSummary={extractSummary}
+        />
+    </div>
+</div>

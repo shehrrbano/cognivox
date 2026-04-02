@@ -1,16 +1,18 @@
+<!-- ACTUAL EDIT: COGNIVOX_UI_REAL_CODE_APPLIER_v2 -->
+<!-- UNIFIED: COGNIVOX_UI_MAPPER_v1 -->
 <script lang="ts">
     export let message: string | null = null;
     export let type: "info" | "warning" | "error" = "info";
 </script>
 
 {#if message}
-    <div class="fixed top-4 right-4 z-[10000] max-w-sm animate-fadeIn">
+    <div class="fixed top-fluid-gap right-fluid-gap left-fluid-gap sm:left-auto z-[10000] max-w-sm animate-fadeIn">
         <div
             class="px-4 py-3 rounded-lg shadow-lg border {type === 'error'
-                ? 'bg-red-500/20 border-red-500/50 text-red-400'
+                ? 'bg-red-50 border-red-300 text-red-500'
                 : type === 'warning'
-                  ? 'bg-yellow-500/20 border-yellow-500/50 text-yellow-400'
-                  : 'bg-cyan-500/20 border-cyan-500/50 text-cyan-400'} text-sm"
+                  ? 'bg-yellow-50 border-yellow-300 text-yellow-600'
+                  : 'bg-blue-50 border-blue-400 text-blue-500'} text-fluid-sm"
         >
             {message}
         </div>

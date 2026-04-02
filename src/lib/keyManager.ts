@@ -6,6 +6,7 @@ export interface ApiKey {
     id: string;
     key: string;
     name: string;
+    priority: number; // 0-100, higher is used first
     isActive: boolean;
     isPrimary: boolean;
     lastUsed: string | null;
@@ -65,6 +66,7 @@ class ApiKeyManager {
                 const oldFormat = JSON.parse(oldKeys);
                 this.state.keys = oldFormat.map((k: any, i: number) => ({
                     ...k,
+                    priority: k.priority || 0,
                     isPrimary: i === 0,
                     failCount: 0,
                     isDisabled: false,
@@ -108,11 +110,12 @@ class ApiKeyManager {
 
     // === KEY MANAGEMENT ===
 
-    addKey(key: string, name?: string): ApiKey {
+    addKey(key: string, name?: string, priority: number = 0): ApiKey {
         const newKey: ApiKey = {
             id: `key_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
             key: key.trim(),
             name: name?.trim() || `Key ${this.state.keys.length + 1}`,
+            priority,
             isActive: this.state.keys.length === 0,
             isPrimary: this.state.keys.length === 0,
             lastUsed: null,
@@ -152,6 +155,24 @@ class ApiKeyManager {
         this.notifyListeners();
     }
 
+    updateKeyPriority(id: string, priority: number) {
+        const key = this.state.keys.find(k => k.id === id);
+        if (key) {
+            key.priority = priority;
+            this.saveState();
+            this.notifyListeners();
+        }
+    }
+
+    updateKeyName(id: string, name: string) {
+        const key = this.state.keys.find(k => k.id === id);
+        if (key) {
+            key.name = name.trim();
+            this.saveState();
+            this.notifyListeners();
+        }
+    }
+
     getKeys(): ApiKey[] {
         return [...this.state.keys];
     }
@@ -178,7 +199,8 @@ class ApiKeyManager {
 
         const availableKeys = this.state.keys
             .map((k, i) => ({ key: k, index: i }))
-            .filter(({ key }) => !key.isDisabled && !this.isRateLimited(key));
+            .filter(({ key }) => !key.isDisabled && !this.isRateLimited(key))
+            .sort((a, b) => (b.key.priority || 0) - (a.key.priority || 0)); // Priority first
 
         if (availableKeys.length === 0) {
             // All keys exhausted - try primary as last resort

@@ -1,0 +1,128 @@
+<script lang="ts">
+    import { createEventDispatcher } from "svelte";
+    import type { ExtractedMemoriesData } from "./types";
+
+    export let show = false;
+    export let extractedMemories: ExtractedMemoriesData | null = null;
+
+    const dispatch = createEventDispatcher();
+
+    function close() {
+        dispatch("close");
+    }
+</script>
+
+{#if show && extractedMemories}
+    <div class="content-card border-purple-500/30 animate-fadeIn">
+        <div class="content-card-header">
+            <span
+                class="text-sm font-medium text-purple-400 flex items-center gap-2"
+                ><svg
+                    class="w-4 h-4"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    ><path
+                        d="M12 3l1.5 4.5L18 9l-4.5 1.5L12 15l-1.5-4.5L6 9l4.5-1.5z"
+                    /></svg
+                > Extracted Memories</span
+            >
+            <button
+                class="icon-btn text-slate-400 hover:text-white"
+                onclick={close}
+                aria-label="Close memories panel"
+            >
+                <svg
+                    class="w-4 h-4"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                >
+                    <path
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        stroke-width="2"
+                        d="M6 18L18 6M6 6l12 12"
+                    />
+                </svg>
+            </button>
+        </div>
+        <div class="p-6 space-y-4">
+            {#if extractedMemories.keyMoments?.length > 0}
+                <div>
+                    <h4
+                        class="text-xs text-slate-400 uppercase tracking-wider mb-2"
+                    >
+                        Key Moments
+                    </h4>
+                    <ul class="space-y-2">
+                        {#each extractedMemories.keyMoments as moment}
+                            <li
+                                class="text-sm text-slate-300 p-2 rounded bg-purple-500/10 border-l-2 border-purple-500"
+                            >
+                                {moment}
+                            </li>
+                        {/each}
+                    </ul>
+                </div>
+            {/if}
+            {#if extractedMemories.quotes?.length > 0}
+                <div>
+                    <h4
+                        class="text-xs text-slate-400 uppercase tracking-wider mb-2"
+                    >
+                        Notable Quotes
+                    </h4>
+                    <div class="space-y-2">
+                        {#each extractedMemories.quotes as quote}
+                            <blockquote
+                                class="text-sm text-slate-300 italic border-l-2 border-cyan-500 pl-3 py-1"
+                            >
+                                "{quote}"
+                            </blockquote>
+                        {/each}
+                    </div>
+                </div>
+            {/if}
+            {#if extractedMemories.personalInsights?.length > 0}
+                <div>
+                    <h4
+                        class="text-xs text-slate-400 uppercase tracking-wider mb-2"
+                    >
+                        Personal Insights
+                    </h4>
+                    <ul class="space-y-1">
+                        {#each extractedMemories.personalInsights as insight}
+                            <li
+                                class="text-sm text-slate-300 flex items-start gap-2"
+                            >
+                                <span class="text-yellow-400">•</span>
+                                {insight}
+                            </li>
+                        {/each}
+                    </ul>
+                </div>
+            {/if}
+            {#if extractedMemories.emotionShifts?.length > 0}
+                <div>
+                    <h4
+                        class="text-xs text-slate-400 uppercase tracking-wider mb-2"
+                    >
+                        Emotion Shifts
+                    </h4>
+                    <ul class="space-y-1">
+                        {#each extractedMemories.emotionShifts as shift}
+                            <li
+                                class="text-sm text-slate-300 flex items-start gap-2"
+                            >
+                                <span class="text-orange-400">↗</span>
+                                {shift}
+                            </li>
+                        {/each}
+                    </ul>
+                </div>
+            {/if}
+        </div>
+    </div>
+{/if}

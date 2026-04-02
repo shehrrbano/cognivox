@@ -1,63 +1,74 @@
-/** @type {import('tailwindcss').Config} */
+const scale = 1.25;
+
 export default {
   content: ['./src/**/*.{html,js,svelte,ts}'],
   theme: {
     extend: {
+      spacing: {
+        '0': '0px',
+        '0.5': `${2 * scale}px`,
+        '1': `${4 * scale}px`,
+        '1.5': `${6 * scale}px`,
+        '2': `${8 * scale}px`,
+        '2.5': `${10 * scale}px`,
+        '3': `${12 * scale}px`,
+        '4': `${16 * scale}px`,
+        '5': `${20 * scale}px`,
+        '6': `${24 * scale}px`,
+        '8': `${32 * scale}px`,
+        '10': `${40 * scale}px`,
+        '12': `${48 * scale}px`,
+        '16': `${64 * scale}px`,
+        '20': `${80 * scale}px`,
+        '24': `${96 * scale}px`,
+        '32': `${128 * scale}px`,
+      },
+      fontSize: {
+        'xxs': [`${10 * scale}px`, `${14 * scale}px`],
+        'xs': [`${12 * scale}px`, `${16 * scale}px`],
+        'sm': [`${14 * scale}px`, `${20 * scale}px`],
+        'base': [`${16 * scale}px`, `${24 * scale}px`],
+        'lg': [`${18 * scale}px`, `${28 * scale}px`],
+        'xl': [`${20 * scale}px`, `${28 * scale}px`],
+        '2xl': [`${24 * scale}px`, `${32 * scale}px`],
+        '3xl': [`${30 * scale}px`, `${36 * scale}px`],
+        '4xl': [`${36 * scale}px`, `${40 * scale}px`],
+      },
+      borderRadius: {
+        'sm': `${2 * scale}px`,
+        'md': `${6 * scale}px`,
+        'lg': `${8 * scale}px`,
+        'xl': `${12 * scale}px`,
+        '2xl': `${16 * scale}px`,
+        '3xl': `${24 * scale}px`,
+      },
       colors: {
-        'god': {
-          50: '#e6fff2',
-          100: '#b3ffe0',
-          200: '#80ffce',
-          300: '#4dffbc',
-          400: '#1affaa',
-          500: '#00e68a',  // Primary green
-          600: '#00b36b',
-          700: '#00804d',
-          800: '#004d2e',
-          900: '#001a10',
-          950: '#000a05',
+        'cognivox': {
+          50: '#EFF6FF',
+          100: '#DBEAFE',
+          200: '#BFDBFE',
+          300: '#93C5FD',
+          400: '#60A5FA',
+          500: '#3B82F6',
+          600: '#2563EB',
+          700: '#1D4ED8',
+          800: '#1E40AF',
+          900: '#1E3A8A',
+          950: '#172554',
         },
-        'matrix': {
-          bg: '#0d0d0d',
-          panel: '#1a1a1a',
-          border: '#00ff41',
-          text: '#00ff41',
-          muted: '#008f11',
-        }
       },
       fontFamily: {
-        mono: ['JetBrains Mono', 'Fira Code', 'Consolas', 'monospace'],
+        sans: ['Inter', 'system-ui', '-apple-system', 'sans-serif'],
       },
       animation: {
         'pulse-slow': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite',
-        'glitch': 'glitch 3s infinite',
-        'scan': 'scan 8s linear infinite',
-        'flicker': 'flicker 0.15s infinite',
-      },
-      keyframes: {
-        glitch: {
-          '0%, 100%': {
-            textShadow: '2px 0 rgba(0, 255, 0, 0.7), -2px 0 rgba(0, 0, 255, 0.7)'
-          },
-          '50%': {
-            textShadow: '-2px 0 rgba(0, 255, 0, 0.7), 2px 0 rgba(0, 0, 255, 0.7)'
-          },
-        },
-        scan: {
-          '0%': { transform: 'translateY(-100%)' },
-          '100%': { transform: 'translateY(100vh)' },
-        },
-        flicker: {
-          '0%, 100%': { opacity: '1' },
-          '50%': { opacity: '0.8' },
-        },
       },
       backdropBlur: {
         xs: '2px',
       },
       boxShadow: {
-        'glow': '0 0 20px rgba(0, 255, 65, 0.3)',
-        'glow-lg': '0 0 40px rgba(0, 255, 65, 0.5)',
+        'soft': '0 1px 3px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04)',
+        'medium': '0 4px 12px rgba(0, 0, 0, 0.08)',
       },
     },
   },

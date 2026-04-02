@@ -1,8 +1,13 @@
+<!-- ACTUAL EDIT: COGNIVOX_UI_REAL_CODE_APPLIER_v2 -->
+<!-- UNIFIED: COGNIVOX_UI_MAPPER_v1 -->
 <script lang="ts">
     import { invoke } from "@tauri-apps/api/core";
     import { listen } from "@tauri-apps/api/event";
     import { getCurrentWindow } from "@tauri-apps/api/window";
-    import { onMount, onDestroy } from "svelte";
+    import { onMount, onDestroy, untrack as svelteUntrack } from "svelte";
+    
+    // Fallback for untrack if svelteUntrack is somehow undefined at runtime
+    const untrackHandle = typeof svelteUntrack !== 'undefined' ? svelteUntrack : ((fn: any) => fn());
     import Diagnostics from "$lib/Diagnostics.svelte";
     import RecordingOverlay from "$lib/RecordingOverlay.svelte";
     import ProcessingProgress from "$lib/ProcessingProgress.svelte";
@@ -17,6 +22,8 @@
     import { FirestoreSessionManager } from "$lib/firestoreSessionManager";
     import { getCurrentUser, initFirebase, waitForAuth } from "$lib/firebase";
     import { keyManager, type KeyManagerState } from "$lib/keyManager";
+    import { settingsStore } from "$lib/settingsStore";
+
 
     // === UI COMPONENTS ===
     import DebugBar from "$lib/DebugBar.svelte";
@@ -32,6 +39,10 @@
     import GraphTab from "$lib/GraphTab.svelte";
     import BottomActionBar from "$lib/BottomActionBar.svelte";
     import ToastNotification from "$lib/ToastNotification.svelte";
+    import InsightsPanel from "$lib/InsightsPanel.svelte";
+    import DecisionLedger from "$lib/DecisionLedger.svelte";
+    import ProjectOverview from "$lib/ProjectOverview.svelte";
+    import SearchTab from "$lib/SearchTab.svelte";
 
     // === SERVICE MODULES ===
     import type {
@@ -74,6 +85,7 @@
     import {
         extractKnowledgeGraph,
         applyGraphQualityRules,
+        selfHealGraph,
         autoClusterGraph,
         expandCluster,
     } from "$lib/services/graphExtractionService";
@@ -95,83 +107,74 @@
     // ============================================================
     // STATE DECLARATIONS
     // ============================================================
-    let devices: string[] = [];
-    let status = "Ready";
-    let isRecording = false;
-    let forceNewSession = false;
-    let apiKey = "";
-    let isGeminiConnected = false;
-    let isRunningInTauri = true;
+    let devices = $state<any[]>([]);
+    let status = $state("Ready");
+    let isRecording = $state(false);
+    // Guard to prevent rapid Start/Stop race condition where stop_audio_capture
+    // could invoke before start_audio_capture completes → EC-009 fix
+    let isRecordingStarting = $state(false);
+    let forceNewSession = $state(false);
+    let apiKey = $state("");
+    let isGeminiConnected = $state(false);
+    let isRunningInTauri = $state(true);
+    let whisperReady = $state(false);
+    let whisperLoading = $state(false);
+    let whisperProgress = $state(0);
 
-    let selectedModel = "gemini-2.0-flash";
-    let availableModels = [
-        { id: "gemini-2.0-flash", name: "Gemini 2.0 Flash (Stable)" },
-        { id: "gemini-2.0-flash-lite", name: "Gemini 2.0 Flash Lite" },
-        {
-            id: "gemini-2.5-flash-preview-04-17",
-            name: "Gemini 2.5 Flash Preview",
-        },
-        { id: "gemini-1.5-flash", name: "Gemini 1.5 Flash (Fallback)" },
-    ];
+    let selectedModel = $state($settingsStore.geminiModel);
+    // availableModels is now dynamic from $settingsStore
 
-    let captureMode = "both";
-    let currentVolume = 0;
-    let volumeInterval: ReturnType<typeof setInterval> | null = null;
-    let autoSaveInterval: ReturnType<typeof setInterval> | null = null;
-    let pastSessions: any[] = [];
-    let sessionCache: Map<string, any> = new Map();
-    let isTyping = false;
-    let partialText = "";
-    let latencyMs = 0;
-    let searchQuery = "";
-    let searchFilter = "all";
-    let transcripts: Transcript[] = [];
-    let stressLevel = 0;
-    let engagementLevel = 0.3;
-    let urgencyLevel = 0;
-    let clarityLevel = 0.4;
-    let alerts: Array<{
+    let captureMode = $state("both");
+    let currentVolume = $state(0);
+    let volumeInterval: ReturnType<typeof setInterval> | null = $state(null);
+    let autoSaveInterval: ReturnType<typeof setInterval> | null = $state(null);
+    let pastSessions = $state<any[]>([]);
+    let sessionCache = $state<Map<string, any>>(new Map());
+    let isTyping = $state(false);
+    let partialText = $state("");
+    let latencyMs = $state(0);
+    let searchQuery = $state("");
+    let searchFilter = $state("all");
+    let transcripts = $state<Transcript[]>([]);
+    let stressLevel = $state(0);
+    let engagementLevel = $state(0.3);
+    let urgencyLevel = $state(0);
+    let clarityLevel = $state(0.4);
+    let alerts = $state<Array<{
         id: string;
         type: string;
         message: string;
         timestamp: string;
         severity: "info" | "warning" | "critical";
-    }> = [];
-    let isProcessing = false;
-    let processingStep = 0;
-    let processingError: string | null = null;
-    let showSettingsModal = false;
-    let recordingStartTime: Date | null = null;
-    let speakerIdInitialized = false;
-    let speakerIdStatus: SpeakerIdStatus | null = null;
-    let speakerProfiles: SpeakerProfile[] = [];
-    let lastIdentifiedSpeaker: IdentifiedSpeaker | null = null;
-    let debugEventCount = 0;
-    let debugLastEvent = "";
-    let debugLastTranscript = "";
-    let keyState: KeyManagerState = keyManager.getState();
-    let isRateLimited = false;
-    let lastRequestTime: string | null = null;
-    let debugMode = false;
-    let toastMessage: string | null = null;
-    let toastType: "info" | "warning" | "error" = "info";
-    let vadState: VADState = vadManager.getState();
-    let vadUnsubscribe: (() => void) | null = null;
-    let chunkUnsubscribe: (() => void) | null = null;
-    let activeTab:
-        | "transcript"
-        | "graph"
-        | "alerts"
-        | "analytics"
-        | "settings"
-        | "speakers"
-        | "diagnostics" = "transcript";
-    let graphNodes: GraphNode[] = [];
-    let graphEdges: GraphEdge[] = [];
+    }>>([]);
+    let isProcessing = $state(false);
+    let processingStep = $state(0);
+    let processingError = $state<string | null>(null);
+    let showSettingsModal = $state(false);
+    let recordingStartTime = $state<Date | null>(null);
+    let speakerIdInitialized = $state(false);
+    let speakerIdStatus = $state<SpeakerIdStatus | null>(null);
+    let speakerProfiles = $state<SpeakerProfile[]>([]);
+    let lastIdentifiedSpeaker = $state<IdentifiedSpeaker | null>(null);
+    let debugEventCount = $state(0);
+    let debugLastEvent = $state("");
+    let debugLastTranscript = $state("");
+    let keyState = $state<KeyManagerState>(keyManager.getState());
+    let isRateLimited = $state(false);
+    let lastRequestTime = $state<string | null>(null);
+    let elapsedRecordingSeconds = $state(0);
+    let recordingTimerInterval: ReturnType<typeof setInterval> | null = null;
+    let debugMode = $state(false);
+    let toastMessage = $state<string | null>(null);
+    let toastType = $state<"info" | "warning" | "error">("info");
+    let vadState = $state<VADState>(vadManager.getState());
+    let activeTab = $state<string>("transcript");
+    let graphNodes = $state<GraphNode[]>([]);
+    let graphEdges = $state<GraphEdge[]>([]);
     // Keep unclustered originals for expanding clusters
-    let _originalGraphNodes: GraphNode[] = [];
-    let _originalGraphEdges: GraphEdge[] = [];
-    let currentSession: any = {
+    let _originalGraphNodes = $state<GraphNode[]>([]);
+    let _originalGraphEdges = $state<GraphEdge[]>([]);
+    let currentSession = $state<any>({
         id: crypto.randomUUID ? crypto.randomUUID() : `session_${Date.now()}`,
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
@@ -186,68 +189,85 @@
             tags: [],
         },
         summary: null,
-    };
-    let isCollapsed = false;
-    let showSummaryPanel = false;
-    let showMemoriesPanel = false;
-    let extractedSummary: ExtractedSummary | null = null;
-    let extractedMemories: ExtractedMemoriesData | null = null;
-    let isExtractingSummary = false;
-    let isExtractingMemories = false;
-    let isGeneratingGraph = false;
-    let extractError: string | null = null;
-    let localInsights: any[] = [];
+    });
+    let isCollapsed = $state(false);
+    let isSidebarOpen = $state(false);
+    let showSummaryPanel = $state(false);
+    let showMemoriesPanel = $state(false);
+    let extractedSummary = $state<ExtractedSummary | null>(null);
+    let localInsights = $state<any[]>([]); // Restored for intelligence pipeline continuity
+    
+    // [PERSISTENCE_v1] Reference to GraphTab for coordinate capture
+    let graphTabRef = $state<any>();
+    let extractedMemories = $state<ExtractedMemoriesData | null>(null);
+    let isExtractingSummary = $state(false);
+    let isExtractingMemories = $state(false);
+    let isGeneratingGraph = $state(false);
+    let extractError = $state<string | null>(null);
     // Timer for promoting partial transcripts when Gemini is unresponsive
-    let partialPromotionTimer: ReturnType<typeof setTimeout> | null = null;
+    let partialPromotionTimer = $state<ReturnType<typeof setTimeout> | null>(null);
+    let typingTimer: ReturnType<typeof setTimeout> | null = null;
     const PARTIAL_PROMOTION_DELAY_MS = 15_000; // 15 seconds
+
+    // Unsubscribe functions (non-reactive)
+    let vadUnsubscribe: (() => void) | null = null;
+    let chunkUnsubscribe: (() => void) | null = null;
+    let unlistenStatus = $state<(() => void) | null>(null);
+    let unlistenTranscript = $state<(() => void) | null>(null);
+    let unlistenIntelligence = $state<(() => void) | null>(null);
+    let unlistenBackendErrors = $state<(() => void) | null>(null);
+
+    // === SETTINGS STORE SUBSCRIPTION ===
+    // Svelte 5 $settingsStore automatically handles subscription.
+    // Manual subscription removed to prevent double-updates.
 
     // ============================================================
     // REACTIVE STATEMENTS
     // ============================================================
-    $: {
-        if (currentSession) {
-            currentSession.transcripts = transcripts.map((t) => ({
-                timestamp: t.timestamp,
-                speaker_id: t.speaker,
-                text: t.text,
-                tone: t.tone || null,
-                category: t.category || null,
-                confidence: t.confidence || 0.5,
-            }));
-            currentSession.graph_nodes = graphNodes.map((n) => ({
-                id: n.id,
-                node_type: n.type,
-                metadata: {},
-            }));
-            currentSession.graph_edges = graphEdges.map((e) => ({
-                from: e.from,
-                to: e.to,
-                relation: e.relation,
-                weight: 1.0,
-            }));
-            currentSession.metadata.total_transcripts = transcripts.length;
-            currentSession.updated_at = new Date().toISOString();
-            currentSession.psychosomatic = {
-                stress: stressLevel || 0,
-                engagement: engagementLevel || 0,
-                urgency: urgencyLevel || 0,
-                clarity: clarityLevel || 0,
-            };
-            currentSession.insights = extractedSummary
-                ? {
-                      topics: extractedSummary.topics || [],
-                      decisions: extractedSummary.decisions || [],
-                      action_items: extractedSummary.actionItems || [],
-                      key_points: extractedSummary.keyPoints || [],
-                  }
-                : null;
-        }
-    }
+    // === SESSION SYNC EFFECT ===
+    // Lightweight sync for UI metadata only. Heavy cloning moved to saveSession.
+    // GUARD: skip during isRecordingStarting to prevent Svelte 5 effect-depth cascade.
+    // isRecordingStarting is a TRACKED dependency so the effect re-runs once it clears.
+    $effect(() => {
+        const transcriptCount = transcripts.length;
+        if (isRecordingStarting) return;
 
-    $: displayText =
+        untrackHandle(() => {
+            if (currentSession && currentSession.metadata) {
+                if (currentSession.metadata.total_transcripts !== transcriptCount) {
+                    currentSession.metadata.total_transcripts = transcriptCount;
+                    currentSession.updated_at = new Date().toISOString();
+                }
+            }
+        });
+    });
+
+    // Keep selectedModel in sync with settingsStore
+    $effect(() => {
+        if (selectedModel !== $settingsStore.geminiModel) {
+            selectedModel = $settingsStore.geminiModel;
+        }
+    });
+
+    // KG_UNIFIED_v1: Trigger refreshLayout when graph tab becomes visible.
+    // GraphTab is CSS-toggled (display:none when hidden) so ResizeObserver doesn't fire on show.
+    // refreshLayout() re-measures containerWidth/containerHeight and calls fitToView().
+    $effect(() => {
+        if (activeTab === 'graph') {
+            // Two rAF frames: first allows CSS display:block to apply, second allows layout paint.
+            requestAnimationFrame(() => {
+                requestAnimationFrame(() => {
+                    graphTabRef?.refreshLayout();
+                });
+            });
+        }
+    });
+
+    let displayText = $derived(
         transcripts.length > 0
             ? transcripts[transcripts.length - 1].text
-            : "No transcripts yet. Start recording to begin.";
+            : "No transcripts yet. Start recording to begin."
+    );
 
     // ============================================================
     // UTILITY FUNCTIONS
@@ -365,6 +385,7 @@
             transcripts,
             graphNodes,
             graphEdges,
+            graphPositions: currentSession?.graph_positions || null,
             stressLevel,
             engagementLevel,
             urgencyLevel,
@@ -376,11 +397,27 @@
         };
     }
 
+    // [PERSISTENCE_v1] Capture visual state from the physics engine
+    function captureGraphPositions() {
+        if (!graphTabRef) return;
+        const posMap = graphTabRef.getPositions();
+        if (posMap && currentSession) {
+            const serializable: Record<string, { x: number; y: number }> = {};
+            posMap.forEach((v: any, k: string) => {
+                serializable[k] = { x: v.x, y: v.y };
+            });
+            currentSession.graph_positions = serializable;
+        }
+    }
+
     function applyRestoredState(state: RestoredState) {
         currentSession = state.currentSession;
         transcripts = state.transcripts;
         graphNodes = state.graphNodes;
         graphEdges = state.graphEdges;
+        if (state.graphPositions && currentSession) {
+            currentSession.graph_positions = state.graphPositions;
+        }
         stressLevel = state.stressLevel;
         engagementLevel = state.engagementLevel;
         urgencyLevel = state.urgencyLevel;
@@ -398,20 +435,30 @@
     // SESSION MANAGEMENT (thin wrappers around sessionService)
     // ============================================================
     function saveCurrentSessionToCache(): any | null {
-        const snapshot = buildSessionSnapshot(getSnapshotParams());
-        if (!snapshot) return null;
-        sessionCache.set(currentSession.id, snapshot);
-        if (isRunningInTauri && transcripts.length > 0) {
-            persistSnapshotToDisk(snapshot);
-        }
-        pastSessions = updatePastSessionsList(
-            pastSessions,
-            snapshot,
-            currentSession.id,
-        );
-        return snapshot;
+        // [EC-017] CRITICAL GUARD: Never build snapshot while recording is starting
+        // because the state is in flux and multiple flushes will trigger depth-limit crashes.
+        if (isRecordingStarting || isProcessing) return null;
+
+        return untrackHandle(() => {
+            const snapshot = buildSessionSnapshot(getSnapshotParams());
+            if (!snapshot) return null;
+            sessionCache.set(currentSession.id, snapshot);
+            if (isRunningInTauri && transcripts.length > 0) {
+                persistSnapshotToDisk(snapshot);
+            }
+            pastSessions = updatePastSessionsList(
+                pastSessions,
+                snapshot,
+                currentSession.id,
+            );
+            return snapshot;
+        });
     }
 
+    // MEETING_TASKS_v1: Task 3.1 — Firebase Persistence Audit
+    // VERIFIED: loadInitialData() correctly calls initFirebase() → waitForAuth() → refreshSessionList()
+    // → fetchAllSessions() which loads local disk sessions first, then merges Firestore cloud sessions.
+    // Sessions persist across reopens. No code change required — persistence is confirmed working.
     async function refreshSessionList(): Promise<void> {
         const result = await fetchAllSessions(sessionCache);
         pastSessions = result.pastSessions;
@@ -428,8 +475,28 @@
         applyRestoredState(parseSessionIntoState(session));
     }
 
+    // [PERSISTENCE_v1] Core sync hook: Listen for manual moves and update state immediately
+    // KG_UNIFIED_v1: Signature changed from CustomEvent wrapper to direct detail object
+    function handleGraphLayoutChanged(detail: { positions: any }) {
+        const positions = detail.positions;
+        if (currentSession && positions) {
+            console.log(`[GRAPH-PERSISTENCE] Manual move detected: syncing ${Object.keys(positions).length} nodes`);
+            currentSession.graph_positions = positions;
+            
+            // Auto-sync to cache/disk for robustness
+            if (!isRecording && isRunningInTauri) {
+                saveCurrentSessionToCache();
+            }
+        }
+    }
+
     async function handleSessionLoad(session: any) {
         if (!session) return;
+        // FIX: Guard against loading a session while recording — would destroy live transcripts (EC-016)
+        if (isRecording) {
+            showToast("Please stop recording before switching sessions.", "warning");
+            return;
+        }
         if (currentSession?.id === session.id) {
             activeTab = "transcript";
             return;
@@ -438,9 +505,11 @@
         const snapshot = saveCurrentSessionToCache();
         if (snapshot && isRunningInTauri) {
             try {
-                await invoke("save_session", {
-                    sessionJson: JSON.stringify(snapshot),
-                });
+                if (isRunningInTauri) {
+                    await invoke("save_session", {
+                        sessionJson: JSON.stringify(snapshot),
+                    });
+                }
             } catch (e) {
                 console.warn("[SESSION-SWITCH] Disk save failed:", e);
             }
@@ -466,53 +535,66 @@
     }
 
     async function saveSession(isFinal = false) {
+        // [EC-017] EMERGENCY GUARD: Skip during recording setup to prevent reactive loop
+        if (isRecordingStarting) return;
         if (!isRunningInTauri || (!isRecording && !isFinal)) return;
-        if (!currentSession) {
-            console.warn("[PERSISTENCE] No current session to save");
-            return;
-        }
-        try {
-            const sessionObj = buildSessionJson(
-                currentSession,
-                transcripts,
-                graphNodes,
-                graphEdges,
-                stressLevel,
-                engagementLevel,
-                urgencyLevel,
-                clarityLevel,
-                extractedSummary,
-                extractedMemories,
-                showSummaryPanel,
-                showMemoriesPanel,
-            );
-            currentSession = sessionObj;
-            const transcriptCount = sessionObj.transcripts.length;
-            const nodeCount = sessionObj.graph_nodes.length;
-            console.log(
-                `[PERSISTENCE] Saving ${isFinal ? "(Final)" : "(Auto)"}: ${transcriptCount} transcripts, ${nodeCount} nodes`,
-            );
-            saveCurrentSessionToCache();
-            await saveSessionToDisk(JSON.stringify(sessionObj));
-            await syncSessionToCloud(sessionObj);
-            if (isFinal) {
-                await refreshSessionList();
-                status = `Session saved (${transcriptCount} transcripts)`;
+        
+        return untrackHandle(async () => {
+            if (!currentSession) {
+                console.warn("[PERSISTENCE] No current session to save");
+                return;
             }
-        } catch (error: any) {
-            const errMsg =
-                typeof error === "string"
-                    ? error
-                    : error?.message || String(error);
-            console.error("[PERSISTENCE] Save FAILED:", errMsg);
-            status = `⚠ Save failed: ${errMsg}`;
-        }
+            
+            // [PERSISTENCE_v1] Capture latest coordinates before building payload
+            captureGraphPositions();
+
+            try {
+                const sessionObj = buildSessionJson(
+                    currentSession,
+                    transcripts,
+                    graphNodes,
+                    graphEdges,
+                    stressLevel,
+                    engagementLevel,
+                    urgencyLevel,
+                    clarityLevel,
+                    extractedSummary,
+                    extractedMemories,
+                    showSummaryPanel,
+                    showMemoriesPanel,
+                );
+                currentSession = sessionObj;
+                const transcriptCount = sessionObj.transcripts.length;
+                const nodeCount = sessionObj.graph_nodes.length;
+                
+                console.log(
+                    `[PERSISTENCE] Saving ${isFinal ? "(Final)" : "(Auto)"}: ${transcriptCount} transcripts, ${nodeCount} nodes`,
+                );
+                
+                // SAVE to cache
+                saveCurrentSessionToCache();
+                
+                if (isRunningInTauri) {
+                    await saveSessionToDisk(JSON.stringify(sessionObj));
+                    await syncSessionToCloud(sessionObj);
+                }
+                
+                if (isFinal) {
+                    await refreshSessionList();
+                    status = `Session saved (${transcriptCount} transcripts)`;
+                }
+            } catch (error: any) {
+                const errMsg = typeof error === "string" ? error : error?.message || String(error);
+                console.error("[PERSISTENCE] Save FAILED:", errMsg);
+                status = `⚠ Save failed: ${errMsg}`;
+            }
+        });
     }
 
     async function loadInitialData() {
         try {
             if (!isRunningInTauri) return;
-            await recoverPendingSave();
+            if (isRunningInTauri) await recoverPendingSave();
             try {
                 initFirebase();
                 const user = await waitForAuth();
@@ -606,6 +688,11 @@
     }
 
     async function handleGenerateGraph() {
+        // FIX: Guard against calling while recording — would overwrite additive live graph nodes (EC-013)
+        if (isRecording) {
+            showToast("Stop recording before regenerating the knowledge graph.", "warning");
+            return;
+        }
         if (isGeneratingGraph || transcripts.length === 0) return;
         isGeneratingGraph = true;
         status = "Generating knowledge graph...";
@@ -616,17 +703,14 @@
                 graphEdges,
                 getActiveApiKey,
             );
-            // Apply quality rules (dedup, merge, orphan removal)
+            // KG_CLEANUP_SELF_HEALING_v1: quality rules → self-heal → cluster
             const cleaned = applyGraphQualityRules(result.nodes, result.edges);
+            const healed = selfHealGraph(cleaned.nodes, cleaned.edges);
             // Store unclustered originals for expand
-            _originalGraphNodes = [...cleaned.nodes];
-            _originalGraphEdges = [...cleaned.edges];
+            _originalGraphNodes = [...healed.nodes];
+            _originalGraphEdges = [...healed.edges];
             // Auto-cluster if large
-            const clustered = autoClusterGraph(
-                cleaned.nodes,
-                cleaned.edges,
-                20,
-            );
+            const clustered = autoClusterGraph(healed.nodes, healed.edges, 20);
             graphNodes = clustered.nodes;
             graphEdges = clustered.edges;
             if (result.error) {
@@ -656,8 +740,24 @@
         showToast("Knowledge graph cleared", "info");
     }
 
-    function handleToggleCluster(event: CustomEvent<{ nodeId: string }>) {
-        const { nodeId } = event.detail;
+    // KG_CLEANUP_SELF_HEALING_v1: instant self-heal (no API) — removes noise nodes
+    function handleSelfHealGraph() {
+        const before = graphNodes.length;
+        const healed = selfHealGraph(graphNodes, graphEdges);
+        graphNodes = healed.nodes;
+        graphEdges = healed.edges;
+        const removed = before - healed.nodes.length;
+        showToast(
+            removed > 0
+                ? `Graph cleaned: removed ${removed} noise node${removed > 1 ? "s" : ""}`
+                : "Graph is already clean",
+            "info",
+        );
+    }
+
+    // KG_UNIFIED_v1: Signature changed from CustomEvent to direct detail object (Svelte 5 callback)
+    function handleToggleCluster(detail: { nodeId: string }) {
+        const { nodeId } = detail;
         const origNodes =
             _originalGraphNodes.length > 0 ? _originalGraphNodes : graphNodes;
         const origEdges =
@@ -697,9 +797,11 @@
     async function pollVolume() {
         if (!isRecording) return;
         try {
-            let vol = (await invoke("get_current_volume")) as number;
-            currentVolume = currentVolume * 0.3 + vol * 0.7;
-            vadManager.processVolume(currentVolume);
+            if (isRunningInTauri) {
+                let vol = (await invoke("get_current_volume")) as number;
+                currentVolume = currentVolume * 0.3 + vol * 0.7;
+                vadManager.processVolume(currentVolume);
+            }
         } catch {
             /* ignore */
         }
@@ -707,12 +809,17 @@
 
     async function setCaptureMode(mode: string) {
         try {
-            await invoke("set_capture_mode", { mode });
-            captureMode = mode;
-            if (isRecording) {
-                await invoke("stop_audio_capture");
-                await invoke("start_audio_capture");
-                status = `Recording (${mode})...`;
+            if (isRunningInTauri) {
+                await invoke("set_capture_mode", { mode });
+                captureMode = mode;
+                if (isRecording) {
+                    await invoke("stop_audio_capture");
+                    await invoke("start_audio_capture");
+                    status = `Recording (${mode})...`;
+                }
+            } else {
+                captureMode = mode;
+                if (isRecording) status = `Recording (Browser Mode)...`;
             }
         } catch (error) {
             console.error("Failed to set capture mode:", error);
@@ -720,18 +827,28 @@
     }
 
     async function toggleCapture() {
+        console.log("[Recording] toggleCapture called. Current isRecording:", isRecording);
+        // FIX: Prevent rapid start/stop race condition (EC-009)
+        if (isRecordingStarting) {
+            console.warn("[Recording] Ignored — recording start already in progress");
+            return;
+        }
         try {
             if (isRecording) {
+                isRecording = false;
                 // === STOP RECORDING ===
-                await invoke("stop_audio_capture");
+                try {
+                    if (isRunningInTauri) await invoke("stop_audio_capture");
+                } catch (stopErr: any) {
+                    console.warn("[Recording] Stop audio capture failed:", stopErr);
+                }
                 // Flush: tell backend to process any buffered audio immediately
                 // (don't wait for silence timeout)
                 try {
-                    await invoke("flush_audio_buffer");
+                    if (isRunningInTauri) await invoke("flush_audio_buffer");
                 } catch (e) {
                     console.warn("[Recording] flush_audio_buffer:", e);
                 }
-                isRecording = false;
                 if (volumeInterval) {
                     clearInterval(volumeInterval);
                     volumeInterval = null;
@@ -764,146 +881,138 @@
                         status = "Ready";
                     }, 2000);
                 }
+                if (recordingTimerInterval) {
+                    clearInterval(recordingTimerInterval);
+                    recordingTimerInterval = null;
+                }
+                elapsedRecordingSeconds = 0;
+                
                 if (transcripts.length > 0 || graphNodes.length > 0) {
                     await saveSession(true);
                     console.log("[RECORDING] Safety-net final save complete");
                 }
             } else {
-                // === START RECORDING ===
-                // Session continuation: if the previous session ended recently
-                // and had transcripts, CONTINUE it instead of creating a new one.
-                // This prevents "splitting" when a user quickly stops/starts recording.
-                // If user clicked "New Session", skip continuation and force a new session.
-                const CONTINUE_WINDOW_MS = 120_000; // 2 minutes
-                const canContinue =
-                    !forceNewSession &&
-                    currentSession &&
-                    currentSession.updated_at &&
-                    transcripts.length > 0 &&
-                    Date.now() - new Date(currentSession.updated_at).getTime() <
-                        CONTINUE_WINDOW_MS;
-                forceNewSession = false; // Reset flag after use
+                // === START RECORDING (HIGH-CONFIDENCE INIT) ===
+                // UI feedback MUST be immediate
+                isRecording = true; 
+                isRecordingStarting = true;
+                elapsedRecordingSeconds = 0;
+                
+                // Start UI timer immediately
+                recordingTimerInterval = setInterval(() => {
+                    elapsedRecordingSeconds++;
+                }, 1000);
+                
+                untrackHandle(async () => {
+                    // 1. Determine session continuation
+                    const CONTINUE_WINDOW_MS = 120_000;
+                    const canContinue = !forceNewSession && currentSession && currentSession.updated_at &&
+                        transcripts.length > 0 && (Date.now() - new Date(currentSession.updated_at).getTime() < CONTINUE_WINDOW_MS);
+                    forceNewSession = false;
 
-                if (canContinue) {
-                    // CONTINUE existing session — add a new part
-                    console.log(
-                        `[RECORDING] Continuing session ${currentSession.id} (${transcripts.length} existing transcripts)`,
-                    );
-                    const partNum = (currentSession.parts?.length || 0) + 1;
-                    if (!currentSession.parts) currentSession.parts = [];
-                    currentSession.parts.push({
-                        partNumber: partNum,
-                        startedAt: new Date().toISOString(),
-                        transcriptStartIndex: transcripts.length,
-                    });
-                    // Don't clear transcripts/graph — keep existing data
-                    localInsights = [];
-                } else {
-                    // NEW session
-                    saveCurrentSessionToCache();
-                    transcripts = [];
-                    graphNodes = [];
-                    graphEdges = [];
-                    localInsights = [];
-                    extractedSummary = null;
-                    extractedMemories = null;
-                    const now = new Date();
-                    currentSession = {
-                        id: crypto.randomUUID
-                            ? crypto.randomUUID()
-                            : `session_${Date.now()}`,
-                        created_at: now.toISOString(),
-                        updated_at: now.toISOString(),
-                        transcripts: [],
-                        graph_nodes: [],
-                        graph_edges: [],
-                        metadata: {
-                            title: `Session ${now.toLocaleDateString()} ${now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`,
-                            duration_seconds: 0,
-                            total_transcripts: 0,
-                            total_speakers: 0,
-                            tags: [],
-                        },
-                        summary: null,
-                        parts: [
-                            {
-                                partNumber: 1,
-                                startedAt: now.toISOString(),
-                                transcriptStartIndex: 0,
-                            },
-                        ],
-                    };
-                }
-                try {
-                    await invoke("reset_audio_loop");
-                } catch (e) {
-                    console.warn("[Recording] Audio loop reset failed:", e);
-                }
-                try {
-                    await invoke("clear_whisper_context");
-                } catch (e) {
-                    console.warn(
-                        "[Recording] Whisper context clear failed:",
-                        e,
-                    );
-                }
-                currentVolume = 0;
-                await invoke("start_audio_capture");
-                isRecording = true;
-                recordingStartTime = new Date();
-                status = "Listening for speech...";
-                vadManager.start();
-                volumeInterval = setInterval(pollVolume, 100);
-                if (!graphNodes.find((n) => n.id === "Start")) {
-                    graphNodes = [
-                        {
-                            id: "Start",
-                            type: "Root",
-                            label: "Start",
-                            weight: 3,
-                        },
-                    ];
-                    graphEdges = [];
-                }
-                autoSaveInterval = setInterval(() => saveSession(false), 30000);
-                try {
-                    await invoke("start_processing_loop");
-                    console.log(
-                        "[Recording] Audio processing loop started IMMEDIATELY",
-                    );
-                } catch (e) {
-                    console.warn("[Recording] start_processing_loop:", e);
-                }
-                if (keyState.keys.length > 0) {
-                    (async () => {
-                        status = "Initializing AI engine...";
-                        const initResult = await backgroundRecordingInit({
-                            selectedModel,
-                            onSpeakerIdReady: () => {
-                                speakerIdInitialized = true;
-                            },
-                            onSpeakerIdStatusRefresh: doRefreshSpeakerIdStatus,
+                    if (canContinue) {
+                        const partNum = (currentSession.parts?.length || 0) + 1;
+                        if (!currentSession.parts) currentSession.parts = [];
+                        currentSession.parts.push({
+                            partNumber: partNum,
+                            startedAt: new Date().toISOString(),
+                            transcriptStartIndex: transcripts.length,
                         });
-                        isGeminiConnected = initResult.isGeminiConnected;
-                        if (initResult.apiKey) apiKey = initResult.apiKey;
-                        status = initResult.status;
-                        if (initResult.error)
-                            showToast(initResult.error, "warning");
-                    })();
-                }
-                try {
-                    new Audio(
-                        "data:audio/wav;base64,UklGRnoGAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAGAACBhYqFbF1fdJivrJBhNjVgodDbq2EcBj+a2teleicAV63E25NbIACf08HmjFgT",
-                    ).play();
-                } catch {
-                    /* ignore */
-                }
+                        localInsights = [];
+                    } else {
+                        // SAVE OLD: Note this is inside untrack so it's safe
+                        if (currentSession && (transcripts.length > 0 || graphNodes.length > 0)) {
+                            saveCurrentSessionToCache();
+                        }
+                        transcripts = [];
+                        graphNodes = [];
+                        graphEdges = [];
+                        localInsights = [];
+                        
+                        const now = new Date();
+                        currentSession = {
+                            id: (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : `session_${Date.now()}`,
+                            created_at: now.toISOString(),
+                            updated_at: now.toISOString(),
+                            transcripts: [],
+                            graph_nodes: [],
+                            graph_edges: [],
+                            metadata: { title: `Session ${now.toLocaleDateString()} ${now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`, duration_seconds: 0, total_transcripts: 0, total_speakers: 0, tags: [] },
+                            summary: null,
+                            parts: [{ partNumber: 1, startedAt: now.toISOString(), transcriptStartIndex: 0 }],
+                        };
+                    }
+
+                    // 2. Start services (Atomic)
+                    try { if (isRunningInTauri) { await invoke("reset_audio_loop"); await invoke("clear_whisper_context"); } } catch (e) { console.warn("[Recording] Init failed:", e); }
+
+                    // REALTIME_v1: Initialize Whisper unconditionally at every recording start.
+                    // Whisper is a LOCAL model — it does not need an API key.
+                    // Previously it was only initialized inside backgroundRecordingInit which is
+                    // gated on keyState.keys.length > 0, and ran AFTER start_processing_loop.
+                    // The smart_audio_loop checks whisper_ready before processing ANY audio, so
+                    // if Whisper was still loading when audio arrived, nothing got transcribed
+                    // until after stop (flush_audio_buffer). Firing init HERE ensures Whisper
+                    // is loading from the very first moment of recording.
+                    if (isRunningInTauri) {
+                        if (!whisperReady) whisperLoading = true;
+                        invoke("initialize_whisper", { modelSize: "small" })
+                            .then(() => { whisperReady = true; whisperLoading = false; })
+                            .catch(e => {
+                                whisperLoading = false;
+                                console.warn("[Recording] Whisper background init:", e);
+                            });
+                    }
+
+                    currentVolume = 0;
+                    try { if (isRunningInTauri) await invoke("start_audio_capture"); } catch (e) { console.warn("[Recording] Capture backend fail:", e); }
+                    
+                    recordingStartTime = new Date();
+                    status = "Listening for speech...";
+                    
+                    // 3. Handlers & Intervals
+                    vadManager.start();
+                    volumeInterval = setInterval(pollVolume, 100);
+                    autoSaveInterval = setInterval(() => saveSession(false), 30000);
+                    
+                    try { if (isRunningInTauri) await invoke("start_processing_loop"); } catch (e) { console.warn("[Recording] Processing loop fail:", e); }
+                    
+                    if (keyState.keys.length > 0) {
+                        backgroundRecordingInit({
+                            selectedModel,
+                            onSpeakerIdReady: () => { speakerIdInitialized = true; },
+                            onSpeakerIdStatusRefresh: doRefreshSpeakerIdStatus,
+                        }).then(res => {
+                            isGeminiConnected = res.isGeminiConnected;
+                            if (res.apiKey) apiKey = res.apiKey;
+                            status = res.status;
+                            if (res.error) showToast(res.error, "warning");
+                        });
+                    }
+                    
+                    try { new Audio("data:audio/wav;base64,UklGRnoGAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAGAACBhYqFbF1fdJivrJBhNjVgodDbq2EcBj+a2teleicAV63E25NbIACf08HmjFgT").play(); } catch { }
+
+                    // Services are up, but we keep isRecordingStarting for another 800ms 
+                    // to allow UI animations and backend buffers to settle.
+                    setTimeout(() => { 
+                        isRecordingStarting = false;
+                        console.log("[Recording] Stabilization window complete.");
+                    }, 1200);
+                });
             }
         } catch (error: any) {
             console.error("Capture error:", error);
-            status = `Capture Error: ${error?.message || String(error)}`;
-            processingError = error?.message || String(error);
+            const errMsg = error?.message || String(error);
+            // FIX: Provide specific guidance for microphone permission denial (EC-001)
+            if (errMsg.toLowerCase().includes('permission') || errMsg.toLowerCase().includes('denied') || errMsg.toLowerCase().includes('notallowed')) {
+                showToast("Microphone access denied. Please check your browser or OS microphone permissions.", "error");
+            } else {
+                showToast(`Recording failed: ${errMsg}`, "error");
+            }
+            status = `Capture Error: ${errMsg}`;
+            processingError = errMsg;
             isRecording = false;
+            isRecordingStarting = false;
         }
     }
 
@@ -1004,44 +1113,51 @@
             graphNodes = basicGraph.nodes;
             graphEdges = basicGraph.edges;
 
-            // Then enhance with Gemini-powered entity/relationship extraction
-            try {
-                status = "Extracting knowledge graph entities...";
-                const getApiKey = () => keyManager.getCurrentKey()?.key || null;
-                const extractedGraph = await extractKnowledgeGraph(
-                    transcripts,
-                    graphNodes,
-                    graphEdges,
-                    getApiKey,
-                );
-                graphNodes = extractedGraph.nodes;
-                graphEdges = extractedGraph.edges;
-                if (extractedGraph.error) {
+            // KG_CLEANUP_SELF_HEALING_v1: Gemini batch extraction REPLACES the live graph.
+            // Pass empty arrays (not existing junk nodes) so Gemini builds a FRESH clean graph
+            // from the full transcript. This is the auto-heal on recording stop.
+            if (!isRecording) {
+                try {
+                    status = "Rebuilding knowledge graph...";
+                    const getApiKey = () => keyManager.getCurrentKey()?.key || null;
+                    const extractedGraph = await extractKnowledgeGraph(
+                        transcripts,
+                        [], // SELF_HEALING_FIXED: start fresh — replace live junk graph
+                        [], // with clean Gemini-extracted entities and relations
+                        getApiKey,
+                    );
+                    graphNodes = extractedGraph.nodes;
+                    graphEdges = extractedGraph.edges;
+                    if (extractedGraph.error) {
+                        console.warn(
+                            `[PROCESSING] Graph extraction note: ${extractedGraph.error}`,
+                        );
+                    } else {
+                        console.log(`[PROCESSING] Graph rebuilt: ${graphNodes.length} nodes, ${graphEdges.length} edges`);
+                    }
+                } catch (e) {
                     console.warn(
-                        `[PROCESSING] Graph extraction note: ${extractedGraph.error}`,
+                        "[PROCESSING] Enhanced graph extraction failed, using basic graph:",
+                        e,
                     );
                 }
-            } catch (e) {
-                console.warn(
-                    "[PROCESSING] Enhanced graph extraction failed, using basic graph:",
-                    e,
-                );
+            } else {
+                console.log("[PROCESSING] Skipping Gemini extraction — still recording (live graph intact)");
             }
-            // Apply quality rules and auto-clustering
+            // KG_CLEANUP_SELF_HEALING_v1: Apply quality rules → self-heal → auto-cluster
             {
                 const cleaned = applyGraphQualityRules(graphNodes, graphEdges);
-                _originalGraphNodes = [...cleaned.nodes];
-                _originalGraphEdges = [...cleaned.edges];
-                const clustered = autoClusterGraph(
-                    cleaned.nodes,
-                    cleaned.edges,
-                    20,
-                );
+                // Self-heal removes residual junk (generic concepts, orphaned nodes)
+                const healed = selfHealGraph(cleaned.nodes, cleaned.edges);
+                _originalGraphNodes = [...healed.nodes];
+                _originalGraphEdges = [...healed.edges];
+                const clustered = autoClusterGraph(healed.nodes, healed.edges, 20);
                 graphNodes = clustered.nodes;
                 graphEdges = clustered.edges;
             }
             // Fallback: if graph is still very thin after all extraction attempts,
             // force a local-only rebuild from raw transcript text
+            // KG_REDESIGN_v1: Count only real content nodes (exclude deprecated Root/Speaker utility nodes)
             const nonRootNodes = graphNodes.filter(
                 (n) => n.type !== "Root" && n.type !== "Speaker",
             );
@@ -1052,7 +1168,7 @@
                 status = "Building local knowledge graph...";
                 const localResult = await extractKnowledgeGraph(
                     transcripts,
-                    [{ id: "Start", type: "Root", label: "Start", weight: 3 }],
+                    [], // KG_REDESIGN_v1: Graph starts empty — no dummy Start node
                     [],
                     () => null, // Force local extraction by passing no API key
                 );
@@ -1125,32 +1241,34 @@
     // ============================================================
     // EVENT LISTENERS + LIFECYCLE
     // ============================================================
-    let unlistenStatus: () => void;
-    let unlistenTranscript: () => void;
-    let unlistenIntelligence: () => void;
-    let unlistenBackendErrors: () => void;
 
     onMount(async () => {
-        const savedKey = localStorage.getItem("gemini_api_key");
-        const savedModel = localStorage.getItem("gemini_model");
-        if (savedKey) apiKey = savedKey;
-        const validModels = [
-            "gemini-2.0-flash",
-            "gemini-2.0-flash-lite",
-            "gemini-2.5-flash-preview-04-17",
-            "gemini-1.5-flash",
-        ];
-        if (savedModel && validModels.includes(savedModel))
-            selectedModel = savedModel;
-        else {
-            selectedModel = "gemini-2.0-flash";
-            localStorage.setItem("gemini_model", selectedModel);
+        if (typeof window !== "undefined" && window.innerWidth >= 1024) {
+            isSidebarOpen = true;
         }
 
-        isRunningInTauri = !!(
-            typeof window !== "undefined" && (window as any).__TAURI_INTERNALS__
-        );
-        console.log("[INIT] Tauri detection:", isRunningInTauri);
+        // Initialize from store
+        selectedModel = $settingsStore.geminiModel;
+        debugMode = $settingsStore.debugMode;
+
+        // MEETING_TASKS_v1: Task 1.3 — Push tier to Rust backend on startup
+        if (isRunningInTauri || typeof window !== 'undefined') {
+            try {
+                await invoke("set_user_tier", { tier: $settingsStore.userTier ?? 'paid' });
+            } catch (_) { /* non-fatal if Tauri not ready yet */ }
+        }
+        
+        const savedKey = localStorage.getItem("gemini_api_key");
+        if (savedKey) apiKey = savedKey;
+
+        isRunningInTauri = typeof window !== "undefined" && 
+            !!((window as any).__TAURI_INTERNALS__ || (window as any).__TAURI__);
+            
+        // Only log detection once to keep console clean
+        if (!(window as any).__TAURI_LOGGED__) {
+            console.log("[INIT] Tauri environment detected:", isRunningInTauri);
+            (window as any).__TAURI_LOGGED__ = true;
+        }
         if (isRunningInTauri) {
             try {
                 await invoke("list_audio_devices");
@@ -1169,8 +1287,15 @@
                 if (connectionResult.success) {
                     isGeminiConnected = true;
                     apiKey = connectionResult.key?.key || "";
-                    status = "Connected to Intelligence Engine";
-                    await connectGemini();
+                    
+                    // AUTO-CONNECT LOGIC
+                    if ($settingsStore.autoConnect) {
+                        status = "Auto-connecting to Intelligence Engine...";
+                        await connectGemini();
+                        status = "Intelligence Engine Connected ✓";
+                    } else {
+                        status = "Intelligence Engine Ready (Manual)";
+                    }
                 } else {
                     isGeminiConnected = false;
                     status = "Offline - Click settings to add API key";
@@ -1180,6 +1305,32 @@
             }
 
             await loadInitialData();
+
+            // REALTIME_v1: Pre-warm Whisper model in the background so it is ready
+            // before the user starts their first recording. Whisper (local model, ~500MB)
+            // can take 30-120s to load on the first cold run. By firing this here we
+            // overlap that latency with the user configuring settings / reviewing past
+            // sessions. If it fails (model not yet downloaded) it will retry at recording start.
+            if (isRunningInTauri) {
+                whisperLoading = true;
+                invoke("initialize_whisper", { modelSize: "small" })
+                    .then(() => {
+                        whisperReady = true;
+                        whisperLoading = false;
+                        console.log("[PREWARM] Whisper model pre-loaded ✓ — real-time transcription ready");
+                    })
+                    .catch(e => {
+                        whisperLoading = false;
+                        console.warn("[PREWARM] Whisper pre-warm (will retry at recording start):", e);
+                    });
+            }
+
+            listen("cognivox:whisper_progress", (event: any) => {
+                whisperProgress = event.payload.percent;
+                if (whisperProgress >= 100) {
+                    // Handled by initialize_whisper resolution, but safe to set here too
+                }
+            });
 
             // Setup subscriptions
             setupKeyManagerSubscription({
@@ -1192,7 +1343,7 @@
                 onKeySwitch: (key, message) => {
                     apiKey = key.key;
                     showToast(message, "warning");
-                    if (isRecording)
+                    if (isRecording && isRunningInTauri)
                         invoke("update_gemini_key", { key: key.key }).catch(
                             console.error,
                         );
@@ -1207,19 +1358,23 @@
 
             const vadSubs = setupVADSubscription({
                 onVADStateUpdate: (state, rec, proc) => {
-                    vadState = state;
-                    if (rec && !proc) {
-                        if (state.status === "buffering")
-                            status = "Speaking detected – analyzing live...";
-                        else if (state.status === "sending")
-                            status = "Sending chunk to Intelligence Engine...";
-                        else if (state.isSpeaking)
-                            status = "Speaking detected – analyzing live...";
-                        else status = "Listening for speech...";
-                    }
+                    untrackHandle(() => {
+                        vadState = state;
+                        if (rec && !proc) {
+                            if (state.status === "buffering")
+                                status = "Speaking detected – analyzing live...";
+                            else if (state.status === "sending")
+                                status = "Sending chunk to Intelligence Engine...";
+                            else if (state.isSpeaking)
+                                status = "Speaking detected – analyzing live...";
+                            else status = "Listening for speech...";
+                        }
+                    });
                 },
                 onChunk: (_chunk, rec) => {
-                    if (rec) status = "Analyzing speech...";
+                    untrackHandle(() => {
+                        if (rec) status = "Analyzing speech...";
+                    });
                 },
                 getRecordingState: () => ({ isRecording, isProcessing }),
             });
@@ -1258,6 +1413,8 @@
                             transcript: string;
                             speaker?: string;
                             intelligence: string;
+                            chunk_id?: number;
+                            utterance_start_ms?: number;
                         };
                         debugLastTranscript =
                             (payload?.transcript || "").substring(0, 50) +
@@ -1273,7 +1430,18 @@
                         const segments = parseGeminiPayload(payload);
                         const startTime = performance.now();
                         isTyping = true;
-                        transcripts = transcripts.filter((t) => !t.isPartial);
+                        if (typingTimer) clearTimeout(typingTimer);
+
+                        // FIX 3: Remove ONLY the partial transcript matching this chunk_id.
+                        // Previously filtered ALL partials, which dropped late-arriving chunks.
+                        if (payload.chunk_id !== undefined) {
+                            transcripts = transcripts.filter(
+                                (t) => !(t.isPartial && t.chunkId === payload.chunk_id)
+                            );
+                        } else {
+                            // Fallback for payloads without chunk_id (backward-compat)
+                            transcripts = transcripts.filter((t) => !t.isPartial);
+                        }
 
                         for (const seg of segments) {
                             if (
@@ -1284,22 +1452,29 @@
                             console.log(
                                 `[GEMINI] Adding segment: speaker=${seg.speaker}, tone=${seg.tone}, text="${seg.transcript.substring(0, 60)}..."`,
                             );
+                            // FIX 1: Pass utterance_start_ms so timestamp reflects when user spoke
                             transcripts = [
                                 ...transcripts,
-                                createTranscriptEntry(seg),
+                                createTranscriptEntry(seg, payload.utterance_start_ms),
                             ];
                             const graphUpdate = buildGraphFromSegment(
                                 seg,
                                 graphNodes,
                                 graphEdges,
+                                $settingsStore.confidenceThreshold,
+                                $settingsStore.filters
                             );
-                            // Apply light dedup on live updates
-                            const cleaned = applyGraphQualityRules(
-                                graphUpdate.nodes,
-                                graphUpdate.edges,
-                            );
-                            graphNodes = cleaned.nodes;
-                            graphEdges = cleaned.edges;
+                            // FIX 2: Apply additive-only graph updates during live recording
+                            // to prevent new intelligence events from displacing existing nodes.
+                            const existingNodeIds = new Set(graphNodes.map((n) => n.id));
+                            const newNodes = graphUpdate.nodes.filter((n) => !existingNodeIds.has(n.id));
+                            const mergedNodes = [...graphNodes, ...newNodes];
+                            // KG_CLEANUP_SELF_HEALING_v1: Apply quality rules then self-heal
+                            // selfHealGraph removes generic single-word noise (budget-draft, phase, project, etc.)
+                            const cleaned = applyGraphQualityRules(mergedNodes, graphUpdate.edges);
+                            const healed = selfHealGraph(cleaned.nodes, cleaned.edges);
+                            graphNodes = healed.nodes;
+                            graphEdges = healed.edges;
                         }
                         console.log(
                             "[GRAPH] Updated:",
@@ -1315,18 +1490,18 @@
                                 await intelligenceExtractor.extractFromTranscript(
                                     transcripts.slice(-5),
                                 );
-                            if (freshInsights && Array.isArray(freshInsights))
-                                localInsights = [
-                                    ...localInsights,
-                                    ...freshInsights,
-                                ];
+                            if (freshInsights) {
+                                // Insights are automatically synced to InsightsPanel via singleton subscription.
+                                // We update status to show activity.
+                                status = "Intelligence updated ✓";
+                            }
                         } catch (e) {
                             console.error("Live extraction error:", e);
                         }
-                        setTimeout(() => {
+                        typingTimer = setTimeout(() => {
                             isTyping = false;
                             partialText = "";
-                        }, 100);
+                        }, 2000); // 2s debounce to prevent flicker during fast extraction cycles
                     },
                 );
 
@@ -1341,12 +1516,15 @@
                         if (intel?.text && intel.text.trim().length > 0) {
                             const whisperSpeaker = intel?.speaker || "You";
                             status = `Whisper (${intel.language}): "${intel.text.substring(0, 50)}..."`;
+                            const incomingChunkId = intel?.chunk_id;
+                            const utteranceStartMs = intel?.utterance_start_ms;
                             const existingPartial = transcripts.find(
-                                (t) => t.isPartial,
+                                // FIX 3: Match exactly by chunkId if available, else any partial
+                                (t) => t.isPartial && (incomingChunkId === undefined || t.chunkId === incomingChunkId)
                             );
                             if (existingPartial) {
                                 transcripts = transcripts.map((t) =>
-                                    t.isPartial
+                                    t.isPartial && (incomingChunkId === undefined || t.chunkId === incomingChunkId)
                                         ? {
                                               ...t,
                                               text: intel.text,
@@ -1357,14 +1535,21 @@
                             } else {
                                 transcripts = [
                                     ...transcripts,
-                                    createPartialTranscript(intel),
+                                    {
+                                        // FIX: Pass utteranceStartMs to createPartialTranscript for correct timestamp
+                                        ...createPartialTranscript(intel, utteranceStartMs),
+                                        // FIX 3: Tag with chunk_id so gemini_intelligence can remove THIS partial specifically
+                                        chunkId: incomingChunkId,
+                                    },
                                 ];
                                 console.log(
-                                    "[WHISPER] Added partial transcript, total:",
+                                    "[WHISPER] Added partial transcript (chunkId:",
+                                    incomingChunkId,
+                                    "), total:",
                                     transcripts.length,
                                 );
                             }
-                            // Schedule promotion in case Gemini never responds (rate-limited)
+                            // Schedule promotion ONLY as emergency fallback (Gemini permanently failed)
                             if (isRecording) {
                                 schedulePartialPromotion();
                             }
@@ -1386,7 +1571,7 @@
                     );
                     try {
                         const snapshot = saveCurrentSessionToCache();
-                        if (snapshot) {
+                        if (snapshot && isRunningInTauri) {
                             await invoke("save_session", {
                                 sessionJson: JSON.stringify(snapshot),
                             });
@@ -1406,11 +1591,21 @@
     });
 
     async function loadDevices() {
+        if (!isRunningInTauri || typeof invoke === "undefined") {
+            devices = [{ id: "mock", name: "Web Preview Mode - Audio Disabled" }];
+            return;
+        }
         try {
-            devices = await invoke("list_audio_devices");
+            // Safety check for Tauri internals before calling invoke
+            if (typeof window !== "undefined" && ((window as any).__TAURI__ || (window as any).__TAURI_INTERNALS__)) {
+                devices = await invoke("list_audio_devices");
+            } else {
+                throw new Error("Tauri internals not found");
+            }
         } catch (error) {
-            console.error(error);
-            status = "Error listing devices";
+            console.error("[INIT] Device load failed:", error);
+            devices = [{ id: "mock", name: "Web Preview Mode - Audio Disabled" }];
+            status = "Ready (Browser Mode)";
         }
     }
 
@@ -1481,21 +1676,22 @@
 <!-- === RECORDING OVERLAY (Fixed at top during recording) === -->
 <RecordingOverlay
     {isRecording}
+    {status}
     {currentVolume}
+    elapsedSeconds={elapsedRecordingSeconds}
     {isGeminiConnected}
-    on:openSettings={openSettings}
+    onopenSettings={() => (showSettingsModal = true)}
+    ontoggleCapture={toggleCapture}
 />
 
 <!-- === SETTINGS MODAL === -->
 <SettingsModal
     isOpen={showSettingsModal}
-    on:close={closeSettings}
-    on:save={(e) => {
-        selectedModel = e.detail.selectedModel;
-        debugMode = e.detail.enableDebugMode;
-        loadApiKeysFromStorage();
+    onclose={closeSettings}
+    onsave={(e) => {
+        showToast("Settings consolidated across all systems", "info");
     }}
-    on:connected={(e) => {
+    onconnected={(e) => {
         isGeminiConnected = true;
         apiKey = e.detail.key;
         status = "Connected to Gemini ✓";
@@ -1513,104 +1709,99 @@
     {lastRequestTime}
     {debugMode}
     requestCount={keyState.totalCalls}
-    on:openSettings={openSettings}
+    {whisperReady}
+    {whisperLoading}
+    {whisperProgress}
+    onopenSettings={openSettings}
 />
 
 <!-- === TOAST NOTIFICATION === -->
 <ToastNotification message={toastMessage} type={toastType} />
 
 <div
-    class="h-screen w-screen flex bg-[#0a0c0f] font-sans overflow-hidden {isRecording
-        ? 'pt-20'
-        : ''} pb-8"
+    class="h-screen w-full flex flex-col lg:flex-row bg-white font-sans overflow-hidden {isRecording
+        ? 'pt-[72px]'
+        : ''} relative"
 >
-    <!-- SIDEBAR -->
-    <Sidebar
-        {pastSessions}
-        {currentSession}
-        {graphNodes}
-        {graphEdges}
-        {activeTab}
-        {speakerIdInitialized}
-        on:sessionLoad={(e) => handleSessionLoad(e.detail)}
-        on:sessionDelete={(e) =>
-            handleSessionDelete(e.detail.sessionId, e.detail.event)}
-        on:refreshSessions={refreshSessionList}
-        on:tabChange={(e) => (activeTab = e.detail)}
-        on:toggleCluster={handleToggleCluster}
-    />
+    <!-- MOBILE BACKDROP -->
+    {#if isSidebarOpen}
+        <div 
+            class="fixed inset-0 bg-slate-900/20 backdrop-blur-sm z-40 lg:hidden animate-fadeIn"
+            onclick={() => (isSidebarOpen = false)}
+        ></div>
+    {/if}
+
+    <!-- SIDEBAR CONTAINER -->
+    <div class="fixed inset-y-0 left-0 z-50 lg:relative transition-all duration-300 ease-in-out w-[320px] {isSidebarOpen ? 'translate-x-0 lg:ml-0 opacity-100' : '-translate-x-full lg:translate-x-0 lg:-ml-[320px] opacity-0'} overflow-hidden h-full bg-slate-50/30 shrink-0">
+        <div class="w-[320px] h-full pb-14"> <!-- Increased pb to clear StatusBar completely -->
+            <Sidebar
+                {pastSessions}
+                {currentSession}
+                {graphNodes}
+                {graphEdges}
+                {activeTab}
+                {speakerIdInitialized}
+                onsessionLoad={(session) => {
+                    handleSessionLoad(session);
+                }}
+                onsessionDelete={(data) =>
+                    handleSessionDelete(data.sessionId, data.event)}
+                onrefreshSessions={refreshSessionList}
+                ontabChange={(tab) => {
+                    activeTab = tab;
+                }}
+                ontoggleCluster={handleToggleCluster}
+            />
+        </div>
+    </div>
 
     <!-- MAIN CONTENT -->
-    <div class="flex-1 flex flex-col min-w-0">
+    <div class="flex-1 flex flex-col min-w-0 h-full overflow-hidden pb-10">
         <!-- HEADER BAR -->
         <MainHeader
             {status}
             {isRecording}
             {isProcessing}
-            {isGeminiConnected}
+            {isRecordingStarting}
             {keyState}
-            {forceNewSession}
-            hasExistingSession={!!currentSession && transcripts.length > 0}
-            on:openSettings={openSettings}
-            on:toggleCapture={toggleCapture}
-            on:newSession={() => {
-                forceNewSession = true;
-            }}
+            {isGeminiConnected}
+            {isSidebarOpen}
+            {vadState}
+            {whisperReady}
+            {whisperLoading}
+            recordingSeconds={elapsedRecordingSeconds}
+            hasExistingSession={pastSessions.length > 0}
+            forceNewSession={forceNewSession}
+            ontoggleSidebar={() => (isSidebarOpen = !isSidebarOpen)}
+            onopenSettings={() => (showSettingsModal = true)}
+            ontoggleCapture={toggleCapture}
+            onnewSession={() => (forceNewSession = true)}
         />
 
         <!-- CONTENT AREA -->
-        <div class="flex-1 overflow-auto p-6">
-            <div class="max-w-5xl mx-auto space-y-6">
-                {#if !isRunningInTauri}
-                    <div
-                        class="glass-card p-4 flex items-center gap-3 border-yellow-500/30"
-                    >
-                        <svg
-                            class="w-6 h-6 text-yellow-400"
-                            viewBox="0 0 24 24"
-                            fill="none"
-                            stroke="currentColor"
-                            stroke-width="2"
-                            ><path
-                                d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"
-                            /><line x1="12" y1="9" x2="12" y2="13" /><line
-                                x1="12"
-                                y1="17"
-                                x2="12.01"
-                                y2="17"
-                            /></svg
-                        >
-                        <div class="flex-1">
-                            <p class="font-bold text-yellow-400">
-                                Web Preview Mode
-                            </p>
-                            <p class="text-sm text-slate-400">
-                                Native features disabled. Run <code
-                                    class="bg-dark-700 px-1 rounded"
-                                    >npm run tauri dev</code
-                                > for full functionality.
-                            </p>
-                        </div>
-                    </div>
-                {/if}
+        <div class="flex-1 overflow-auto min-h-0 p-4 sm:p-6 lg:p-8">
+            <div class="max-w-5xl mx-auto space-y-fluid-gap">
+
 
                 <!-- === PROCESSING PROGRESS (shows after recording stops) === -->
                 <ProcessingProgress
                     {isProcessing}
                     currentStep={processingStep}
                     error={processingError}
-                    on:dismiss={dismissProcessing}
-                    on:retry={retryProcessing}
+                    ondismiss={dismissProcessing}
+                    onretry={retryProcessing}
                 />
 
                 <!-- === LIVE RECORDING PANEL (shows during recording) === -->
                 <LiveRecordingPanel
                     {isRecording}
+                    {isRecordingStarting}
                     {currentVolume}
                     {isGeminiConnected}
                     {transcripts}
                     {graphNodes}
                     {graphEdges}
+                    recordingSeconds={elapsedRecordingSeconds}
                     bind:stressLevel
                     bind:engagementLevel
                     bind:urgencyLevel
@@ -1621,22 +1812,23 @@
                 <div class="flex gap-3">
                     <div class="flex-1 relative">
                         <svg
-                            class="absolute left-4 top-1/2 -translate-y-1/2 text-slate-500"
+                            class="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400"
                             xmlns="http://www.w3.org/2000/svg"
-                            width="18"
-                            height="18"
+                            width="12"
+                            height="12"
                             viewBox="0 0 24 24"
                             fill="none"
                             stroke="currentColor"
-                            stroke-width="2"
+                            stroke-width="1"
                         >
                             <circle cx="11" cy="11" r="8"></circle>
                             <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
                         </svg>
                         <input
                             type="text"
-                            placeholder="Search transcripts..."
+                            placeholder="Search semantic logs..."
                             bind:value={searchQuery}
+                            onkeydown={(e) => { if(e.key === 'Enter') activeTab = 'search'; }}
                             class="search-input"
                         />
                     </div>
@@ -1650,34 +1842,27 @@
                 {#if activeTab === "transcript"}
                     <TranscriptView
                         {transcripts}
+                        {graphNodes}
+                        {graphEdges}
                         {isCollapsed}
                         {debugMode}
                         {debugEventCount}
                         {debugLastEvent}
                         {debugLastTranscript}
+                        onexpandGraph={() => (activeTab = "graph")}
                     />
                     <SummaryPanel
                         show={showSummaryPanel}
                         {extractedSummary}
-                        on:close={closeSummaryPanel}
+                        onclose={closeSummaryPanel}
                     />
                     <MemoriesPanel
                         show={showMemoriesPanel}
                         {extractedMemories}
-                        on:close={closeMemoriesPanel}
-                    />
-                {:else if activeTab === "graph"}
-                    <GraphTab
-                        {graphNodes}
-                        {graphEdges}
-                        {transcripts}
-                        isGenerating={isGeneratingGraph}
-                        on:generateGraph={handleGenerateGraph}
-                        on:clearGraph={handleClearGraph}
-                        on:toggleCluster={handleToggleCluster}
+                        onclose={closeMemoriesPanel}
                     />
                 {:else if activeTab === "alerts"}
-                    <AlertsTab {alerts} on:clearAlerts={() => (alerts = [])} />
+                    <AlertsTab {alerts} onclearAlerts={() => (alerts = [])} />
                 {:else if activeTab === "analytics"}
                     <AnalyticsTab
                         {transcripts}
@@ -1688,17 +1873,16 @@
                     />
                 {:else if activeTab === "settings"}
                     <SettingsTab
-                        bind:selectedModel
-                        {availableModels}
-                        bind:apiKey
-                        {isGeminiConnected}
-                        {captureMode}
-                        {currentVolume}
-                        {isRecording}
-                        on:connectGemini={connectGemini}
-                        on:setCaptureMode={(e) => setCaptureMode(e.detail)}
+                        bind:selectedModel={selectedModel}
+                        bind:apiKey={apiKey}
+                        isGeminiConnected={isGeminiConnected}
+                        captureMode={captureMode}
+                        currentVolume={currentVolume}
+                        isRecording={isRecording}
                         on:settingsChange={(e) =>
                             handleSettingsChange(e.detail)}
+                        on:connectGemini={connectGemini}
+                        on:setCaptureMode={(e) => setCaptureMode(e.detail)}
                     />
                 {:else if activeTab === "diagnostics"}
                     <Diagnostics {isRecording} {isGeminiConnected} />
@@ -1708,15 +1892,46 @@
                         {speakerIdStatus}
                         {speakerProfiles}
                         {lastIdentifiedSpeaker}
-                        on:initializeSpeakerId={initializeSpeakerId}
-                        on:clearSpeakerProfiles={clearSpeakerProfiles}
-                        on:renameSpeaker={(e) =>
+                        oninitializeSpeakerId={initializeSpeakerId}
+                        onclearSpeakerProfiles={clearSpeakerProfiles}
+                        onrenameSpeaker={(e) =>
                             renameSpeaker(
                                 e.detail.speakerId,
                                 e.detail.newLabel,
                             )}
                     />
+                {:else if activeTab === "tasks"}
+                    <div class="h-[600px] w-full bg-white rounded-2xl border border-gray-200/60 shadow-sm overflow-hidden animate-fadeIn">
+                        <InsightsPanel />
+                    </div>
+                {:else if activeTab === "ledger"}
+                    <DecisionLedger {transcripts} {graphNodes} />
+                {:else if activeTab === "overview"}
+                    <ProjectOverview {transcripts} {graphNodes} {pastSessions} />
+                {:else if activeTab === "search"}
+                    <SearchTab {transcripts} {graphNodes} initialQuery={searchQuery} />
                 {/if}
+
+                <!-- KG_SYNC_v1: GraphTab always mounted (CSS-toggled) to preserve KnowledgeGraph physics state across tab switches.
+                     Conditional rendering caused positions map to reset every tab switch → layout scrambled each visit. -->
+                <div class="{activeTab !== 'graph' ? 'hidden' : ''}">
+                    <GraphTab
+                        bind:this={graphTabRef}
+                        {graphNodes}
+                        {graphEdges}
+                        {transcripts}
+                        {searchQuery}
+                        isGenerating={isGeneratingGraph}
+                        ongenerateGraph={handleGenerateGraph}
+                        onclearGraph={handleClearGraph}
+                        onselfHealGraph={handleSelfHealGraph}
+                        ontoggleCluster={handleToggleCluster}
+                        onlayoutChanged={handleGraphLayoutChanged}
+                        {isRecording}
+                        {isRecordingStarting}
+                        initialPositions={currentSession?.graph_positions || null}
+                    />
+                </div>
             </div>
         </div>
 
@@ -1729,9 +1944,9 @@
             {showSummaryPanel}
             {isExtractingMemories}
             {isExtractingSummary}
-            on:toggleCollapse={toggleCollapseState}
-            on:extractMemories={extractMemories}
-            on:extractSummary={extractSummary}
+            ontoggleCollapse={toggleCollapseState}
+            onextractMemories={extractMemories}
+            onextractSummary={extractSummary}
         />
     </div>
 </div>

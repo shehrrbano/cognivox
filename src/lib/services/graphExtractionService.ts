@@ -38,37 +38,45 @@ interface GraphApiResponse {
  * Build the prompt for knowledge graph extraction.
  */
 function buildGraphExtractionPrompt(transcriptText: string): string {
-    return `You are a knowledge graph extraction engine. Analyze the following transcript (lecture, meeting, or conversation) and extract ALL concepts, entities, and relationships to build a comprehensive conceptual knowledge graph.
+    return `You are a knowledge graph extraction engine. Analyze the following meeting/conversation transcript and extract a clean, interconnected knowledge graph using Subject-Verb-Object (SVO) triples.
 
 TRANSCRIPT:
 ${transcriptText}
 
 EXTRACTION RULES:
-1. Extract ALL meaningful concepts and entities: academic concepts, theories, techniques, methods, people, organizations, projects, topics, technologies, locations, dates, decisions, tasks, definitions, examples, formulas
-2. Extract ALL relationships: "requires" (prerequisite), "used_in" (application), "explains" (definition/clarification), "part_of" (composition), "contrasts_with" (comparison), "leads_to" (causation), "example_of" (illustration), "related_to" (general association), "discussed_by" (speaker attribution), "depends_on", "implements", "extends"
-3. Each entity needs a unique "id" (short snake_case identifier), a "type" (category), a "label" (human-readable display name), and "weight" (importance 1-5, where 5 = central topic, 1 = minor mention)
-4. Each relationship needs "source" (entity id), "target" (entity id), and "relation" (relationship type)
-5. Entity types: CONCEPT, THEORY, METHOD, TECHNIQUE, DEFINITION, EXAMPLE, FORMULA, PERSON, ORG, PROJECT, TOPIC, TECHNOLOGY, LOCATION, DATE, DECISION, TASK, RISK, ACTION_ITEM, Speaker
-6. Always include a "Start" node of type "Root" as the central anchor
-7. Connect main concepts/topics to the Start node with "topic_of" relation
-8. Connect speakers to concepts they discuss, NOT just to the Start node
-9. Create CONCEPT-to-CONCEPT relationships (e.g., "Gradient Descent" --requires--> "Derivative", "Neural Network" --uses--> "Backpropagation")
-10. Aim for 8-25 nodes and 12-35 edges. Focus on conceptual depth over breadth
-11. Use multi-word labels for clarity (e.g., "Machine Learning" not just "ML")
-12. Merge duplicate or near-duplicate concepts (e.g., "AI" and "Artificial Intelligence" should be one node)
+1. Extract ONLY meaningful named entities: specific people, organizations, projects, systems, technologies, decisions, tasks, risks, key domain concepts — NOT generic nouns (project, phase, budget, update, thing, item, meeting, point). NOT language names (English, Urdu). NOT discourse markers (Alright, Now, Well, Lets).
+2. Entity IDs MUST be English snake_case regardless of the transcript language. Labels can be in the speaker's language.
+3. Each entity: unique "id" (English snake_case, lowercase), "type", "label" (human-readable, specific), "weight" (1-5 importance)
+4. Entity types: CONCEPT, PERSON, ORG, PROJECT, TECHNOLOGY, DECISION, TASK, RISK, ACTION_ITEM, Speaker
+5. Do NOT include a "Start" or "Root" node — the graph is purely entity-driven
+6. Aim for 8-15 nodes and 10-20 edges. Quality over quantity. Fewer meaningful nodes beat 100+ generic words.
+7. Merge ALL duplicate or near-duplicate concepts into ONE node (e.g., "AI" + "Artificial Intelligence" → id="artificial_intelligence")
+8. Prefer SPECIFIC named entities over generic nouns: "Bi-weekly Projection Cycle" not "projection"
+9. For figures of speech (metaphors, idioms): use the normalized literal meaning as the entity label (e.g., "burning through cash" → id="rapid_budget_consumption", label="Rapid Budget Consumption")
+10. Each relationship: "source" (entity id), "target" (entity id), "relation" (typed verb: decides, assigns, requires, leads_to, depends_on, implements, contrasts_with, raises, discussed, part_of)
+11. Create entity-to-entity edges ONLY for meaningful causal or structural relationships
+
+ENTITY TYPE ASSIGNMENT RULES — MANDATORY:
+- type=PROJECT: named projects and initiatives (e.g., "Project Oryon", "Phase 1")
+- type=DECISION: approved plans, budget structures, committed processes, KPI targets (e.g., "2.5M Budget Allocation", "Bi-weekly Reporting Cycle", "Functionality Stability KPI")
+- type=TASK: explicitly assigned work items (e.g., "Quarterly Milestone Review", "Deliver Phase 1 Deliverables")
+- type=RISK: identified risks, failure conditions, dependencies (e.g., "Phase Slip Risk", "Budget Overrun Risk"). Conditional statements ("if X slips, everything slips") = RISK entity.
+- type=PERSON: named individuals only
+- type=CONCEPT: strategic frameworks, methodologies, abstract approaches (e.g., "Rolling Forecast Model", "Contingency Reserve Strategy")
+- DO NOT use type=CONCEPT for entities that are clearly DECISION, TASK, or RISK — use the most specific type
 
 RETURN FORMAT (valid JSON only, no markdown, no explanation):
 {
   "nodes": [
-    {"id": "Start", "type": "Root", "label": "Start", "weight": 5},
-    {"id": "gradient_descent", "type": "CONCEPT", "label": "Gradient Descent", "weight": 4},
-    {"id": "derivative", "type": "CONCEPT", "label": "Derivative", "weight": 3},
+    {"id": "bi_weekly_reporting_cycle", "type": "DECISION", "label": "Bi-weekly Reporting Cycle", "weight": 4},
+    {"id": "static_budget_model", "type": "CONCEPT", "label": "Static Budget Model", "weight": 3},
+    {"id": "budget_overspend_risk", "type": "RISK", "label": "Budget Overspend Risk", "weight": 4},
     {"id": "speaker_1", "type": "Speaker", "label": "Speaker 1", "weight": 2}
   ],
   "edges": [
-    {"source": "gradient_descent", "target": "Start", "relation": "topic_of"},
-    {"source": "gradient_descent", "target": "derivative", "relation": "requires"},
-    {"source": "speaker_1", "target": "gradient_descent", "relation": "discussed"}
+    {"source": "speaker_1", "target": "bi_weekly_reporting_cycle", "relation": "decided"},
+    {"source": "budget_overspend_risk", "target": "bi_weekly_reporting_cycle", "relation": "leads_to"},
+    {"source": "static_budget_model", "target": "budget_overspend_risk", "relation": "raises"}
   ]
 }
 
@@ -226,15 +234,7 @@ function convertToGraphData(
         }
     }
 
-    // Ensure Start node exists
-    if (!nodeMap.has("Start")) {
-        nodeMap.set("Start", {
-            id: "Start",
-            type: "Root",
-            label: "Start",
-            weight: 5,
-        });
-    }
+    // KG_REDESIGN_v1: Do NOT inject "Start"/"Root" dummy node — graph is purely entity-driven.
 
     return {
         nodes: Array.from(nodeMap.values()),
@@ -375,15 +375,7 @@ export function buildLocalGraph(
         }
     }
 
-    // Ensure Start node
-    if (!nodeMap.has("Start")) {
-        nodeMap.set("Start", {
-            id: "Start",
-            type: "Root",
-            label: "Start",
-            weight: 5,
-        });
-    }
+    // KG_REDESIGN_v1: Do NOT inject "Start"/"Root" dummy node — graph is purely entity-driven.
 
     const stopWords = new Set([
         "the", "this", "that", "there", "their", "these", "those", "with",
@@ -742,14 +734,15 @@ export function applyGraphQualityRules(
         }
     }
 
-    // 3. Remove orphan nodes (no edges) except Start and Speaker nodes
+    // 3. Remove orphan nodes (no edges) except Speaker nodes
+    // KG_REDESIGN_v1: "Root" type is deprecated — no longer preserved as an exception
     const connectedIds = new Set<string>();
     for (const e of cleanEdges) {
         connectedIds.add(e.from);
         connectedIds.add(e.to);
     }
     const finalNodes = deduped.filter(
-        (n) => connectedIds.has(n.id) || n.type === "Root" || n.type === "Speaker",
+        (n) => connectedIds.has(n.id) || n.type === "Speaker",
     );
 
     // 4. Remove edges referencing nodes that no longer exist
@@ -762,6 +755,106 @@ export function applyGraphQualityRules(
         `[GraphQuality] ${nodes.length}→${finalNodes.length} nodes, ${edges.length}→${finalEdges.length} edges`,
     );
 
+    return { nodes: finalNodes, edges: finalEdges };
+}
+
+/**
+ * KG_CLEANUP_SELF_HEALING_v1 — Self-healing graph cleanup.
+ * Removes generic single-word concept noise that pollutes the live KG.
+ * Runs after every live segment update AND after recording stops.
+ * More aggressive than applyGraphQualityRules — targets semantic junk.
+ */
+export function selfHealGraph(
+    nodes: GraphNode[],
+    edges: GraphEdge[],
+): { nodes: GraphNode[]; edges: GraphEdge[] } {
+    // Step 1: Run base quality rules first (case dedup, orphan removal)
+    const base = applyGraphQualityRules(nodes, edges);
+    if (base.nodes.length === 0) return base;
+
+    // Step 2: Define important types that are NEVER removed
+    const protectedTypes = new Set([
+        "Speaker", "PERSON", "ORG", "PROJECT", "DECISION",
+        "TASK", "RISK", "TECHNOLOGY", "LOCATION", "DATE", "ACTION_ITEM",
+    ]);
+
+    // Step 3: Generic stop-word concepts to remove (single words that add no insight)
+    const genericStopWords = new Set([
+        "project", "phase", "budget", "draft", "version", "update",
+        "item", "note", "point", "thing", "work", "plan", "team", "user",
+        "data", "time", "date", "way", "need", "help", "call", "part",
+        "area", "level", "issue", "type", "case", "form", "step", "goal",
+        "role", "lead", "head", "base", "core", "main", "task", "info",
+        "report", "review", "meeting", "session", "process", "system",
+        "status", "action", "result", "output", "input", "value", "idea",
+        "change", "group", "check", "start", "end", "list", "week", "day",
+        "month", "year", "hour", "minute", "second", "number", "cost",
+        "place", "text", "word", "line", "block", "flow", "run", "build",
+        "over-spent", "budget-draft", "phase-one", "phase-two", "phase-three",
+        // Language names — never meaningful standalone graph nodes
+        "english", "urdu", "hindi", "arabic", "chinese", "french", "spanish", "german",
+        // Conversation fillers and discourse markers
+        "alright", "okay", "well", "lets", "right", "sure", "now", "actually",
+        "basically", "clearly", "discussed", "mentioned", "stated", "noted",
+        "relay", "relaying", "said", "says", "speaking",
+        // Generic adjectives used as standalone nodes
+        "static", "dynamic", "correct", "proper", "basic", "general", "simple",
+        "specific", "current", "recent", "final", "initial", "primary", "secondary",
+        // Standalone abstract nouns that carry no graph value alone
+        "forward", "alignment", "ownership", "execution", "clarity", "excuses",
+        "moving", "expect", "without",
+    ]);
+
+    // Step 4: Count edges per node for connectivity analysis
+    const edgeCount = new Map<string, number>();
+    for (const e of base.edges) {
+        edgeCount.set(e.from, (edgeCount.get(e.from) || 0) + 1);
+        edgeCount.set(e.to, (edgeCount.get(e.to) || 0) + 1);
+    }
+
+    const filteredNodes = base.nodes.filter((node) => {
+        // Always keep protected types
+        if (protectedTypes.has(node.type)) return true;
+
+        const label = (node.label || node.id).toLowerCase().trim();
+        const normalizedId = node.id.toLowerCase().replace(/[-_]/g, " ").trim();
+        const words = label.split(/[\s_-]+/).filter(w => w.length > 0);
+
+        // Remove if it's a known generic stop word (single word or hyphenated)
+        if (words.length === 1 && genericStopWords.has(words[0])) return false;
+        if (genericStopWords.has(normalizedId)) return false;
+
+        // Remove very short labels (< 4 chars) — likely noise
+        if (label.length < 4) return false;
+
+        // Remove low-connectivity, low-weight generic concept nodes
+        const connectivity = edgeCount.get(node.id) || 0;
+        const weight = node.weight || 1;
+        if (connectivity <= 1 && weight < 2 && node.type === "CONCEPT") return false;
+
+        // Remove purely lowercase single-word ENTITY nodes with no proper noun casing
+        // (Gemini returns real named entities in proper case; generic words are lowercase)
+        if (words.length === 1 && label === label.toLowerCase() && node.type === "ENTITY" && connectivity <= 1) return false;
+
+        return true;
+    });
+
+    // Step 5: Rebuild edges using only surviving nodes
+    const survivorIds = new Set(filteredNodes.map(n => n.id));
+    const filteredEdges = base.edges.filter(
+        e => survivorIds.has(e.from) && survivorIds.has(e.to),
+    );
+
+    // Step 6: Final orphan pass — remove speakers with 0 entity connections
+    const connectedAfter = new Set<string>();
+    for (const e of filteredEdges) { connectedAfter.add(e.from); connectedAfter.add(e.to); }
+    const finalNodes = filteredNodes.filter(
+        n => connectedAfter.has(n.id) || (n.type === "Speaker" && (edgeCount.get(n.id) || 0) > 0),
+    );
+    const finalNodeIds = new Set(finalNodes.map(n => n.id));
+    const finalEdges = filteredEdges.filter(e => finalNodeIds.has(e.from) && finalNodeIds.has(e.to));
+
+    console.log(`[SelfHeal] ${nodes.length}→${finalNodes.length} nodes, ${edges.length}→${finalEdges.length} edges`);
     return { nodes: finalNodes, edges: finalEdges };
 }
 
@@ -796,11 +889,12 @@ export function autoClusterGraph(
         const toNode = nodes.find((n) => n.id === e.to);
 
         // "to" is a leaf hanging off "from"
-        if (toCount <= 1 && (toNode?.weight || 1) <= 2 && toNode?.type !== "Root" && toNode?.type !== "Speaker") {
+        // KG_REDESIGN_v1: "Root" type deprecated — only "Speaker" is exempt from clustering
+        if (toCount <= 1 && (toNode?.weight || 1) <= 2 && toNode?.type !== "Speaker") {
             parentOf.set(e.to, e.from);
         }
         // "from" is a leaf hanging off "to"
-        if (fromCount <= 1 && (fromNode?.weight || 1) <= 2 && fromNode?.type !== "Root" && fromNode?.type !== "Speaker") {
+        if (fromCount <= 1 && (fromNode?.weight || 1) <= 2 && fromNode?.type !== "Speaker") {
             parentOf.set(e.from, e.to);
         }
     }

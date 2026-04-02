@@ -1,3 +1,5 @@
+<!-- ACTUAL EDIT: COGNIVOX_UI_REAL_CODE_APPLIER_v2 -->
+<!-- UNIFIED: COGNIVOX_UI_MAPPER_v1 -->
 <script lang="ts">
     import { onMount, onDestroy } from "svelte";
     import { vadManager, type VADState } from "./vadManager";
@@ -59,7 +61,7 @@
     });
 
     function getBarColor(isSpeech: boolean, level: number): string {
-        if (level < 0.003) return "bg-slate-700"; // Dead silence
+        if (level < 0.003) return "bg-gray-100"; // Dead silence
         if (level < 0.01) return "bg-slate-600"; // Very quiet
         if (isSpeech) return "bg-gradient-to-t from-green-600 to-green-400"; // Active speech - green
         return "bg-gradient-to-t from-yellow-600 to-yellow-400"; // Some noise - yellow
@@ -88,10 +90,10 @@
     }
 
     function getStatusColor(): string {
-        if (!isRecording) return "text-slate-500";
+        if (!isRecording) return "text-gray-400";
         if (vadState.status === "sending") return "text-blue-400";
-        if (vadState.isSpeaking) return "text-green-400";
-        return "text-slate-400";
+        if (vadState.isSpeaking) return "text-green-600";
+        return "text-gray-500";
     }
 
     function getMinBufferPercent(): number {
@@ -101,7 +103,7 @@
 </script>
 
 <div
-    class="vad-waveform rounded-xl bg-dark-800/60 border border-cyan-500/20 p-4 backdrop-blur-sm"
+    class="vad-waveform rounded-xl bg-gray-100/60 border border-blue-200 p-3 sm:p-4 backdrop-blur-sm"
 >
     <!-- Header -->
     <div class="flex items-center justify-between mb-3">
@@ -123,7 +125,7 @@
                 >{getStatusText()}</span
             >
         </div>
-        <div class="flex items-center gap-4 text-xs text-slate-500">
+        <div class="flex flex-col sm:flex-row items-center gap-1 sm:gap-4 text-xs text-gray-400">
             <span class="flex items-center gap-1">
                 <span class="w-2 h-2 rounded-full bg-green-500"></span>
                 Speech: {formatTime(vadState.totalSpeechTime)}
@@ -134,12 +136,12 @@
 
     <!-- Waveform Visualization -->
     <div
-        class="flex items-end justify-center gap-px h-20 bg-dark-900/60 rounded-lg p-3 mb-3"
+        class="flex items-end justify-center gap-px h-16 sm:h-20 bg-gray-50/60 rounded-lg p-2 sm:p-3 mb-3"
     >
         {#each barHistory as bar, i}
             {@const height = Math.max(4, Math.min(64, bar.level * 600))}
             <div
-                class="flex-1 min-w-[3px] max-w-[6px] rounded-t-sm transition-all duration-50 {getBarColor(
+                class="flex-1 min-w-[2px] max-w-[4px] rounded-t-sm transition-all duration-50 {getBarColor(
                     bar.isSpeech,
                     bar.level,
                 )}"
@@ -150,7 +152,7 @@
         {#if barHistory.length < BAR_COUNT}
             {#each Array(BAR_COUNT - barHistory.length) as _, i}
                 <div
-                    class="flex-1 min-w-[3px] max-w-[6px] rounded-t-sm bg-slate-800 h-1"
+                    class="flex-1 min-w-[2px] max-w-[4px] rounded-t-sm bg-gray-50 h-1"
                 ></div>
             {/each}
         {/if}
@@ -159,18 +161,18 @@
     <!-- Buffer Progress Bar -->
     <div class="space-y-2">
         <div class="flex items-center justify-between">
-            <span class="text-xs text-slate-500">Speech Buffer</span>
+            <span class="text-xs text-gray-400">Speech Buffer</span>
             <span
                 class="text-xs {getMinBufferPercent() >= 100
-                    ? 'text-green-400'
-                    : 'text-cyan-400'}"
+                    ? 'text-green-600'
+                    : 'text-blue-500'}"
             >
                 {formatTime(vadState.bufferDuration)} / {formatTime(
                     vadManager.getConfig().minSpeechDuration,
                 )}
             </span>
         </div>
-        <div class="h-2 bg-dark-900/80 rounded-full overflow-hidden">
+        <div class="h-2 bg-gray-50/80 rounded-full overflow-hidden">
             <div
                 class="h-full transition-all duration-200 rounded-full {getMinBufferPercent() >=
                 100
@@ -182,9 +184,9 @@
     </div>
 
     <!-- Silence/Activity Indicators -->
-    <div class="mt-3 flex items-center justify-between">
+    <div class="mt-3 flex flex-col items-start sm:flex-row sm:items-center justify-between gap-2">
         <div class="flex items-center gap-2">
-            <span class="text-xs text-slate-500">Activity:</span>
+            <span class="text-xs text-gray-400">Activity:</span>
             <div class="flex gap-1">
                 {#each [0, 1, 2, 3, 4, 5, 6, 7] as dot}
                     {@const isActive = vadState.vadConfidence > dot * 0.12}
@@ -195,14 +197,14 @@
                                 : dot > 2
                                   ? 'bg-yellow-500'
                                   : 'bg-slate-500'
-                            : 'bg-slate-700'}"
+                            : 'bg-gray-100'}"
                     ></div>
                 {/each}
             </div>
         </div>
 
         <!-- Confidence percentage -->
-        <span class="text-xs text-slate-400">
+        <span class="text-xs text-gray-500">
             {(vadState.vadConfidence * 100).toFixed(0)}% confidence
         </span>
     </div>
@@ -210,6 +212,6 @@
 
 <style>
     .vad-waveform {
-        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+        box-shadow: 0 3px 13px rgba(0, 0, 0, 0.3);
     }
 </style>

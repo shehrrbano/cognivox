@@ -67,22 +67,28 @@ let db: Firestore;
 let auth: Auth;
 let initialized = false;
 
-export function initFirebase(): { app: FirebaseApp; db: Firestore; auth: Auth } {
+export function initFirebase(): { app: FirebaseApp | null; db: Firestore | null; auth: Auth | null } {
     if (initialized) {
         return { app, db, auth };
     }
 
-    app = initializeApp(firebaseConfig);
-    db = getFirestore(app);
-    auth = getAuth(app);
+    if (!isFirebaseConfigured()) {
+        console.log("[Firebase] SILENT MODE: No valid cloud config found. Using local-only fallback.");
+        initialized = true; // Mark as "initialized" in silent mode to prevent repeated checks
+        return { app: null as any, db: null as any, auth: null as any };
+    }
 
-    // NOTE: IndexedDB persistence DISABLED.
-    // It was causing stale cached reads — sessions loaded with 0 transcripts
-    // because the cache had old data from before transcripts were saved.
-    // All reads now go directly to the Firestore server for fresh data.
+    try {
+        app = initializeApp(firebaseConfig);
+        db = getFirestore(app);
+        auth = getAuth(app);
+        initialized = true;
+        console.log("[Firebase] Cloud Storage ENABLED with project:", firebaseConfig.projectId);
+    } catch (e) {
+        console.error("[Firebase] Initialization failed:", e);
+        return { app: null as any, db: null as any, auth: null as any };
+    }
 
-    initialized = true;
-    console.log("[Firebase] Initialized with project:", firebaseConfig.projectId);
     return { app, db, auth };
 }
 
@@ -150,7 +156,8 @@ export async function signOut(): Promise<void> {
  */
 export function getCurrentUser(): User | null {
     const authInstance = getAuthInstance();
-    return authInstance.currentUser;
+    if (!authInstance || typeof authInstance !== 'object' || !('currentUser' in authInstance)) return null;
+    return authInstance.currentUser || null;
 }
 
 /**
@@ -159,20 +166,30 @@ export function getCurrentUser(): User | null {
  */
 export function waitForAuth(timeoutMs = 5000): Promise<User | null> {
     const authInstance = getAuthInstance();
+    if (!authInstance || typeof authInstance !== 'object' || !('currentUser' in authInstance)) {
+        return Promise.resolve(null);
+    }
+    
     // If already resolved, return immediately
     if (authInstance.currentUser) return Promise.resolve(authInstance.currentUser);
 
     return new Promise((resolve) => {
+        let unsub: () => void = () => {};
         const timer = setTimeout(() => {
             unsub();
             resolve(null);
         }, timeoutMs);
 
-        const unsub = onAuthStateChanged(authInstance, (user) => {
+        try {
+            unsub = onAuthStateChanged(authInstance, (user) => {
+                clearTimeout(timer);
+                unsub();
+                resolve(user);
+            });
+        } catch (e) {
             clearTimeout(timer);
-            unsub();
-            resolve(user);
-        });
+            resolve(null);
+        }
     });
 }
 
@@ -181,6 +198,10 @@ export function waitForAuth(timeoutMs = 5000): Promise<User | null> {
  */
 export function onAuthChange(callback: (user: User | null) => void): () => void {
     const authInstance = getAuthInstance();
+    if (!authInstance) {
+        callback(null);
+        return () => {};
+    }
     return onAuthStateChanged(authInstance, callback);
 }
 

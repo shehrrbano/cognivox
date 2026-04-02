@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, Mutex as StdMutex, MutexGuard, atomic::{AtomicBool, Ordering}};
+use std::sync::{Arc, Mutex as StdMutex, MutexGuard, atomic::{AtomicBool, AtomicU64, Ordering}};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::time::{Duration, interval, Instant, sleep};
 use crossbeam_channel::Receiver;
@@ -56,6 +56,9 @@ pub struct GeminiState {
     pub api_key: StdMutex<Option<String>>,
     pub is_connected: StdMutex<bool>,
     pub selected_model: StdMutex<String>,
+    /// MEETING_TASKS_v1: Task 1.3 — Tier-based routing.
+    /// "free" = skip Gemini API (Whisper-only). "paid" = full Gemini pipeline.
+    pub user_tier: StdMutex<String>,
     pub reset_signal: StdMutex<bool>,
     /// When true, the audio loop will immediately process whatever is buffered
     /// (skip the silence timeout). Set when user stops recording.
@@ -71,7 +74,8 @@ impl Default for GeminiState {
             audio_rx: StdMutex::new(None),
             api_key: StdMutex::new(None),
             is_connected: StdMutex::new(false),
-            selected_model: StdMutex::new("gemini-2.0-flash".to_string()),
+            selected_model: StdMutex::new("gemini-2.0-flash".to_string()), // MEETING_TASKS_v1: Task 1.2 — Default Flash 2.0
+            user_tier: StdMutex::new("paid".to_string()), // MEETING_TASKS_v1: Task 1.3
             reset_signal: StdMutex::new(false),
             flush_signal: StdMutex::new(false),
             loop_alive: Arc::new(AtomicBool::new(false)),
@@ -82,7 +86,7 @@ impl Default for GeminiState {
 const COGNIVOX_INTELLIGENCE_PROMPT: &str = r#"You are a PASSIVE MEETING INTELLIGENCE ENGINE analyzing transcribed speech.
 
 INPUT: Transcribed text from a meeting segment. It may have a speaker tag like "[You]:" or "[Speaker 2]:" OR it may be untagged (single-mic capture with multiple speakers talking).
-The conversation may be in English, Urdu (Roman Urdu), or a mix of both languages (code-switching).
+The conversation may be in English, Urdu (Roman Urdu), or a mix of both languages (code-switching). Future inputs may be in ANY language.
 
 CRITICAL: ROMAN URDU OUTPUT ONLY
 If the input contains Urdu text in Arabic/Nastaliq script (اردو), you MUST convert it to Roman Urdu (Latin script transliteration) in your output.
@@ -136,8 +140,43 @@ Do NOT default to NEUTRAL. Carefully analyze the actual emotional content of the
 - Understanding or supportive statements = EMPATHETIC
 Only use NEUTRAL when speech is truly flat/informational with no emotional indicators at all.
 
+CRITICAL TASK 3 - STRUCTURED KNOWLEDGE EXTRACTION:
+Extract meaning using Subject-Verb-Object (SVO) triples, not just loose entity lists.
+For EACH meaningful statement, identify WHO did/said/decided WHAT about WHICH concept.
+
+MULTILINGUAL ENTITY IDs: Entity IDs MUST always be English snake_case regardless of the transcript language.
+Entity labels should be in the original language of the speaker.
+Example (Urdu input): entity id="budget_overspend" label="bajat ki kami" (Urdu label, English ID)
+
+FIGURES OF SPEECH: Detect metaphors, idioms, and hyperbole. Normalize them to their literal semantic meaning for graph nodes.
+Example: "burning through cash" → normalized="rapid budget consumption", type="metaphor"
+Example: "we're drowning in tasks" → normalized="task overload", type="metaphor"
+
+IMPLICATIONS: Identify strategic intent, implied commitments, or unstated consequences.
+Example: "I want a projection every two weeks" implies "bi-weekly reporting is now mandatory"
+
 OUTPUT FORMAT (JSON array - one entry per detected speaker segment):
-[{"transcript":"speaker's text in English or Roman Urdu (NEVER Arabic script)","speaker":"Speaker 1 or You or Speaker 2","tone":"<actual detected tone>","category":["TASK"],"confidence":0.85,"summary":"Brief summary","entities":[{"name":"entity name","type":"PERSON|PROJECT|TOPIC|CONCEPT|TECHNOLOGY|METHOD|THEORY|LOCATION|DATE|ORG"}],"graph_edges":[{"from":"entity or speaker","to":"entity or concept","relation":"discusses|requires|used_in|explains|part_of|related_to|example_of|depends_on|leads_to"}]}]
+[{
+  "transcript": "speaker's text in English or Roman Urdu (NEVER Arabic script)",
+  "speaker": "Speaker 1 or You or Speaker 2",
+  "tone": "<actual detected tone>",
+  "category": ["TASK"],
+  "confidence": 0.85,
+  "summary": "Brief summary of this segment",
+  "entities": [
+    {"id": "english_snake_case_id", "label": "Display Label (original language)", "type": "PERSON|PROJECT|DECISION|TASK|RISK|TECHNOLOGY|ORG|LOCATION|DATE|CONCEPT", "weight": 3}
+  ],
+  "svo_triples": [
+    {"subject_id": "speaker_1", "verb": "decided", "object_id": "bi_weekly_reporting", "confidence": 0.9}
+  ],
+  "graph_edges": [
+    {"from": "budget_risk", "to": "deployment_plan", "relation": "leads_to", "strength": 0.8}
+  ],
+  "implications": ["Bi-weekly reporting is now a standing commitment"],
+  "figures_of_speech": [
+    {"original": "burning through cash", "normalized": "rapid budget consumption", "type": "metaphor"}
+  ]
+}]
 
 IMPORTANT: Default to ONE speaker unless you have strong evidence of multiple speakers. Most audio segments come from a single person. Return an array with one element for single-speaker input.
 
@@ -147,11 +186,29 @@ RULES:
 - tone: NEUTRAL|URGENT|FRUSTRATED|EXCITED|POSITIVE|NEGATIVE|HESITANT|DOMINANT|EMPATHETIC (pick the BEST match, avoid NEUTRAL unless truly emotionless)
 - category: TASK|DECISION|DEADLINE|QUERY|ACTION_ITEM|RISK|SENTIMENT|URGENCY|INTERRUPTION|AGREEMENT|DISAGREEMENT|OFF_TOPIC|EMOTION_SHIFT|DOMINANCE_SHIFT|EMPATHY_GAP|TOPIC_DRIFT
 - confidence: 0.0-1.0
-- entities: Extract ALL concepts, theories, methods, techniques, people, projects, topics, organizations, locations, dates mentioned. Use multi-word names (e.g. "Machine Learning" not "ML"). Include academic/technical concepts.
-- graph_edges: Create SEMANTIC relationships between entities. Use relationship types like: discusses, requires, used_in, explains, part_of, related_to, example_of, depends_on, leads_to, contrasts_with, implements, extends
-- Always include at least one graph_edge connecting the speaker to the main concept discussed
-- Create concept-to-concept edges when concepts are related (e.g. "Gradient Descent" requires "Derivative")
-- For low-confidence or unclear: lower confidence value, not error"#;
+- entities: Extract ONLY named, specific entities — people, projects, decisions, risks, technologies, specific concepts. NOT generic nouns (project, phase, budget, update, thing, item). NOT single language names (English, Urdu). NOT discourse markers (Alright, Okay, Now, Well, Right). Max 8 entities. Use multi-word specific labels. Entity IDs always English snake_case.
+- svo_triples: For each clear Subject-Verb-Object statement. subject_id and object_id must match entity ids or speaker id (speaker id format: "speaker_1", "speaker_2", "you"). Verb must be a meaningful typed relation: decided, assigned, identified, raised, requires, depends_on, leads_to, contrasts_with, implements.
+- graph_edges: Entity-to-entity semantic relationships only (no speaker edges here — those come from svo_triples). strength: 0.0-1.0
+- implications: 0-3 strings, strategic inferences only. Omit if nothing meaningful is implied.
+- figures_of_speech: Only include if figurative language is present. normalized form is what gets added to the graph as a node label.
+- For low-confidence or unclear: lower confidence value, not error
+
+CATEGORY ASSIGNMENT RULES — MANDATORY (do not default to INFO or OFF_TOPIC for business content):
+- DECISION: ANY budget allocation ("budget is X", "X% goes to Y"), approved direction ("moving forward with X"), committed plan ("we will do X"), KPI/metric assignment ("KPI is X"), phase commitment ("Phase X will X"), role directive ("you are responsible for X"). Each clear commitment or directive = DECISION. A single segment can have multiple categories.
+- TASK: ANY explicit work assignment or required action ("you need to X", "make sure X", "deliver X", "complete X by X"). Must be an assigned future action, not a past statement.
+- RISK: ANY conditional failure statement ("if X slips...", "if X fails..."), stated concern, or explicit risk identification ("risk of X", "concern about X").
+- DEADLINE: ANY time-bound commitment ("by end of week", "in 45 days", "within Phase X", "every two weeks").
+- MULTIPLE categories per segment are strongly encouraged when content spans types (e.g., a decision that also introduces a risk: ["DECISION", "RISK"]).
+- A directive like "I expect ownership and execution" = DECISION (commitment statement), tone = DOMINANT.
+
+ENTITY TYPE ASSIGNMENT — MANDATORY:
+- type=PROJECT for named projects and initiatives (e.g., "Project Oryon")
+- type=DECISION for approved plans, budget structures, KPI targets, committed processes (e.g., "Bi-weekly Forecast Model", "2.5M Budget Allocation")
+- type=TASK for explicitly assigned work items (e.g., "Quarterly Milestone Review")
+- type=RISK for identified risks and failure conditions (e.g., "Phase Slip Risk", "Budget Overrun Risk")
+- type=PERSON for named individuals
+- type=CONCEPT for strategic frameworks and approaches (e.g., "Rolling Forecast Model")
+- DO NOT extract: language names (English, Urdu), discourse markers (Alright, Now), generic adjectives (Static, Correct, Clear)"#;
 
 // ============================================================================
 // Structs
@@ -585,11 +642,17 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle, alive_flag:
     let backoff = Arc::new(StdMutex::new(0u64));
     let last_request = Arc::new(StdMutex::new(Instant::now() - Duration::from_secs(MIN_REQUEST_INTERVAL_SECS)));
     let mut request_count = 0u32;
+    // FIX 3: Atomic chunk ID — incremented per utterance batch.
+    // Flows through both whisper_transcription and gemini_intelligence events
+    // so the frontend can replace the exact partial transcript, not a random one.
+    let chunk_counter = Arc::new(AtomicU64::new(0));
     // Session generation: incremented on reset so stale spawned tasks don't overwrite fresh state
     let session_generation = Arc::new(StdMutex::new(0u64));
     let mut _audio_received_count = 0u64;
     let mut last_level_log = Instant::now();
-    
+    // Rate-limits the "buffer trimmed" log so it doesn't spam 20x/sec while model is loading
+    let mut last_overflow_log = Instant::now() - Duration::from_secs(30);
+
     let mut tick = interval(Duration::from_millis(50)); // More frequent polling
     let mut total_samples_received: u64 = 0;
     let mut processing_started_at: Option<Instant> = None;
@@ -597,6 +660,7 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle, alive_flag:
     
     // Adaptive noise floor — tracks ambient noise level and adjusts speech detection
     let mut noise_floor: f32 = 0.005; // Conservative initial estimate
+    #[allow(unused_assignments)]
     let mut dynamic_threshold: f32 = SPEECH_THRESHOLD;
     
     println!("[AUDIO] ========================================");
@@ -905,6 +969,9 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle, alive_flag:
                 processing_started_at = Some(Instant::now());
                 request_count += 1;
                 
+                // FIX 3: Increment chunk_id for this utterance batch
+                let current_chunk_id = chunk_counter.fetch_add(1, Ordering::SeqCst);
+                
                 // Compute speaker tag from source timeline
                 // Count total samples from each source to determine dominant speaker
                 let mut mic_samples_total: usize = 0;
@@ -994,6 +1061,8 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle, alive_flag:
                 let _pending_speak_clone = pending_speaking.clone();
                 let generation_clone = session_generation.clone();
                 let spawn_generation = *poison_lock(&session_generation);
+                let chunk_counter_clone = chunk_counter.clone();
+                let utterance_chunk_id = current_chunk_id;
                 
                 // Spawn processing as async task so main loop keeps collecting audio
                 tokio::spawn(async move {
@@ -1275,7 +1344,9 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle, alive_flag:
                                     "language": result.language,
                                     "confidence": result.confidence,
                                     "source": "whisper",
-                                    "speaker": speaker_tag.clone()
+                                    "speaker": speaker_tag.clone(),
+                                    "utterance_start_ms": result.utterance_start_ms,
+                                    "chunk_id": utterance_chunk_id
                                 }));
                                 result.text
                             }
@@ -1319,7 +1390,9 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle, alive_flag:
                                 "language": result.language,
                                 "confidence": result.confidence,
                                 "source": "whisper",
-                                "speaker": speaker_tag.clone()
+                                "speaker": speaker_tag.clone(),
+                                "utterance_start_ms": result.utterance_start_ms,
+                                "chunk_id": utterance_chunk_id
                             }));
                             result.text
                         }
@@ -1379,13 +1452,21 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle, alive_flag:
                     
                     let _ = app.emit("cognivox:status", "Extracting intelligence...");
                     
-                    // Get current key and model from state
-                    let (key, model) = {
+                    // Get current key, model, and tier from state
+                    let (key, model, tier) = {
                         let state = app.state::<GeminiState>();
                         let k: String = poison_lock(&state.api_key).clone().unwrap_or_default();
                         let m = poison_lock(&state.selected_model).clone();
-                        (k, m)
+                        let t = poison_lock(&state.user_tier).clone();
+                        (k, m, t)
                     };
+
+                    // MEETING_TASKS_v1: Task 1.3 — Free tier = Whisper only, skip Gemini
+                    if tier == "free" {
+                        println!("[TIER] Free user — Gemini API skipped. Whisper-only transcript posted.");
+                        *poison_lock(&processing_clone) = false;
+                        return;
+                    }
 
                     if key.is_empty() {
                         println!("[GEMINI] ✗ Error: No API key configured");
@@ -1419,11 +1500,14 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle, alive_flag:
                     
                     match call_gemini_with_text(&key, &model, &speaker_annotated_transcript, &mut bo, &mut lr).await {
                         Ok(response) => {
-                            println!("[GEMINI] ✓ INTELLIGENCE EXTRACTED");
+                            println!("[GEMINI] ✓ INTELLIGENCE EXTRACTED (chunk_id: {})", utterance_chunk_id);
                             let _ = app.emit("cognivox:gemini_intelligence", serde_json::json!({
                                 "transcript": transcription.clone(),
                                 "speaker": speaker_tag.clone(),
-                                "intelligence": response
+                                "intelligence": response,
+                                // FIX 1+3: chunk_id correlates this Intelligence event back to its
+                                // whisper_transcription event so the frontend replaces the correct partial.
+                                "chunk_id": utterance_chunk_id
                             }));
                             let _ = app.emit("cognivox:status", "Listening for speech...");
                         }
@@ -1435,7 +1519,8 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle, alive_flag:
                                 "transcript": transcription.clone(),
                                 "speaker": speaker_tag.clone(),
                                 "intelligence": format!("{{\"transcript\":\"{}\",\"speaker\":\"{}\",\"tone\":\"NEUTRAL\",\"category\":[\"INFO\"],\"confidence\":0.5}}", 
-                                    transcription.replace('"', "'").replace('\n', " "), speaker_tag)
+                                    transcription.replace('"', "'").replace('\n', " "), speaker_tag),
+                                "chunk_id": utterance_chunk_id
                             }));
                             
                             let _ = app.emit("cognivox:status", format!("Gemini error: {}. Transcript saved.", e));
@@ -1541,13 +1626,29 @@ async fn smart_audio_loop(rx: Receiver<TaggedAudio>, app: AppHandle, alive_flag:
             }
         }
         
-        // Safety valve: cap buffer at 60 seconds (960k samples) to prevent unbounded memory growth.
-        // This should never trigger in practice — MAX_BATCH_SECS (30s) triggers processing first.
-        let max_samples = (60.0 * 16000.0) as usize;
+        // Safety cap: trim buffer when it exceeds MAX_BATCH_SECS.
+        // Normally MAX_BATCH_SECS triggers processing (via should_process) before this fires.
+        // When Whisper is LOADING (model download in progress), whisper_ready=false so
+        // should_process never fires — audio accumulates. We trim here to MAX_BATCH_SECS
+        // (not 60s) so that when Whisper finally loads:
+        //   a) only the most recent, relevant speech is processed
+        //   b) we don't send 60s to Whisper in one shot (30s already caused GGML OOM crashes)
+        let max_samples = (MAX_BATCH_SECS * 16000.0) as usize;
         if buffer.len() > max_samples {
             let keep_from = buffer.len() - max_samples;
             buffer = buffer[keep_from..].to_vec();
-            println!("[AUDIO] ⚠ Buffer overflow at {:.1}s — kept last 60s. This shouldn't happen.", buffer.len() as f32 / 16000.0);
+            // Rate-limit: only log every 10 seconds so the console isn't flooded
+            // while the model is downloading (which can take minutes on first run)
+            if last_overflow_log.elapsed() > Duration::from_secs(10) {
+                last_overflow_log = Instant::now();
+                let ws = app.state::<WhisperState>();
+                let whisper_rdy = *poison_lock(&ws.is_initialized);
+                if whisper_rdy {
+                    println!("[AUDIO] ⚠ Buffer overflow — trimmed to {:.1}s. Processing may be stuck.", buffer.len() as f32 / 16000.0);
+                } else {
+                    println!("[AUDIO] Whisper loading — audio trimmed to {:.1}s cap. Will transcribe when model is ready.", MAX_BATCH_SECS);
+                }
+            }
         }
     }
 }
@@ -1558,12 +1659,25 @@ pub fn set_gemini_model(state: tauri::State<'_, GeminiState>, model: String) -> 
     Ok(format!("Model: {}", model))
 }
 
+/// MEETING_TASKS_v1: Task 1.3 — Tier-based routing.
+/// Call from frontend with tier = "free" or "paid".
+/// "free" = Whisper-only (no Gemini API calls). "paid" = full Gemini pipeline.
+#[tauri::command]
+pub fn set_user_tier(state: tauri::State<'_, GeminiState>, tier: String) -> Result<String, String> {
+    let valid = tier == "free" || tier == "paid";
+    if !valid {
+        return Err(format!("Invalid tier '{}' — must be 'free' or 'paid'", tier));
+    }
+    *poison_lock(&state.user_tier) = tier.clone();
+    println!("[TIER] User tier set to '{}'", tier);
+    Ok(format!("Tier: {}", tier))
+}
+
 #[tauri::command]
 pub fn get_available_models() -> Vec<serde_json::Value> {
     vec![
         serde_json::json!({"id": "gemini-2.0-flash", "name": "Gemini 2.0 Flash (Stable)"}),
         serde_json::json!({"id": "gemini-2.0-flash-lite", "name": "Gemini 2.0 Flash Lite"}),
-        serde_json::json!({"id": "gemini-2.5-flash-preview-04-17", "name": "Gemini 2.5 Flash Preview"}),
         serde_json::json!({"id": "gemini-1.5-flash", "name": "Gemini 1.5 Flash (Fallback)"}),
     ]
 }

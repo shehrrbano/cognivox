@@ -27,12 +27,17 @@ export function buildSessionSnapshot(params: SnapshotParams): any | null {
     const { currentSession, transcripts, graphNodes, graphEdges } = params;
     if (!currentSession?.id) return null;
 
-    // GUARD: Don't cache/persist sessions with no real data
-    const hasData = transcripts.length > 0 || graphNodes.length > 0;
+    // GUARD: Only skip if there's absolutely no session context
+    if (!currentSession?.id) return null;
+    
+    // We allow saving sessions with 0 transcripts if they have metadata (e.g. title)
+    // This fixed the "cache skipping" issue for just-started recordings.
+    const hasData = (transcripts && transcripts.length > 0) || 
+                   (graphNodes && graphNodes.length > 0) ||
+                   (currentSession.metadata?.title && currentSession.metadata.title !== "Untitled Meeting");
+    
     if (!hasData) {
-        console.log(
-            `[CACHE] Skipping empty session ${currentSession.id} (no transcripts or nodes)`,
-        );
+        // Only log as debug/silent
         return null;
     }
 
@@ -167,22 +172,25 @@ export async function loadFullSession(
         if (!diskLoaded && FirestoreSessionManager.isAvailable()) {
             try {
                 const cloudSession = await FirestoreSessionManager.loadSession(sessionId);
-                const cloudTranscripts = cloudSession?.transcripts?.length || 0;
-                const cloudNodes = cloudSession?.graph_nodes?.length || 0;
-                if (cloudTranscripts > cacheTranscripts || cloudNodes > cacheNodes || !session) {
-                    session = cloudSession;
-                    console.log(
-                        `[RESTORE] Loaded from cloud: ${cloudTranscripts} transcripts, ${cloudNodes} nodes`,
-                    );
+                if (cloudSession) {
+                    const cloudTranscripts = cloudSession.transcripts?.length || 0;
+                    const cloudNodes = cloudSession.graph_nodes?.length || 0;
+                    if (cloudTranscripts > cacheTranscripts || cloudNodes > cacheNodes || !session) {
+                        session = cloudSession;
+                        console.log(
+                            `[RESTORE] Loaded from cloud: ${cloudTranscripts} transcripts, ${cloudNodes} nodes`,
+                        );
+                    }
                 }
-                sessionCache.set(sessionId, JSON.parse(JSON.stringify(session)));
-            } catch {
+            } catch (cloudErr) {
+                // Silent fallback
                 session = session || fallbackSession;
             }
         }
-
-        if (!session) {
-            session = fallbackSession;
+        
+        session = session || fallbackSession;
+        if (session) {
+            sessionCache.set(sessionId, JSON.parse(JSON.stringify(session)));
         }
     }
 
@@ -277,6 +285,7 @@ export function parseSessionIntoState(session: any): RestoredState {
         transcripts,
         graphNodes,
         graphEdges,
+        graphPositions: session.graph_positions || null,
         stressLevel,
         engagementLevel,
         urgencyLevel,

@@ -1,0 +1,172 @@
+<!-- UNIFIED: COGNIVOX_UI_MAPPER_v1 -->
+<script lang="ts">
+    import { createEventDispatcher } from "svelte";
+    import CognivoxControls from "./CognivoxControls.svelte";
+    import type { ModelOption } from "./types";
+
+    export let selectedModel = "gemini-2.0-flash";
+    export let availableModels: ModelOption[] = [];
+    export let apiKey = "";
+    export let isGeminiConnected = false;
+    export let captureMode = "both";
+    export let currentVolume = 0;
+    export let isRecording = false;
+
+    const dispatch = createEventDispatcher();
+
+    function connectGemini() {
+        dispatch("connectGemini");
+    }
+
+    function setCaptureMode(mode: string) {
+        dispatch("setCaptureMode", mode);
+    }
+
+    function handleSettingsChange(settings: any) {
+        dispatch("settingsChange", settings);
+    }
+</script>
+
+<div class="glass-card p-6">
+    <h3 class="text-lg font-medium text-slate-200 mb-6">
+        Audio & Processing Controls
+    </h3>
+
+    <!-- Model Selection -->
+    <div class="mb-6">
+        <label for="model-select" class="block text-xs text-slate-400 mb-2"
+            >AI Model</label
+        >
+        <select
+            id="model-select"
+            bind:value={selectedModel}
+            class="select-field w-full"
+        >
+            {#each availableModels as model}
+                <option value={model.id}>{model.name}</option>
+            {/each}
+        </select>
+    </div>
+
+    <!-- API Key -->
+    <div class="mb-6">
+        <label for="api-key-input" class="block text-xs text-slate-400 mb-2"
+            >Gemini API Key</label
+        >
+        <div class="flex gap-2">
+            <input
+                id="api-key-input"
+                type="password"
+                bind:value={apiKey}
+                class="input-field flex-1"
+                placeholder="AIza..."
+            />
+            <button
+                class="btn-secondary"
+                onclick={connectGemini}
+                disabled={isGeminiConnected}
+            >
+                {isGeminiConnected ? "Connected" : "Connect"}
+            </button>
+        </div>
+    </div>
+
+    <!-- Capture Source -->
+    <div class="mb-6">
+        <span class="block text-xs text-slate-400 mb-2">Capture Source</span>
+        <div class="flex gap-2">
+            <button
+                class="{captureMode === 'mic'
+                    ? 'btn-primary'
+                    : 'btn-secondary'} flex-1"
+                onclick={() => setCaptureMode("mic")}
+                aria-label="Set Mic Only"
+            >
+                <svg
+                    class="w-4 h-4 inline mr-1"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    ><path
+                        d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"
+                    /><path d="M19 10v2a7 7 0 0 1-14 0v-2" /></svg
+                > Mic
+            </button>
+            <button
+                class="{captureMode === 'system'
+                    ? 'btn-primary'
+                    : 'btn-secondary'} flex-1"
+                onclick={() => setCaptureMode("system")}
+                aria-label="Set System Audio Only"
+            >
+                System
+            </button>
+            <button
+                class="{captureMode === 'both'
+                    ? 'btn-primary'
+                    : 'btn-secondary'} flex-1"
+                onclick={() => setCaptureMode("both")}
+                aria-label="Set Both Audio Sources"
+            >
+                Both
+            </button>
+        </div>
+    </div>
+
+    <!-- Audio Level -->
+    <div class="mb-6">
+        <span class="block text-xs text-slate-400 mb-2">Audio Level</span>
+        <div class="space-y-2">
+            {#if currentVolume !== undefined}
+                <div
+                    class="h-3 bg-dark-700 rounded-full overflow-hidden"
+                    role="progressbar"
+                    aria-valuenow={Math.min(
+                        Math.max(currentVolume * 10, 0),
+                        1,
+                    ) * 100}
+                    aria-valuemin="0"
+                    aria-valuemax="100"
+                >
+                    <div
+                        class="h-full transition-all duration-75 {currentVolume >
+                        0.15
+                            ? 'bg-red-500'
+                            : currentVolume > 0.05
+                              ? 'bg-green-500'
+                              : currentVolume > 0.01
+                                ? 'bg-cyan-500'
+                                : 'bg-slate-600'}"
+                        style="width: {Math.min(
+                            Math.max(currentVolume * 10, 0),
+                            1,
+                        ) * 100}%"
+                    ></div>
+                </div>
+                <div class="flex justify-between text-xs text-slate-500 mt-1">
+                    <span class="flex items-center gap-1">
+                        <span
+                            class="w-2 h-2 rounded-full {isRecording
+                                ? currentVolume > 0.02
+                                    ? 'bg-green-500 animate-pulse'
+                                    : 'bg-cyan-500'
+                                : 'bg-slate-600'}"
+                        ></span>
+                        {isRecording ? "Listening" : "Idle"}
+                    </span>
+                    <span
+                        >{isRecording
+                            ? currentVolume > 0.0001
+                                ? (20 * Math.log10(currentVolume)).toFixed(0) +
+                                  " dB"
+                                : "-∞ dB"
+                            : "--"}</span
+                    >
+                </div>
+            {/if}
+        </div>
+    </div>
+
+    <CognivoxControls onSettingsChange={handleSettingsChange} />
+</div>

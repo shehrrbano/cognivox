@@ -1,0 +1,196 @@
+<script lang="ts">
+    import type { Transcript } from "./types";
+
+    export let transcripts: Transcript[] = [];
+    export let isCollapsed = false;
+    export let debugMode = false;
+    export let debugEventCount = 0;
+    export let debugLastEvent = "";
+    export let debugLastTranscript = "";
+</script>
+
+<!-- DEBUG PANEL (only when debug mode is on) -->
+{#if debugMode}
+    <div
+        class="bg-yellow-500/20 border border-yellow-500/50 rounded-lg p-3 mb-4"
+    >
+        <div class="flex items-center gap-4 text-xs font-mono">
+            <span class="text-yellow-400">DEBUG:</span>
+            <span class="text-slate-300"
+                >Events: <strong class="text-cyan-400">{debugEventCount}</strong
+                ></span
+            >
+            <span class="text-slate-300"
+                >Transcripts: <strong class="text-cyan-400"
+                    >{transcripts.length}</strong
+                ></span
+            >
+            <span class="text-slate-300"
+                >Last: <strong class="text-green-400"
+                    >{debugLastEvent || "none"}</strong
+                ></span
+            >
+        </div>
+        {#if debugLastTranscript}
+            <div class="mt-2 text-xs text-slate-400 truncate">
+                Last text: "{debugLastTranscript}"
+            </div>
+        {/if}
+    </div>
+{/if}
+
+<!-- The Gemini Conduit Card -->
+<div class="content-card">
+    <div class="content-card-header">
+        <span class="text-sm font-medium text-slate-200"
+            >The Gemini Conduit</span
+        >
+        <button class="icon-btn" aria-label="More options">
+            <svg
+                xmlns="http://www.w3.org/2000/svg"
+                width="16"
+                height="16"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+            >
+                <circle cx="12" cy="12" r="1"></circle>
+                <circle cx="19" cy="12" r="1"></circle>
+                <circle cx="5" cy="12" r="1"></circle>
+            </svg>
+        </button>
+    </div>
+    <img
+        src="/gemini_conduit.png"
+        alt="Gemini Conduit"
+        class="content-card-image"
+    />
+</div>
+
+<!-- Psychosomatic Engine - Transcription -->
+<div class="content-card {isCollapsed ? 'max-h-32 overflow-hidden' : ''}">
+    <div class="content-card-header">
+        <span class="text-sm font-medium text-slate-200">Transcription</span>
+        <span class="text-xs text-slate-500">{transcripts.length} entries</span>
+    </div>
+
+    <div class="p-6">
+        {#if transcripts.length === 0}
+            <!-- Empty State -->
+            <div class="text-center py-12">
+                <svg
+                    class="w-16 h-16 mx-auto mb-4 opacity-30 text-cyan-500"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.5"
+                    ><path
+                        d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"
+                    /><path d="M19 10v2a7 7 0 0 1-14 0v-2" /><line
+                        x1="12"
+                        y1="19"
+                        x2="12"
+                        y2="22"
+                    /></svg
+                >
+                <p class="text-lg text-slate-400 mb-2">No transcripts yet</p>
+                <p class="text-sm text-slate-500">
+                    Click "Start Recording" to begin capturing audio
+                </p>
+            </div>
+        {:else if isCollapsed}
+            <!-- Collapsed View - Highlights Only -->
+            <div class="text-center text-slate-400 py-4">
+                <p class="text-sm">
+                    {transcripts.length} transcript entries
+                </p>
+                <p class="text-xs text-slate-500 mt-1">
+                    Click "Expand" to view full transcripts
+                </p>
+            </div>
+        {:else}
+            <!-- Full Transcript View - Beautiful Bubbles -->
+            <div class="space-y-3 max-h-[500px] overflow-y-auto pr-2">
+                {#each transcripts.slice(-15).reverse() as t, i (t.id)}
+                    {@const speakerNum =
+                        t.speaker?.includes("1") || t.speaker === "You" ? 1 : 2}
+                    {@const isYou = speakerNum === 1}
+                    <div
+                        class="flex {isYou
+                            ? 'justify-end'
+                            : 'justify-start'} animate-fadeIn"
+                    >
+                        <div
+                            class="max-w-[80%] {isYou ? 'order-2' : 'order-1'}"
+                        >
+                            <!-- Speaker info -->
+                            <div
+                                class="flex items-center gap-2 mb-1 {isYou
+                                    ? 'justify-end'
+                                    : 'justify-start'}"
+                            >
+                                <span
+                                    class="text-xs {isYou
+                                        ? 'text-cyan-400'
+                                        : 'text-purple-400'} font-medium"
+                                >
+                                    {isYou ? "You" : t.speaker || "Speaker 2"}
+                                </span>
+                                <span class="text-xs text-slate-600"
+                                    >{t.timestamp}</span
+                                >
+                            </div>
+                            <!-- Message bubble -->
+                            <div
+                                class="p-3 rounded-2xl {isYou
+                                    ? 'bg-cyan-500/20 border border-cyan-500/30 rounded-tr-sm'
+                                    : 'bg-purple-500/10 border border-purple-500/20 rounded-tl-sm'}"
+                            >
+                                <p
+                                    class="text-sm text-slate-200 leading-relaxed"
+                                >
+                                    {t.text}
+                                </p>
+                            </div>
+                            <!-- Sentiment/tone indicator -->
+                            {#if t.tone}
+                                <div
+                                    class="flex {isYou
+                                        ? 'justify-end'
+                                        : 'justify-start'} mt-1"
+                                >
+                                    <span
+                                        class="text-xs px-2 py-0.5 rounded-full {t.tone ===
+                                        'POSITIVE'
+                                            ? 'bg-green-500/20 text-green-400'
+                                            : t.tone === 'NEGATIVE'
+                                              ? 'bg-red-500/20 text-red-400'
+                                              : t.tone === 'URGENT'
+                                                ? 'bg-orange-500/20 text-orange-400'
+                                                : 'bg-slate-500/20 text-slate-400'}"
+                                        >{t.tone.toLowerCase()}</span
+                                    >
+                                </div>
+                            {/if}
+                        </div>
+                        <!-- Avatar -->
+                        <div
+                            class="{isYou
+                                ? 'order-3 ml-2'
+                                : 'order-0 mr-2'} flex-shrink-0"
+                        >
+                            <div
+                                class="w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold {isYou
+                                    ? 'bg-cyan-500/30 text-cyan-300'
+                                    : 'bg-purple-500/30 text-purple-300'}"
+                            >
+                                {isYou ? "Y" : "S2"}
+                            </div>
+                        </div>
+                    </div>
+                {/each}
+            </div>
+        {/if}
+    </div>
+</div>

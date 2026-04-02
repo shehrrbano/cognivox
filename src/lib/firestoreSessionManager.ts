@@ -93,6 +93,7 @@ export interface SessionData {
     graph_nodes: GraphNode[];
     graph_edges: GraphEdge[];
     metadata: SessionMetadata;
+    graph_positions?: Record<string, { x: number; y: number }>; // [PERSISTENCE_v1]
     summary?: SessionSummary;
     psychosomatic?: PsychosomaticState;
     insights?: ExtractedInsights;

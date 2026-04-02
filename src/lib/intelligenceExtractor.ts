@@ -1,4 +1,7 @@
 import { keyManager } from './keyManager';
+import { settingsStore } from './settingsStore';
+import { get } from "svelte/store";
+import type { Transcript, ParsedSegment } from "./types";
 
 export interface ExtractedInsights {
     tasks: Array<{ text: string; assignee?: string; priority?: string }>;
@@ -59,9 +62,25 @@ class IntelligenceExtractor {
     private insights: ExtractedInsights = this.getEmptyInsights();
     private listeners: Set<(insights: ExtractedInsights) => void> = new Set();
     private isProcessing = false;
+    private confidenceThreshold = 0.7;
+    // MEETING_TASKS_v1: Task 1.3 — Tier-based routing
+    private userTier: 'free' | 'paid' = 'free';
 
     constructor() {
         this.loadFilters();
+
+        // Subscribe to global settings store for real-time updates
+        if (typeof window !== 'undefined') {
+            settingsStore.subscribe(settings => {
+                this.filters = { ...settings.filters };
+                this.confidenceThreshold = settings.confidenceThreshold;
+                // MEETING_TASKS_v1: Task 1.3 — Track user tier for backend routing
+                this.userTier = settings.userTier || 'free';
+                if (settings.debugMode) {
+                    console.log('[Intelligence] Filters and Threshold updated from store');
+                }
+            });
+        }
     }
 
     private getEmptyInsights(): ExtractedInsights {
@@ -142,7 +161,7 @@ class IntelligenceExtractor {
         // Always include speakers
         enabledFilters.push('- "speakers": array of {id, name, turns} for each speaker detected (use "Speaker 1", "Speaker 2", etc. Only include multiple speakers if there is clear evidence of different people speaking)');
 
-        return `Analyze this meeting transcript and extract structured insights.
+        return `You are a meeting intelligence engine. Analyze this transcript and extract structured insights with high precision.
 
 TRANSCRIPT:
 ${transcriptText}
@@ -152,10 +171,16 @@ EXTRACT THE FOLLOWING (return valid JSON only, no markdown):
 ${enabledFilters.join(',\n')}
 }
 
-RULES:
-- Be concise but specific
-- Include actual names/dates if mentioned
-- For speakers, try to identify distinct voices based on context
+CLASSIFICATION RULES — MANDATORY:
+DECISIONS: ANY budget allocation, approved direction, committed plan, role assignment, KPI target, or directive statement counts as a decision. Examples: "budget is 2.5 million", "moving forward with Project X", "KPI is functionality and stability", "40% goes to product development", "rolling forecast every two weeks". Do NOT skip decisions because the speaker sounds authoritative or the tone is neutral — directives ARE decisions.
+TASKS: ANY explicit work assignment or required action. Look for: "you need to X", "make sure X", "deliver X", "complete X", "responsible for X". Must be a future assigned action.
+RISKS: ANY conditional failure statement, stated concern, or identified threat. Look for: "if X slips...", "if X fails...", "risk of X", "concern about X", "everything depends on X". Conditional statements ("if base slips, everything slips") are HIGH-PRIORITY risks.
+DEADLINES: ANY time-bound commitment. Look for: "by end of week", "within X days", "every two weeks", "Phase X by X date".
+
+QUALITY RULES:
+- Be specific: use exact values, names, percentages from the transcript
+- Include actual names, dollar amounts, percentages, timeframes
+- Do not extract generic filler words as tasks or decisions
 - If nothing found for a category, return empty array
 - Return ONLY valid JSON, no explanation`;
     }
@@ -175,6 +200,13 @@ RULES:
             return null;
         }
 
+        // MEETING_TASKS_v1: Task 1.3 — Tier-based routing
+        // Free users: Gemini API calls skipped — rely on local Whisper transcription only
+        if (this.userTier === 'free') {
+            console.log('[TIER] Free user — using local Whisper only. Gemini intelligence skipped.');
+            return null;
+        }
+
         this.isProcessing = true;
 
         const transcriptText = transcripts
@@ -189,14 +221,23 @@ RULES:
                 throw new Error('No API key available');
             }
 
-            const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    contents: [{ parts: [{ text: prompt }] }],
-                    generationConfig: { temperature: 0.2 }
-                })
-            });
+            // MEETING_TASKS_v1: Task 1.2 — Upgraded to Gemini 2.5 Flash
+            const settings = get(settingsStore);
+            const model = settings.geminiModel || "gemini-2.0-flash";
+            
+            const payload = {
+                contents: [{ parts: [{ text: prompt }] }],
+                generationConfig: { temperature: 0.2 }
+            };
+
+            const response = await fetch(
+                `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+                {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(payload),
+                },
+            );
 
             if (!response.ok) {
                 if (response.status === 429) {
@@ -218,6 +259,11 @@ RULES:
                 keyManager.reportSuccess();
 
                 console.log('[Intelligence] Extracted:', extracted);
+                
+                // Filter extracted insights by confidence if Gemini provides it 
+                // (Note: Currently Gemini response doesn't always provide per-item confidence in this schema, 
+                // but we prepare the logic here for future structured output with scores)
+                
                 return this.insights;
             }
         } catch (error: any) {
@@ -281,3 +327,60 @@ RULES:
 
 // Singleton
 export const intelligenceExtractor = new IntelligenceExtractor();
+
+// ============================================================
+// MEETING_TASKS_v1: Task 3.3 — RAG Context Window Helper
+// Extracts N words before and after a match phrase from a text corpus.
+// Used by SearchTab and any RAG augmentation pipeline.
+// ============================================================
+
+/**
+ * Extract a context window of N words before and N words after a match in text.
+ * Returns the surrounding context with the match preserved in-place.
+ * @param text - Full text to search within
+ * @param match - The phrase to find
+ * @param words - Number of words to include on each side (default: 10)
+ * @returns Context string: "...pre-context [MATCH] post-context..."
+ */
+export function getContextWindow(text: string, match: string, words: number = 10): string {
+    if (!text || !match) return text || '';
+    const lowerText = text.toLowerCase();
+    const lowerMatch = match.toLowerCase().trim();
+    const idx = lowerText.indexOf(lowerMatch);
+    if (idx === -1) return text.slice(0, 120) + (text.length > 120 ? '…' : '');
+
+    // Split text into word tokens with their positions
+    const allWords = text.split(/(\s+)/); // Preserve whitespace as tokens
+    const wordTokens: Array<{ word: string; start: number; end: number }> = [];
+    let pos = 0;
+    for (const token of allWords) {
+        if (token.trim().length > 0) {
+            wordTokens.push({ word: token, start: pos, end: pos + token.length });
+        }
+        pos += token.length;
+    }
+
+    // Find which word index corresponds to the match start position
+    const matchEnd = idx + lowerMatch.length;
+    let matchStartWordIdx = 0;
+    let matchEndWordIdx = wordTokens.length - 1;
+    for (let i = 0; i < wordTokens.length; i++) {
+        if (wordTokens[i].start <= idx && wordTokens[i].end > idx) matchStartWordIdx = i;
+        if (wordTokens[i].start < matchEnd && wordTokens[i].end >= matchEnd) {
+            matchEndWordIdx = i;
+            break;
+        }
+    }
+
+    const preStart = Math.max(0, matchStartWordIdx - words);
+    const postEnd = Math.min(wordTokens.length - 1, matchEndWordIdx + words);
+
+    const preWords = wordTokens.slice(preStart, matchStartWordIdx).map(w => w.word).join(' ');
+    const matchWord = wordTokens.slice(matchStartWordIdx, matchEndWordIdx + 1).map(w => w.word).join(' ');
+    const postWords = wordTokens.slice(matchEndWordIdx + 1, postEnd + 1).map(w => w.word).join(' ');
+
+    const prefix = preStart > 0 ? '…' : '';
+    const suffix = postEnd < wordTokens.length - 1 ? '…' : '';
+
+    return `${prefix}${preWords} ${matchWord} ${postWords}${suffix}`.trim();
+}

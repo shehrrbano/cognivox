@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mkdir -p \"C:/Users/omen/Desktop/Cognivox/CODEBASE_INDEX/FULL_FUNCTIONALITY_AUDIT_AND_FIX_v1/SUBAGENTS\")",
+      "Bash(mkdir -p \"C:/Users/omen/Desktop/Cognivox/CODEBASE_INDEX/FULL_FUNCTIONALITY_AUDIT_AND_FIX_v1/VERSIONS\")",
+      "Bash(npm run:*)",
+      "Bash(find C:UsersomenDesktopCognivox -maxdepth 2 -name *.md -path *meeting* -o -name *.md -path *notes* -o -name *.txt -path *meeting*)",
+      "Bash(grep:*)",
+      "Bash(cargo check:*)",
+      "Bash(npx svelte-check:*)",
+      "Bash(mkdir -p \"C:/Users/omen/Desktop/Cognivox/CODEBASE_INDEX/LIVE_RECORDING_FEEDBACK_AND_STOP_BUTTON_FIX_v1/SUBAGENTS\")",
+      "Bash(mkdir -p \"C:/Users/omen/Desktop/Cognivox/CODEBASE_INDEX/LIVE_RECORDING_FEEDBACK_AND_STOP_BUTTON_FIX_v1/VERSIONS\")",
+      "Bash(npx tsc:*)",
+      "Bash(cargo build:*)",
+      "Bash(npx vite:*)",
+      "Bash(ls:*)"
+    ]
+  }
+}

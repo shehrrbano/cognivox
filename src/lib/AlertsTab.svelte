@@ -1,3 +1,5 @@
+<!-- ACTUAL EDIT: COGNIVOX_UI_REAL_CODE_APPLIER_v2 -->
+<!-- UNIFIED: COGNIVOX_UI_MAPPER_v1 -->
 <script lang="ts">
     import { createEventDispatcher } from "svelte";
     import type { Alert } from "./types";
@@ -13,13 +15,13 @@
 
 <div class="content-card">
     <div class="content-card-header">
-        <span class="text-sm font-medium text-slate-200 flex items-center gap-2"
+        <span class="text-sm font-medium text-gray-800 flex items-center gap-2"
             ><svg
                 class="w-4 h-4"
                 viewBox="0 0 24 24"
                 fill="none"
                 stroke="currentColor"
-                stroke-width="2"
+                stroke-width="1"
                 ><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" /><path
                     d="M13.73 21a2 2 0 0 1-3.46 0"
                 /></svg
@@ -29,11 +31,11 @@
             >Clear All</button
         >
     </div>
-    <div class="p-6 space-y-3 max-h-96 overflow-y-auto">
+    <div class="p-4 sm:p-6 space-y-fluid-gap max-h-96 overflow-y-auto">
         {#if alerts.length === 0}
-            <div class="text-center py-12 text-slate-500">
+            <div class="text-center py-12 text-gray-400">
                 <svg
-                    class="w-12 h-12 mx-auto mb-4 text-slate-500 opacity-30"
+                    class="w-12 h-12 mx-auto mb-4 text-gray-400 opacity-30"
                     viewBox="0 0 24 24"
                     fill="none"
                     stroke="currentColor"
@@ -51,10 +53,10 @@
             {#each alerts as alert}
                 <div
                     class="glass-card p-4 {alert.severity === 'critical'
-                        ? 'border-red-500/30'
+                        ? 'border-red-300'
                         : alert.severity === 'warning'
-                          ? 'border-yellow-500/30'
-                          : 'border-cyan-500/30'}"
+                          ? 'border-yellow-300'
+                          : 'border-blue-300'}"
                 >
                     <div class="flex items-start gap-3">
                         <svg
@@ -62,11 +64,11 @@
                                 ? 'text-red-500'
                                 : alert.severity === 'warning'
                                   ? 'text-yellow-500'
-                                  : 'text-cyan-500'}"
+                                  : 'text-blue-600'}"
                             viewBox="0 0 24 24"
                             fill="none"
                             stroke="currentColor"
-                            stroke-width="2"
+                            stroke-width="1"
                             ><circle cx="12" cy="12" r="10" /><line
                                 x1="12"
                                 y1="8"
@@ -76,14 +78,14 @@
                         >
                         <div class="flex-1">
                             <div class="flex justify-between">
-                                <span class="font-medium text-slate-200"
+                                <span class="font-medium text-gray-800"
                                     >{alert.type}</span
                                 >
-                                <span class="text-xs text-slate-500"
+                                <span class="text-xs text-gray-400"
                                     >{alert.timestamp}</span
                                 >
                             </div>
-                            <p class="text-sm text-slate-400 mt-1">
+                            <p class="text-sm text-gray-500 mt-1">
                                 {alert.message}
                             </p>
                         </div>

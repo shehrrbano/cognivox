@@ -1,47 +1,83 @@
+<!-- ACTUAL EDIT: COGNIVOX_UI_REAL_CODE_APPLIER_v2 -->
+<!-- UNIFIED: COGNIVOX_UI_MAPPER_v1 -->
 <script lang="ts">
-    import { createEventDispatcher } from "svelte";
+    // KG_UNIFIED_v1: Converted to Svelte 5 $props() — removes createEventDispatcher mismatch
+    // that caused all button events (Generate, Clear, Clean Up) to be dispatched but never received.
     import KnowledgeGraph from "./KnowledgeGraph.svelte";
     import type { GraphNode, GraphEdge, Transcript } from "./types";
 
-    export let graphNodes: GraphNode[] = [];
-    export let graphEdges: GraphEdge[] = [];
-    export let transcripts: Transcript[] = [];
-    export let isGenerating: boolean = false;
+    let {
+        graphNodes = [] as GraphNode[],
+        graphEdges = [] as GraphEdge[],
+        transcripts = [] as Transcript[],
+        isGenerating = false,
+        searchQuery = "",
+        isRecording = false,
+        isRecordingStarting = false,
+        initialPositions = null as any,
+        // Callback props (Svelte 5 style — replaces createEventDispatcher)
+        ongenerateGraph = undefined as (() => void) | undefined,
+        onclearGraph = undefined as (() => void) | undefined,
+        onselfHealGraph = undefined as (() => void) | undefined,
+        ontoggleCluster = undefined as ((d: { nodeId: string }) => void) | undefined,
+        onlayoutChanged = undefined as ((d: { positions: any }) => void) | undefined,
+    } = $props();
 
-    const dispatch = createEventDispatcher();
+    let graphRef = $state<any>(null);
 
-    function handleGenerateGraph() {
-        dispatch("generateGraph");
-    }
+    // Expose getPositions for +page.svelte graphTabRef.getPositions()
+    export function getPositions() { return graphRef?.getPositions(); }
 
-    function handleClearGraph() {
-        dispatch("clearGraph");
-    }
+    // KG_UNIFIED_v1: Expose refreshLayout so +page.svelte can trigger re-measure
+    // when graph tab becomes visible (was hidden via display:none).
+    export function refreshLayout() { graphRef?.refreshLayout?.(); }
 
-    function handleToggleCluster(event: CustomEvent<{ nodeId: string }>) {
-        dispatch("toggleCluster", event.detail);
-    }
+    function handleGenerateGraph() { ongenerateGraph?.(); }
+    function handleClearGraph() { onclearGraph?.(); }
+    function handleSelfHeal() { onselfHealGraph?.(); }
 </script>
 
 <div
-    class="content-card"
-    style="height: calc(100vh - 220px); min-height: 500px;"
+    class="content-card overflow-hidden"
+    style="height: clamp(268px, 60vh, 359px); min-height: 180px;"
 >
     <div class="content-card-header">
         <div class="flex items-center justify-between w-full">
             <div class="flex items-center gap-3">
-                <span class="text-sm font-medium text-slate-200"
-                    >Knowledge Graph Visualization</span
-                >
-                <span class="text-xs text-slate-500"
-                    >{graphNodes.length} nodes • {graphEdges.length} edges</span
-                >
+                <div class="flex items-center gap-2 flex-wrap pb-2 sm:pb-0">
+                    {#if isRecording}
+                        <div class="flex items-center gap-1.5 px-3 py-1 bg-red-50 border border-red-200 rounded-full shadow-[0_1px_2px_rgba(0,0,0,0.05)]">
+                            <div class="w-2.5 h-2.5 rounded-full bg-red-500 animate-pulse"></div>
+                            <span class="text-[7px] font-bold tracking-wider text-red-600 uppercase">LIVE</span>
+                        </div>
+                    {/if}
+                    <div class="flex items-center gap-1.5 px-3 py-1 bg-white border border-gray-100 rounded-full shadow-[0_1px_2px_rgba(0,0,0,0.05)]">
+                        <div class="w-2.5 h-2.5 rounded-full bg-blue-500"></div>
+                        <span class="text-[7px] font-bold tracking-wider text-gray-600 uppercase">TASKS</span>
+                    </div>
+                    <div class="flex items-center gap-1.5 px-3 py-1 bg-white border border-gray-100 rounded-full shadow-[0_1px_2px_rgba(0,0,0,0.05)]">
+                        <div class="w-2.5 h-2.5 rounded-full bg-green-500"></div>
+                        <span class="text-[7px] font-bold tracking-wider text-gray-600 uppercase">DECISIONS</span>
+                    </div>
+                    <div class="flex items-center gap-1.5 px-3 py-1 bg-white border border-gray-100 rounded-full shadow-[0_1px_2px_rgba(0,0,0,0.05)]">
+                        <div class="w-2.5 h-2.5 rounded-full bg-red-500"></div>
+                        <span class="text-[7px] font-bold tracking-wider text-gray-600 uppercase">RISKS</span>
+                    </div>
+                </div>
             </div>
             <div class="flex items-center gap-2">
                 {#if graphNodes.length > 0}
+                    <!-- KG_CLEANUP_SELF_HEALING_v1: Self-heal button removes junk nodes instantly -->
+                    <button
+                        onclick={handleSelfHeal}
+                        class="px-2 py-1 text-xs rounded bg-amber-50 hover:bg-amber-100 text-amber-600 hover:text-amber-700 border border-amber-200 transition-colors font-medium"
+                        title="Remove noise nodes and deduplicate (instant, no API call)"
+                    >
+                        ✦ Clean Up
+                    </button>
                     <button
                         onclick={handleClearGraph}
-                        class="px-2 py-1 text-xs rounded bg-slate-700/50 hover:bg-slate-600/50 text-slate-400 hover:text-slate-200 border border-slate-600/30 transition-colors"
+                        class="px-2 py-1 text-xs rounded bg-gray-100/50 hover:bg-slate-600/50 text-gray-500 hover:text-gray-800 border border-slate-600/30 transition-colors"
                         title="Clear graph"
                     >
                         Clear
@@ -52,10 +88,10 @@
                     disabled={isGenerating || transcripts.length === 0}
                     class="px-3 py-1 text-xs rounded font-medium transition-all
                         {isGenerating
-                        ? 'bg-cyan-500/20 text-cyan-300 cursor-wait'
+                        ? 'bg-blue-50 text-blue-400 cursor-wait'
                         : transcripts.length === 0
-                          ? 'bg-slate-700/30 text-slate-500 cursor-not-allowed'
-                          : 'bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-400 hover:text-cyan-300 border border-cyan-500/30'}"
+                          ? 'bg-gray-100/30 text-gray-400 cursor-not-allowed'
+                          : 'bg-blue-50 hover:bg-blue-100 text-blue-500 hover:text-blue-400 border border-blue-300'}"
                     title={transcripts.length === 0
                         ? "Record a conversation first"
                         : "Generate knowledge graph from transcripts"}
@@ -72,7 +108,7 @@
                                     cy="12"
                                     r="10"
                                     stroke="currentColor"
-                                    stroke-width="3"
+                                    stroke-width="2"
                                     stroke-dasharray="31"
                                     stroke-dashoffset="10"
                                 />
@@ -86,7 +122,7 @@
                                 viewBox="0 0 24 24"
                                 fill="none"
                                 stroke="currentColor"
-                                stroke-width="2"
+                                stroke-width="1"
                             >
                                 <circle cx="12" cy="5" r="3" />
                                 <circle cx="5" cy="19" r="3" />
@@ -101,12 +137,17 @@
             </div>
         </div>
     </div>
-    <div class="h-full p-2">
+    <div class="h-full p-2 sm:p-fluid-gap">
         <KnowledgeGraph
+            bind:this={graphRef}
+            {searchQuery}
             nodes={graphNodes}
             edges={graphEdges}
             compact={false}
-            on:toggleCluster={handleToggleCluster}
+            {initialPositions}
+            pauseSimulation={isRecordingStarting}
+            {ontoggleCluster}
+            {onlayoutChanged}
         />
     </div>
 </div>

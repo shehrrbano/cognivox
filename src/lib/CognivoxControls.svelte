@@ -1,3 +1,5 @@
+<!-- ACTUAL EDIT: COGNIVOX_UI_REAL_CODE_APPLIER_v2 -->
+<!-- UNIFIED: COGNIVOX_UI_MAPPER_v1 -->
 <script lang="ts">
     import { createEventDispatcher } from "svelte";
     import { invoke } from "@tauri-apps/api/core";
@@ -78,10 +80,10 @@
     }
 </script>
 
-<div class="space-y-6">
+<div class="space-y-fluid-gap">
     <!-- Confidence -->
     <div>
-        <label for="conf" class="block text-xs text-slate-400 mb-2">
+        <label for="conf" class="block text-xs text-gray-500 mb-2">
             Min Confidence Threshold
         </label>
         <div class="flex items-center gap-4">
@@ -95,7 +97,7 @@
                 onchange={updateSettings}
                 class="w-full"
             />
-            <span class="text-sm font-mono text-cyan-400 w-12 text-right">
+            <span class="text-sm font-mono text-blue-500 w-12 text-right">
                 {(confidenceThreshold * 100).toFixed(0)}%
             </span>
         </div>
@@ -103,7 +105,7 @@
 
     <!-- VAD -->
     <div>
-        <label for="vad" class="block text-xs text-slate-400 mb-2">
+        <label for="vad" class="block text-xs text-gray-500 mb-2">
             Voice Activity Sensitivity
         </label>
         <div class="flex items-center gap-4">
@@ -117,7 +119,7 @@
                 onchange={updateSettings}
                 class="w-full"
             />
-            <span class="text-sm font-mono text-cyan-400 w-12 text-right">
+            <span class="text-sm font-mono text-blue-500 w-12 text-right">
                 {vadSensitivity}
             </span>
         </div>
@@ -132,17 +134,17 @@
             onchange={updateSettings}
             class="w-4 h-4 rounded"
         />
-        <label for="autoconnect" class="text-sm text-slate-300">
+        <label for="autoconnect" class="text-sm text-gray-700">
             Auto-connect on startup
         </label>
     </div>
 
     <!-- Filters -->
-    <div class="pt-4 border-t border-cyan-500/10">
-        <h4 class="text-xs font-semibold text-cyan-400 uppercase tracking-wider mb-3">
+    <div class="pt-4 border-t border-gray-200">
+        <h4 class="text-xs font-semibold text-blue-500 uppercase tracking-wider mb-3">
             Intelligence Filters
         </h4>
-        <div class="grid grid-cols-2 gap-2">
+        <div class="grid grid-cols-1 xs:grid-cols-2 gap-2">
             {#each categories as cat}
                 <div class="flex items-center gap-2">
                     <input
@@ -152,7 +154,7 @@
                         onchange={updateSettings}
                         class="w-4 h-4 rounded"
                     />
-                    <label for={cat.id} class="text-sm text-slate-300">
+                    <label for={cat.id} class="text-sm text-gray-700">
                         {cat.label}
                     </label>
                 </div>
@@ -161,14 +163,14 @@
     </div>
     
     <!-- Prediction Controls -->
-    <div class="pt-4 border-t border-cyan-500/10">
-        <h4 class="text-xs font-semibold text-cyan-400 uppercase tracking-wider mb-3">
+    <div class="pt-4 border-t border-gray-200">
+        <h4 class="text-xs font-semibold text-blue-500 uppercase tracking-wider mb-3">
             Prediction & Optimistic Mode
         </h4>
         
-        <div class="space-y-4">
+        <div class="space-y-fluid-gap">
             <div>
-                <label for="pred" class="block text-xs text-slate-400 mb-2">
+                <label for="pred" class="block text-xs text-gray-500 mb-2">
                     Prediction Aggression
                 </label>
                 <div class="flex items-center gap-4">
@@ -182,7 +184,7 @@
                         onchange={updateSettings}
                         class="w-full"
                     />
-                    <span class="text-sm font-mono text-cyan-400 w-12 text-right">
+                    <span class="text-sm font-mono text-blue-500 w-12 text-right">
                         {(predictionAggression * 100).toFixed(0)}%
                     </span>
                 </div>
@@ -196,7 +198,7 @@
                     onchange={updateSettings}
                     class="w-4 h-4 rounded"
                 />
-                <label for="optimistic" class="text-sm text-slate-300">
+                <label for="optimistic" class="text-sm text-gray-700">
                     Enable Optimistic Predictions (Local)
                 </label>
             </div>
@@ -204,12 +206,12 @@
     </div>
     
     <!-- Manual Intelligence Injection -->
-    <div class="pt-4 border-t border-cyan-500/10">
-        <h4 class="text-xs font-semibold text-cyan-400 uppercase tracking-wider mb-3">
+    <div class="pt-4 border-t border-gray-200">
+        <h4 class="text-xs font-semibold text-blue-500 uppercase tracking-wider mb-3">
             Manual Intelligence Inject
         </h4>
         
-        <div class="space-y-3">
+        <div class="space-y-fluid-gap">
             <input
                 type="text"
                 placeholder="Enter text to inject..."
@@ -237,25 +239,25 @@
     </div>
     
     <!-- Keyboard Shortcuts Reference -->
-    <div class="pt-4 border-t border-cyan-500/10">
-        <h4 class="text-xs font-semibold text-cyan-400 uppercase tracking-wider mb-3 flex items-center gap-2">
-            <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="16" rx="2" ry="2"/><path d="M6 8h.001"/><path d="M10 8h.001"/><path d="M14 8h.001"/><path d="M18 8h.001"/><path d="M8 12h.001"/><path d="M12 12h.001"/><path d="M16 12h.001"/><path d="M7 16h10"/></svg> Keyboard Shortcuts
+    <div class="pt-4 border-t border-gray-200">
+        <h4 class="text-xs font-semibold text-blue-500 uppercase tracking-wider mb-3 flex items-center gap-2">
+            <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1"><rect x="2" y="4" width="13" height="11" rx="2" ry="2"/><path d="M6 8h.001"/><path d="M10 8h.001"/><path d="M14 8h.001"/><path d="M18 8h.001"/><path d="M8 12h.001"/><path d="M12 12h.001"/><path d="M16 12h.001"/><path d="M7 16h10"/></svg> Keyboard Shortcuts
         </h4>
-        <div class="text-xs text-slate-400 space-y-1.5">
+        <div class="text-xs text-gray-500 space-y-1.5">
             <div class="flex items-center gap-2">
-                <kbd class="px-1.5 py-0.5 bg-dark-700 rounded text-cyan-400 border border-cyan-500/20">Ctrl+Shift+R</kbd>
+                <kbd class="px-1.5 py-0.5 bg-gray-200 rounded text-blue-500 border border-blue-200">Ctrl+Shift+R</kbd>
                 <span>Toggle Recording</span>
             </div>
             <div class="flex items-center gap-2">
-                <kbd class="px-1.5 py-0.5 bg-dark-700 rounded text-cyan-400 border border-cyan-500/20">Ctrl+Shift+G</kbd>
+                <kbd class="px-1.5 py-0.5 bg-gray-200 rounded text-blue-500 border border-blue-200">Ctrl+Shift+G</kbd>
                 <span>Graph View</span>
             </div>
             <div class="flex items-center gap-2">
-                <kbd class="px-1.5 py-0.5 bg-dark-700 rounded text-cyan-400 border border-cyan-500/20">Ctrl+Shift+A</kbd>
+                <kbd class="px-1.5 py-0.5 bg-gray-200 rounded text-blue-500 border border-blue-200">Ctrl+Shift+A</kbd>
                 <span>Alerts</span>
             </div>
             <div class="flex items-center gap-2">
-                <kbd class="px-1.5 py-0.5 bg-dark-700 rounded text-cyan-400 border border-cyan-500/20">Ctrl+Shift+T</kbd>
+                <kbd class="px-1.5 py-0.5 bg-gray-200 rounded text-blue-500 border border-blue-200">Ctrl+Shift+T</kbd>
                 <span>Transcripts</span>
             </div>
         </div>

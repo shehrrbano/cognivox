@@ -1,196 +1,206 @@
+<!-- ACTUAL EDIT: COGNIVOX_UI_REAL_CODE_APPLIER_v2 -->
+<!-- UNIFIED: COGNIVOX_UI_MAPPER_v1 -->
 <script lang="ts">
-    import type { Transcript } from "./types";
+    import type { Transcript, GraphNode, GraphEdge } from "./types";
+    import { createEventDispatcher, onMount } from "svelte";
+    import KnowledgeGraph from "./KnowledgeGraph.svelte";
 
-    export let transcripts: Transcript[] = [];
-    export let isCollapsed = false;
-    export let debugMode = false;
-    export let debugEventCount = 0;
-    export let debugLastEvent = "";
-    export let debugLastTranscript = "";
+    let {
+        transcripts = [],
+        graphNodes = [],
+        graphEdges = [],
+        isCollapsed = false,
+        debugMode = false,
+        debugEventCount = 0,
+        debugLastEvent = "",
+        debugLastTranscript = ""
+    } = $props();
+
+    import { settingsStore } from "./settingsStore";
+
+    const dispatch = createEventDispatcher();
+
+    // Task 2.3 (BATCH2): Inline speaker rename — dispatch to parent (+page.svelte)
+    function renameSpeakerInline(speakerId: string | undefined, currentName: string) {
+        const newName = prompt(`Rename "${currentName}" to:`, currentName);
+        if (newName && newName.trim() && newName.trim() !== currentName) {
+            dispatch('renameSpeaker', { speakerId, newLabel: newName.trim() });
+        }
+    }
+
+    // MEETING_TASKS_v1: Task 3.2 — Export transcript to .txt file
+    function exportTranscriptAsTxt() {
+        if (!transcripts || transcripts.length === 0) return;
+        const lines = (transcripts as Transcript[]).map(t => {
+            const ts = t.timestamp || '';
+            const speaker = t.speaker || 'Speaker';
+            const text = t.text || '';
+            const tone = t.tone && t.tone !== 'NEUTRAL' ? ` [${t.tone}]` : '';
+            return `[${ts}] ${speaker}${tone}: ${text}`;
+        });
+        const content = lines.join('\n');
+        const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `transcript_${new Date().toISOString().slice(0,19).replace(/[:T]/g, '-')}.txt`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+    }
+
+    // Mapping node types/categories to settings filter keys
+    const filterMap: Record<string, string> = {
+        'TASK': 'tasks',
+        'DECISION': 'decisions',
+        'DEADLINE': 'deadlines',
+        'ACTION_ITEM': 'actionItems',
+        'RISK': 'risks',
+        'URGENCY': 'urgency',
+        'SENTIMENT': 'sentiment',
+        'INTERRUPTION': 'interruptions',
+        'AGREEMENT': 'agreement',
+        'DISAGREEMENT': 'disagreement',
+        'EMOTION_SHIFT': 'emotionShifts',
+        'TOPIC_DRIFT': 'topicDrifts'
+    };
+
+    let filteredNodes = $derived((graphNodes || []).filter(node => {
+        // KG_REDESIGN_v1: "Start"/"Root" nodes are deprecated — filter them out entirely
+        if (node.id === 'Start' || node.type === 'Root') return false;
+        // Always show speaker, entity, and tone nodes
+        if (node.type === 'Speaker' || node.type === 'ENTITY' || node.type === 'Entity' || node.type === 'Tone') return true;
+
+        // Check if this category is enabled in settings
+        const filterKey = filterMap[node.id] || filterMap[node.type];
+        if (filterKey) {
+            return ($settingsStore.filters as any)[filterKey] !== false;
+        }
+        return true;
+    }));
+
+    let filteredEdges = $derived((graphEdges || []).filter(edge => {
+        const sourceVisible = filteredNodes.some(n => n.id === (edge as any).source || n.id === edge.from);
+        const targetVisible = filteredNodes.some(n => n.id === (edge as any).target || n.id === edge.to);
+        return sourceVisible && targetVisible;
+    }));
+
+
+    function getToneStyle(tone?: string) {
+        if (!tone) return "bg-gray-100 text-gray-500 border-gray-200/50";
+        switch (tone.toUpperCase()) {
+            case "POSITIVE": return "bg-green-50 text-green-600 border-green-200/50";
+            case "NEGATIVE": return "bg-red-50 text-red-600 border-red-200/50";
+            case "URGENT": return "bg-orange-50 text-orange-600 border-orange-200/50";
+            default: return "bg-gray-100 text-gray-500 border-gray-200/50";
+        }
+    }
 </script>
 
-<!-- DEBUG PANEL (only when debug mode is on) -->
-{#if debugMode}
-    <div
-        class="bg-yellow-500/20 border border-yellow-500/50 rounded-lg p-3 mb-4"
-    >
-        <div class="flex items-center gap-4 text-xs font-mono">
-            <span class="text-yellow-400">DEBUG:</span>
-            <span class="text-slate-300"
-                >Events: <strong class="text-cyan-400">{debugEventCount}</strong
-                ></span
-            >
-            <span class="text-slate-300"
-                >Transcripts: <strong class="text-cyan-400"
-                    >{transcripts.length}</strong
-                ></span
-            >
-            <span class="text-slate-300"
-                >Last: <strong class="text-green-400"
-                    >{debugLastEvent || "none"}</strong
-                ></span
-            >
-        </div>
-        {#if debugLastTranscript}
-            <div class="mt-2 text-xs text-slate-400 truncate">
-                Last text: "{debugLastTranscript}"
+<div class="w-full flex flex-col xl:flex-row gap-4 xl:h-[600px]">
+    <!-- Left Column: Transcript Section (40%) -->
+    <div class="xl:w-[40%] h-[600px] xl:h-auto flex flex-col bg-white rounded-2xl border border-gray-200/60 shadow-sm overflow-hidden flex-shrink-0">
+        <!-- Header -->
+        <div class="px-5 py-4 border-b border-gray-100 flex justify-between items-center bg-gray-50/50 sticky top-0 z-10 backdrop-blur-sm">
+            <div class="flex items-center gap-3">
+                <span class="text-[11px] font-black text-gray-800 uppercase tracking-widest flex items-center gap-2">
+                    <span class="w-2 h-2 rounded-full bg-red-500 animate-pulse shadow-[0_0_8px_rgba(239,68,68,0.6)] ring-2 ring-red-500/20"></span>
+                    LIVE TRANSCRIPT
+                </span>
             </div>
-        {/if}
-    </div>
-{/if}
-
-<!-- The Gemini Conduit Card -->
-<div class="content-card">
-    <div class="content-card-header">
-        <span class="text-sm font-medium text-slate-200"
-            >The Gemini Conduit</span
-        >
-        <button class="icon-btn" aria-label="More options">
-            <svg
-                xmlns="http://www.w3.org/2000/svg"
-                width="16"
-                height="16"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="2"
-            >
-                <circle cx="12" cy="12" r="1"></circle>
-                <circle cx="19" cy="12" r="1"></circle>
-                <circle cx="5" cy="12" r="1"></circle>
-            </svg>
-        </button>
-    </div>
-    <img
-        src="/gemini_conduit.png"
-        alt="Gemini Conduit"
-        class="content-card-image"
-    />
-</div>
-
-<!-- Psychosomatic Engine - Transcription -->
-<div class="content-card {isCollapsed ? 'max-h-32 overflow-hidden' : ''}">
-    <div class="content-card-header">
-        <span class="text-sm font-medium text-slate-200">Transcription</span>
-        <span class="text-xs text-slate-500">{transcripts.length} entries</span>
-    </div>
-
-    <div class="p-6">
-        {#if transcripts.length === 0}
-            <!-- Empty State -->
-            <div class="text-center py-12">
-                <svg
-                    class="w-16 h-16 mx-auto mb-4 opacity-30 text-cyan-500"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="1.5"
-                    ><path
-                        d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"
-                    /><path d="M19 10v2a7 7 0 0 1-14 0v-2" /><line
-                        x1="12"
-                        y1="19"
-                        x2="12"
-                        y2="22"
-                    /></svg
-                >
-                <p class="text-lg text-slate-400 mb-2">No transcripts yet</p>
-                <p class="text-sm text-slate-500">
-                    Click "Start Recording" to begin capturing audio
-                </p>
-            </div>
-        {:else if isCollapsed}
-            <!-- Collapsed View - Highlights Only -->
-            <div class="text-center text-slate-400 py-4">
-                <p class="text-sm">
-                    {transcripts.length} transcript entries
-                </p>
-                <p class="text-xs text-slate-500 mt-1">
-                    Click "Expand" to view full transcripts
-                </p>
-            </div>
-        {:else}
-            <!-- Full Transcript View - Beautiful Bubbles -->
-            <div class="space-y-3 max-h-[500px] overflow-y-auto pr-2">
-                {#each transcripts.slice(-15).reverse() as t, i (t.id)}
-                    {@const speakerNum =
-                        t.speaker?.includes("1") || t.speaker === "You" ? 1 : 2}
-                    {@const isYou = speakerNum === 1}
-                    <div
-                        class="flex {isYou
-                            ? 'justify-end'
-                            : 'justify-start'} animate-fadeIn"
+            <div class="flex items-center gap-2">
+                <span class="text-[9px] font-bold text-gray-400 bg-white px-2 py-0.5 rounded border border-gray-200 shadow-sm">{transcripts.length} ENTRIES</span>
+                <!-- MEETING_TASKS_v1: Task 3.2 — Export to .txt button -->
+                {#if transcripts.length > 0}
+                    <button
+                        onclick={exportTranscriptAsTxt}
+                        title="Export transcript as .txt"
+                        class="flex items-center gap-1 text-[9px] font-bold text-gray-400 bg-white hover:text-blue-600 hover:border-blue-200 px-2 py-0.5 rounded border border-gray-200 shadow-sm transition-colors"
+                        aria-label="Export transcript as text file"
                     >
-                        <div
-                            class="max-w-[80%] {isYou ? 'order-2' : 'order-1'}"
-                        >
-                            <!-- Speaker info -->
-                            <div
-                                class="flex items-center gap-2 mb-1 {isYou
-                                    ? 'justify-end'
-                                    : 'justify-start'}"
-                            >
-                                <span
-                                    class="text-xs {isYou
-                                        ? 'text-cyan-400'
-                                        : 'text-purple-400'} font-medium"
-                                >
-                                    {isYou ? "You" : t.speaker || "Speaker 2"}
-                                </span>
-                                <span class="text-xs text-slate-600"
-                                    >{t.timestamp}</span
-                                >
+                        <svg class="w-2.5 h-2.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                            <polyline points="7 10 12 15 17 10"/>
+                            <line x1="12" y1="15" x2="12" y2="3"/>
+                        </svg>
+                        EXPORT
+                    </button>
+                {/if}
+            </div>
+        </div>
+
+        <!-- Transcript Content -->
+        <div class="flex-1 overflow-y-auto p-5 space-y-5 custom-scrollbar bg-white">
+            {#if transcripts.length === 0}
+                <div class="flex flex-col items-center justify-center h-full text-center opacity-50">
+                    <svg class="w-8 h-8 text-blue-300 mb-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/></svg>
+                    <p class="text-[11px] font-bold text-gray-500 uppercase tracking-widest">Awaiting Audio</p>
+                </div>
+            {:else}
+                {#each transcripts as t, i (t.id || i)}
+                    {@const isUser = t.speaker?.toLowerCase() === 'you' || t.speaker?.includes('1')}
+                    <!-- Task 2.2 (BATCH2): Determine speaker role — speakerId 1 = Lecturer, others = Student N -->
+                    {@const speakerLabel = t.speaker && t.speaker !== 'You' && t.speaker !== 'Speaker 1'
+                        ? t.speaker
+                        : isUser
+                            ? 'Lecturer'
+                            : `Student ${(t.speakerId ?? 2) - 1}`
+                    }
+                    {@const avatarText = isUser ? 'LEC' : `S${(t.speakerId ?? 2) - 1}`}
+                    <div class="group flex gap-3 animate-fadeIn">
+                        <!-- Avatar -->
+                        <div class="flex-shrink-0">
+                            <div class="w-7 h-7 rounded-full flex items-center justify-center text-[9px] font-black {isUser ? 'bg-blue-100 text-blue-600 border border-blue-200/50' : 'bg-purple-100 text-purple-600 border border-purple-200/50'} shadow-sm">
+                                {avatarText}
                             </div>
-                            <!-- Message bubble -->
-                            <div
-                                class="p-3 rounded-2xl {isYou
-                                    ? 'bg-cyan-500/20 border border-cyan-500/30 rounded-tr-sm'
-                                    : 'bg-purple-500/10 border border-purple-500/20 rounded-tl-sm'}"
-                            >
-                                <p
-                                    class="text-sm text-slate-200 leading-relaxed"
-                                >
+                        </div>
+                        
+                        <!-- Content -->
+                        <div class="flex-1 min-w-0">
+                            <div class="flex items-center gap-2 mb-1">
+                                <span class="text-[10px] font-bold {isUser ? 'text-blue-600' : 'text-purple-600'} flex items-center gap-1.5">
+                                    {speakerLabel}
+                                    {#if t.tone}
+                                        <span class="text-[7px] uppercase tracking-wider px-1.5 py-0.5 rounded border {getToneStyle(t.tone)}">
+                                            {t.tone}
+                                        </span>
+                                    {/if}
+                                </span>
+                                <span class="text-[9px] font-medium text-gray-400">{t.timestamp || new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</span>
+                                <!-- Task 2.3 (BATCH2): Inline rename button — hidden until hover -->
+                                <button
+                                    class="opacity-0 group-hover:opacity-100 transition-opacity text-[8px] text-gray-400 hover:text-blue-500 px-1.5 py-0.5 rounded border border-gray-200 hover:border-blue-300 bg-white ml-auto"
+                                    onclick={() => renameSpeakerInline(t.speakerId?.toString(), speakerLabel)}
+                                    title="Rename this speaker"
+                                >✏ Rename</button>
+                            </div>
+                            
+                            <div class="bg-gray-50/80 hover:bg-gray-100/80 transition-colors p-3.5 rounded-2xl rounded-tl-sm border border-gray-200/60 shadow-sm relative">
+                                <p class="text-[13px] font-semibold text-gray-800 leading-relaxed max-w-prose break-words">
                                     {t.text}
                                 </p>
-                            </div>
-                            <!-- Sentiment/tone indicator -->
-                            {#if t.tone}
-                                <div
-                                    class="flex {isYou
-                                        ? 'justify-end'
-                                        : 'justify-start'} mt-1"
-                                >
-                                    <span
-                                        class="text-xs px-2 py-0.5 rounded-full {t.tone ===
-                                        'POSITIVE'
-                                            ? 'bg-green-500/20 text-green-400'
-                                            : t.tone === 'NEGATIVE'
-                                              ? 'bg-red-500/20 text-red-400'
-                                              : t.tone === 'URGENT'
-                                                ? 'bg-orange-500/20 text-orange-400'
-                                                : 'bg-slate-500/20 text-slate-400'}"
-                                        >{t.tone.toLowerCase()}</span
-                                    >
-                                </div>
-                            {/if}
-                        </div>
-                        <!-- Avatar -->
-                        <div
-                            class="{isYou
-                                ? 'order-3 ml-2'
-                                : 'order-0 mr-2'} flex-shrink-0"
-                        >
-                            <div
-                                class="w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold {isYou
-                                    ? 'bg-cyan-500/30 text-cyan-300'
-                                    : 'bg-purple-500/30 text-purple-300'}"
-                            >
-                                {isYou ? "Y" : "S2"}
                             </div>
                         </div>
                     </div>
                 {/each}
-            </div>
-        {/if}
+            {/if}
+        </div>
+    </div>
+
+    <!-- Right Column: Knowledge Graph — same KnowledgeGraph component as MAP tab -->
+    <div class="xl:w-[60%] h-[600px] xl:h-auto overflow-hidden rounded-2xl border border-gray-200/60 shadow-sm">
+        <KnowledgeGraph
+            nodes={filteredNodes}
+            edges={filteredEdges}
+            compact={false}
+        />
     </div>
 </div>
+
+<style>
+    .custom-scrollbar::-webkit-scrollbar { width: 5px; height: 5px; }
+    .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+    .custom-scrollbar::-webkit-scrollbar-thumb { background: rgba(148, 163, 184, 0.4); border-radius: 10px; }
+    .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: rgba(148, 163, 184, 0.6); }
+</style>

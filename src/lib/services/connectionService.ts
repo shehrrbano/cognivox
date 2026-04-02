@@ -102,9 +102,11 @@ export function setupKeyManagerSubscription(callbacks: {
                 callbacks.onKeySwitch(activeKey, message);
 
                 if (callbacks.isRecording()) {
-                    invoke("update_gemini_key", { key: activeKey.key }).catch((err) =>
-                        console.error("[TAURI] Failed to update key:", err),
-                    );
+                    if (typeof window !== "undefined" && ((window as any).__TAURI__ || (window as any).__TAURI_INTERNALS__)) {
+                        invoke("update_gemini_key", { key: activeKey.key }).catch((err) =>
+                            console.error("[TAURI] Failed to update key:", err),
+                        );
+                    }
                 }
             }
         }
@@ -201,14 +203,18 @@ export async function backgroundRecordingInit(params: {
     error?: string;
 }> {
     try {
-        // STEP 1: Init Whisper + Speaker ID in PARALLEL
+        // STEP 1: Init Whisper + Speaker ID in PARALLEL (Tauri only)
+        const isTauri = typeof window !== "undefined" && !!((window as any).__TAURI__ || (window as any).__TAURI_INTERNALS__);
+        
         const [whisperResult, speakerResult] = await Promise.allSettled([
             (async () => {
+                if (!isTauri) return;
                 await invoke("initialize_whisper", { modelSize: "small" });
                 await invoke("set_whisper_language", { language: "auto" });
                 console.log("[Recording] Whisper ready (small, auto-detect)");
             })(),
             (async () => {
+                if (!isTauri) return;
                 await invoke("initialize_speaker_id");
                 params.onSpeakerIdReady();
                 console.log("[Recording] ECAPA-TDNN speaker ID ready");
@@ -243,34 +249,38 @@ export async function backgroundRecordingInit(params: {
         const apiKey = keyResult.key.key;
         console.log("[Recording] Ready with key:", keyResult.key?.name);
 
-        // STEP 3: Test Gemini connection
-        try {
-            await invoke("test_gemini_connection", {
-                key: keyResult.key!.key,
-                model: params.selectedModel,
-            });
-            console.log(`[Recording] Connected with key: ${keyResult.key!.name}`);
-        } catch (e: any) {
-            const errMsg = e?.message || String(e);
-            console.warn(`[Recording] Backend test warning: ${errMsg}`);
+        // STEP 3: Test Gemini connection (Tauri only)
+        if (isTauri) {
+            try {
+                await invoke("test_gemini_connection", {
+                    key: keyResult.key!.key,
+                    model: params.selectedModel,
+                });
+                console.log(`[Recording] Connected with key: ${keyResult.key!.name}`);
+            } catch (e: any) {
+                const errMsg = e?.message || String(e);
+                console.warn(`[Recording] Backend test warning: ${errMsg}`);
 
-            // Try to silently rotate to next key
-            const nextKey = keyManager.rotateToNextKey();
-            if (nextKey) {
-                try {
-                    await invoke("update_gemini_key", { key: nextKey.key });
-                    console.log(
-                        `[Recording] Rotated to ${nextKey.name} after initial test failure`,
-                    );
-                    return {
-                        isGeminiConnected: true,
-                        apiKey: nextKey.key,
-                        status: "Listening for speech...",
-                    };
-                } catch (_) {
-                    /* ignore */
+                // Try to silently rotate to next key
+                const nextKey = keyManager.rotateToNextKey();
+                if (nextKey) {
+                    try {
+                        await invoke("update_gemini_key", { key: nextKey.key });
+                        console.log(
+                            `[Recording] Rotated to ${nextKey.name} after initial test failure`,
+                        );
+                        return {
+                            isGeminiConnected: true,
+                            apiKey: nextKey.key,
+                            status: "Listening for speech...",
+                        };
+                    } catch (_) {
+                        /* ignore */
+                    }
                 }
             }
+        } else {
+            console.log("[Recording] Browser mode: skipping backend connection test");
         }
 
         return {

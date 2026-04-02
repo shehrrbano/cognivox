@@ -12,6 +12,8 @@ export interface VADConfig {
     enableFillerDetection: boolean; // Strip filler words
 }
 
+import { settingsStore } from './settingsStore';
+
 export interface VADState {
     isSpeaking: boolean;
     silenceDuration: number;
@@ -41,11 +43,15 @@ const FILLER_WORDS = [
 ];
 
 class VADManager {
+    // MEETING_TASKS_v1: Task 2.1 — VAD threshold tuned for accurate stop detection
+    // Reduced silenceDuration: 2000→1200ms so VAD stops recording faster after speech ends.
+    // Reduced minSpeechDuration: 1500→800ms to catch shorter utterances.
+    // silenceThreshold raised slightly to 0.004 to better reject ambient noise before declaring speech.
     private config: VADConfig = {
-        minSpeechDuration: 1500,    // 1.5s of speech before considering it real (filters brief noise)
-        silenceThreshold: 0.003,    // Raised — matches backend adaptive threshold baseline
-        silenceDuration: 2000,      // 2 seconds silence (was 4s) - quicker updates
-        minChunkDuration: 1500,     // 1.5s minimum chunk (raised from 1s)
+        minSpeechDuration: 800,     // 0.8s of speech before considering it real (was 1.5s — catches shorter utterances)
+        silenceThreshold: 0.004,    // Raised slightly — more robust ambient noise rejection
+        silenceDuration: 1200,      // 1.2s silence triggers stop (was 2s) — faster stop detection per meeting task 2.1
+        minChunkDuration: 800,      // 0.8s minimum chunk (lowered to match new minSpeechDuration)
         maxChunkDuration: 30000,    // 30s max
         enableFillerDetection: true
     };
@@ -72,6 +78,28 @@ class VADManager {
 
     constructor() {
         this.loadConfig();
+        
+        // Subscribe to global settings store for real-time updates
+        if (typeof window !== 'undefined') {
+            settingsStore.subscribe(settings => {
+                // Mapping Sensitivity (0-100) to RMS Threshold (0.02 - 0.0005)
+                // High Sensitivity = Lower Threshold = More speech segments captured
+                const sensitivityFactor = settings.vadSensitivity / 100;
+                const threshold = 0.02 - (sensitivityFactor * 0.0195);
+                
+                this.config = {
+                    ...this.config,
+                    minSpeechDuration: settings.vadConfig.minSpeechDuration,
+                    silenceDuration: settings.vadConfig.silenceDuration,
+                    minChunkDuration: settings.vadConfig.minChunkDuration,
+                    enableFillerDetection: settings.vadConfig.enableFillerDetection,
+                    silenceThreshold: threshold
+                };
+                if (settings.debugMode) {
+                    console.log('[VAD] Config updated. Sensitivity:', settings.vadSensitivity, 'Threshold:', threshold.toFixed(5));
+                }
+            });
+        }
     }
 
     // === CONFIGURATION ===

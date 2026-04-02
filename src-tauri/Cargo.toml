@@ -37,10 +37,10 @@ futures-util = "0.3"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.6", features = ["v4", "serde"] }
 dirs = "5.0"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 open = "5"
 dotenvy = "0.15"
-whisper-rs = { git = "https://github.com/tazz4843/whisper-rs", branch = "master" }
+whisper-rs = "0.16.0"
 hf-hub = { version = "0.3", features = ["tokio"] }
 ort = "2.0.0-rc.11"
 ndarray = "0.16"

@@ -1,0 +1,6 @@
+<!-- UNIFIED: COGNIVOX_UI_MAPPER_v1 -->
+<script>
+  import "../app.css";
+</script>
+
+<slot />

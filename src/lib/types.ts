@@ -10,6 +10,9 @@ export interface Transcript {
     category?: string[];
     confidence?: number;
     isPartial?: boolean;
+    /** FIX 3: Atomic chunk ID from Rust — used to correlate a partial whisper transcript
+     *  to its final gemini_intelligence event. Eliminates timer-based partial promotion. */
+    chunkId?: number;
 }
 
 export interface Alert {
@@ -74,6 +77,27 @@ export interface ExtractedMemoriesData {
     emotionShifts: string[];
 }
 
+export interface DynamicModel {
+    id: string;              // Model ID (e.g. "gemini-2.0-flash")
+    name: string;            // User-friendly name
+    provider: 'gemini' | 'openai' | 'custom';
+    isCustom: boolean;       // User-added?
+    description?: string;
+}
+
+export interface DynamicApiKey {
+    id: string;               // Unique identifier
+    name: string;             // User-friendly name
+    key: string;              // The actual API key
+    priority: number;         // Higher priority keys used first
+    isActive: boolean;        // Is the key currently active?
+    isPrimary?: boolean;      // Default key for new sessions
+    rateLimited?: boolean;    // Currently on cooldown?
+    rateLimitedUntil?: number;// Expiry time for rate limit
+    usageCount?: number;      // Total successful calls
+    lastUsed?: string | null; // ISO timestamp
+}
+
 export interface ModelOption {
     id: string;
     name: string;
@@ -87,6 +111,7 @@ export interface RestoredState {
     transcripts: Transcript[];
     graphNodes: GraphNode[];
     graphEdges: GraphEdge[];
+    graphPositions?: Record<string, { x: number; y: number }>;
     stressLevel: number;
     engagementLevel: number;
     urgencyLevel: number;
@@ -116,6 +141,23 @@ export interface SnapshotParams {
     showMemoriesPanel: boolean;
 }
 
+/** Subject-Verb-Object triple extracted by Gemini — primary graph-building signal */
+export interface SvoTriple {
+    subject_id: string;
+    verb: string;
+    object_id: string;
+    confidence?: number;
+}
+
+/** Figurative language detected in the transcript */
+export interface FigureOfSpeech {
+    original: string;
+    /** Semantic literal meaning — used as the graph node label */
+    normalized: string;
+    /** "metaphor" | "idiom" | "hyperbole" | "personification" */
+    type: string;
+}
+
 /** A parsed segment from Gemini intelligence response */
 export interface ParsedSegment {
     transcript: string;
@@ -123,8 +165,21 @@ export interface ParsedSegment {
     tone: string;
     confidence: number;
     category: string[];
-    entities: Array<{ name: string; type: string }>;
-    graph_edges: Array<{ from: string; to: string; relation: string }>;
+    entities: Array<{
+        /** English snake_case ID — language-agnostic, stable across sessions */
+        id?: string;
+        name: string;
+        type: string;
+        label?: string;
+        weight?: number;
+    }>;
+    graph_edges: Array<{ from: string; to: string; relation: string; strength?: number }>;
+    /** SVO triples — richer than raw entity lists, drive the primary KG edges */
+    svo_triples?: SvoTriple[];
+    /** Strategic implications inferred from the segment */
+    implications?: string[];
+    /** Figurative language detected; normalized form becomes a graph node */
+    figures_of_speech?: FigureOfSpeech[];
 }
 
 /** Tone analysis result */

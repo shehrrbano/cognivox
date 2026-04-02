@@ -4,6 +4,8 @@
  * Pure functions that return results.
  */
 import { keyManager } from "$lib/keyManager";
+import { settingsStore } from "$lib/settingsStore"; // Added
+import { get } from "svelte/store"; // Added
 import type { Transcript, ExtractedSummary, ExtractedMemoriesData } from "$lib/types";
 
 /**
@@ -38,8 +40,11 @@ Return ONLY valid JSON, no markdown, no explanation.`;
             throw new Error("No API key configured");
         }
 
+        const settings = get(settingsStore);
+        const model = settings.geminiModel || "gemini-2.0-flash";
+
         const response = await fetch(
-            `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
+            `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
             {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -105,8 +110,11 @@ Return ONLY valid JSON, no markdown, no explanation.`;
             throw new Error("No API key configured");
         }
 
+        const settings = get(settingsStore);
+        const model = settings.geminiModel || "gemini-2.0-flash";
+
         const response = await fetch(
-            `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
+            `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
             {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },

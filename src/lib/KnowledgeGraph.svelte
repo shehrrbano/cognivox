@@ -1,24 +1,36 @@
 <script lang="ts">
-    import { onMount, onDestroy } from "svelte";
+    import { onMount, onDestroy, untrack } from "svelte";
 
-    export let nodes: Array<{
-        id: string;
-        type: string;
-        weight?: number;
-        label?: string;
-        collapsed?: boolean;
-        childCount?: number;
-        childIds?: string[];
-    }> = [];
-    export let edges: Array<{ from: string; to: string; relation: string }> =
-        [];
-    export let compact: boolean = false;
+    let {
+        nodes = [],
+        edges = [],
+        compact = false,
+        searchQuery = "",
+        initialPositions = null as Record<string, { x: number; y: number }> | null, // [PERSISTENCE_v1] Load saved coordinates
+        pauseSimulation = false,
+        isFullscreen = $bindable(false),
+        // KG_UNIFIED_v1: callback props replace createEventDispatcher (Svelte 5 compatible)
+        ontoggleCluster = undefined as ((d: { nodeId: string }) => void) | undefined,
+        onlayoutChanged = undefined as ((d: { positions: Record<string, { x: number; y: number }> }) => void) | undefined,
+    } = $props();
 
-    // Expand/collapse callback — emitted so parent can update data
-    import { createEventDispatcher } from "svelte";
-    const dispatch = createEventDispatcher<{
-        toggleCluster: { nodeId: string };
-    }>();
+    // INTELLIGENT_PARSING_FIXED: local search term overrides prop when set
+    let localSearchTerm = $state("");
+
+    // Reactive: set of node IDs that match the search query (local input or external prop)
+    let highlightedNodes = $derived.by(() => {
+        const q = (localSearchTerm.trim() || searchQuery.trim()).toLowerCase();
+        if (q.length < 2) return new Set<string>();
+        return new Set(
+            nodes
+                .filter(n =>
+                    n.id.toLowerCase().includes(q) ||
+                    (n.label || '').toLowerCase().includes(q) ||
+                    n.type.toLowerCase().includes(q)
+                )
+                .map(n => n.id)
+        );
+    });
 
     // Force-directed layout state
     interface NodePosition {
@@ -30,124 +42,151 @@
         fy?: number | null;
     }
 
-    let positions: Map<string, NodePosition> = new Map();
-    let svgElement: SVGSVGElement;
-    let containerEl: HTMLDivElement;
-    let containerWidth = 600;
-    let containerHeight = 400;
+    // [REACTIVE_v2] Use Record for Svelte 5 granular reactivity
+    let positions = $state<Record<string, NodePosition>>({});
+    export const getPositions = () => {
+        const map = new Map<string, NodePosition>();
+        Object.entries(positions).forEach(([id, pos]) => map.set(id, pos));
+        return map;
+    };
+
+    // KG_UNIFIED_v1: Expose refreshLayout so parent can trigger re-measure after tab becomes visible.
+    // Called by +page.svelte $effect when activeTab switches to 'graph' (display:none → block).
+    export function refreshLayout() {
+        untrack(() => {
+            measureAndAttach();
+            setTimeout(() => fitToView(), 80);
+        });
+    }
+
+    let svgElement = $state<SVGSVGElement>();
+    let containerEl = $state<HTMLDivElement>();
+    let containerWidth = $state(600);
+    let containerHeight = $state(400);
     let animationFrame: number;
-    let isSimulating = true;
-    let draggedNode: string | null = null;
-    let simulationTick = 0;
+    let isSimulating = $state(true);
+    let draggedNode = $state<string | null>(null);
+    let simulationTick = $state(0);
 
     // Pan & Zoom state
-    let zoomLevel = 1.0;
-    let panX = 0;
-    let panY = 0;
-    let isPanning = false;
+    let zoomLevel = $state(1.0);
+    let panX = $state(0);
+    let panY = $state(0);
+    let isPanning = $state(false);
 
-    // Fullscreen state
-    let isFullscreen = false;
-    let selectedNode: string | null = null;
+    // isFullscreen is now a bindable prop
+    let selectedNode = $state<string | null>(null);
 
-    // Force simulation constants - tuned for clear, non-overlapping layout
-    const REPULSION = 25000;
-    const ATTRACTION = 0.008;
-    const DAMPING = 0.82;
-    const CENTER_PULL = 0.003;
-    const MIN_DISTANCE = 180;
-    const IDEAL_EDGE_LENGTH = 220;
+    // [OPTIMIZATION_v2] Tuned constants for interactive stability
+    const REPULSION = 18000; // Lowered from 28k to prevent jitter
+    const ATTRACTION = 0.012;
+    const DAMPING = 0.82; // Slightly more friction
+    const CENTER_PULL = 0.005;
+    const TYPE_PULL = 0.006;
+    const MIN_DISTANCE = 110;
+    const IDEAL_EDGE_LENGTH = 150;
 
-    // Initialize node positions
+    let injectionCooldown = $state(0);
+    let previousNodeCount = $state(0);
+
+    // [PERSISTENCE_v1] Initialize node positions with spatial memory support
     function initializePositions() {
-        const centerX = containerWidth / 2;
-        const centerY = containerHeight / 2;
+        if (nodes.length === 0) return;
+        
+        const centerX = containerWidth > 0 ? containerWidth / 2 : 400;
+        const centerY = containerHeight > 0 ? containerHeight / 2 : 300;
 
         nodes.forEach((node, i) => {
-            if (!positions.has(node.id)) {
-                const angle = (i / Math.max(nodes.length, 1)) * 2 * Math.PI;
-                // Spread nodes out more based on count - use larger radius
-                const baseRadius =
-                    Math.min(containerWidth, containerHeight) * 0.35;
-                const radius =
-                    baseRadius +
-                    (nodes.length > 5 ? (nodes.length - 5) * 15 : 0);
-                positions.set(node.id, {
-                    x:
-                        centerX +
-                        radius * Math.cos(angle) +
-                        (Math.random() - 0.5) * 80,
-                    y:
-                        centerY +
-                        radius * Math.sin(angle) +
-                        (Math.random() - 0.5) * 80,
-                    vx: 0,
-                    vy: 0,
-                });
+            // [PERSISTENCE_v1] Additive-only initialization:
+            // Do NOT overwrite positions if the node already has a valid coordinate in the Map.
+            // This prevents manual moves from being "snapped back" when new intelligence arrives.
+            if (!positions[node.id]) {
+                // Try restore from initialPositions first (Firestore)
+                if (initialPositions && initialPositions[node.id]) {
+                    const saved = initialPositions[node.id];
+                    positions[node.id] = {
+                        x: saved.x,
+                        y: saved.y,
+                        vx: 0,
+                        vy: 0,
+                    };
+                } else if (i === 0) {
+                    // First node is the Anchor
+                    positions[node.id] = {
+                        x: centerX,
+                        y: centerY,
+                        vx: 0,
+                        vy: 0,
+                        fx: centerX, // [PSYCHO_v1] Lock root node initially to center
+                        fy: centerY
+                    };
+                } else {
+                    // Spawn logic: Mind-map style radial spread
+                    const angle = (i / Math.max(nodes.length, 1)) * 2 * Math.PI;
+                    const baseRadius = 180;
+                    positions[node.id] = {
+                        x: centerX + baseRadius * Math.cos(angle) + (Math.random() - 0.5) * 50,
+                        y: centerY + baseRadius * Math.sin(angle) + (Math.random() - 0.5) * 50,
+                        vx: 0,
+                        vy: 0,
+                    };
+                }
             }
         });
 
-        // Remove positions for deleted nodes
+        // Cleanup stale positions
         const nodeIds = new Set(nodes.map((n) => n.id));
-        for (const id of positions.keys()) {
-            if (!nodeIds.has(id)) {
-                positions.delete(id);
-            }
-        }
-
-        positions = new Map(positions);
+        Object.keys(positions).forEach(id => {
+            if (!nodeIds.has(id)) delete positions[id];
+        });
     }
 
-    // Force simulation step
+    // [OPTIMIZATION_v1] Force simulation with semantic clustering
     function simulateStep() {
-        if (!isSimulating || nodes.length === 0) return;
+        if (!isSimulating || nodes.length === 0 || pauseSimulation) return;
 
         const centerX = containerWidth / 2;
         const centerY = containerHeight / 2;
 
-        // Apply forces
         nodes.forEach((node) => {
-            const pos = positions.get(node.id);
+            const pos = positions[node.id];
             if (!pos || (pos.fx !== undefined && pos.fx !== null)) return;
 
-            let fx = 0,
-                fy = 0;
+            let fx = 0, fy = 0;
 
-            // Repulsion from other nodes (stronger, with larger min distance)
+            // 1. Optimized Repulsion (Distance Cutoff)
             nodes.forEach((other) => {
                 if (other.id === node.id) return;
-                const otherPos = positions.get(other.id);
+                const otherPos = positions[other.id];
                 if (!otherPos) return;
 
                 const dx = pos.x - otherPos.x;
                 const dy = pos.y - otherPos.y;
                 const distSq = dx * dx + dy * dy;
+                
+                // [OPTIMIZATION_v1] Skip far nodes to save O(n^2) cycles
+                if (distSq > 250000) return; // 500px squared for better clustering
+
                 const dist = Math.max(Math.sqrt(distSq), 1);
-
-                // Strong repulsion that prevents overlap
-                const force = REPULSION / (dist * dist);
-
-                // Extra strong push if nodes are too close
-                const pushMultiplier =
-                    dist < MIN_DISTANCE ? (MIN_DISTANCE / dist) * 3 : 1;
+                const force = REPULSION / distSq;
+                const pushMultiplier = dist < MIN_DISTANCE ? (MIN_DISTANCE / dist) * 2.0 : 1;
 
                 fx += (dx / dist) * force * pushMultiplier;
                 fy += (dy / dist) * force * pushMultiplier;
             });
 
-            // Attraction to connected nodes (with ideal distance)
+            // 2. Attraction Force (Springs)
             edges.forEach((edge) => {
                 let otherId: string | null = null;
                 if (edge.from === node.id) otherId = edge.to;
                 else if (edge.to === node.id) otherId = edge.from;
 
                 if (otherId) {
-                    const otherPos = positions.get(otherId);
+                    const otherPos = positions[otherId];
                     if (otherPos) {
                         const dx = otherPos.x - pos.x;
                         const dy = otherPos.y - pos.y;
                         const dist = Math.sqrt(dx * dx + dy * dy);
-                        // Spring force: attract if too far, repel if too close
                         const displacement = dist - IDEAL_EDGE_LENGTH;
                         const springForce = displacement * ATTRACTION;
                         if (dist > 0) {
@@ -158,37 +197,41 @@
                 }
             });
 
-            // Pull toward center
+            // 3. [PSYCHO_v1] Semantic Pull (Cluster by type)
+            const typeLower = node.type.toLowerCase();
+            let targetX = centerX;
+            let targetY = centerY;
+
+            if (typeLower.includes('task')) { targetX = centerX - 250; targetY = centerY - 150; }
+            else if (typeLower.includes('decision')) { targetX = centerX + 250; targetY = centerY - 150; }
+            else if (typeLower.includes('risk')) { targetY = centerY + 250; }
+
+            fx += (targetX - pos.x) * TYPE_PULL;
+            fy += (targetY - pos.y) * TYPE_PULL;
+
+            // 4. Center Pull & Velocity Decay
             fx += (centerX - pos.x) * CENTER_PULL;
             fy += (centerY - pos.y) * CENTER_PULL;
 
-            // Update velocity
             pos.vx = (pos.vx + fx) * DAMPING;
             pos.vy = (pos.vy + fy) * DAMPING;
+            
+            // [STABILITY_v1] Cap velocity to prevent explosion
+            const maxV = 10;
+            pos.vx = Math.max(-maxV, Math.min(maxV, pos.vx));
+            pos.vy = Math.max(-maxV, Math.min(maxV, pos.vy));
 
-            // Update position
             pos.x += pos.vx;
             pos.y += pos.vy;
 
-            // Boundary constraints with generous padding
-            const padding = 80;
-            pos.x = Math.max(
-                padding,
-                Math.min(containerWidth - padding, pos.x),
-            );
-            pos.y = Math.max(
-                padding,
-                Math.min(containerHeight - padding, pos.y),
-            );
+            const padding = 60;
+            pos.x = Math.max(padding, Math.min(containerWidth - padding, pos.x));
+            pos.y = Math.max(padding, Math.min(containerHeight - padding, pos.y));
         });
 
-        positions = new Map(positions);
         simulationTick++;
-
-        // Run simulation longer to ensure good layout
-        if (simulationTick > 600) {
-            isSimulating = false;
-        }
+        if (injectionCooldown > 0) injectionCooldown--;
+        if (simulationTick > 600) isSimulating = false;
     }
 
     function animate() {
@@ -196,10 +239,11 @@
         animationFrame = requestAnimationFrame(animate);
     }
 
-    // Drag handlers
     function handleMouseDown(event: MouseEvent, nodeId: string) {
         draggedNode = nodeId;
-        const pos = positions.get(nodeId);
+        isSimulating = true; // Ensure simulation is active for real-time rendering
+        simulationTick = 0;
+        const pos = positions[nodeId];
         if (pos) {
             pos.fx = pos.x;
             pos.fy = pos.y;
@@ -211,10 +255,10 @@
         if (!draggedNode || !svgElement) return;
 
         const rect = svgElement.getBoundingClientRect();
-        const x = event.clientX - rect.left;
-        const y = event.clientY - rect.top;
+        const x = (event.clientX - rect.left - panX) / zoomLevel;
+        const y = (event.clientY - rect.top - panY) / zoomLevel;
 
-        const pos = positions.get(draggedNode);
+        const pos = positions[draggedNode];
         if (pos) {
             pos.x = x;
             pos.y = y;
@@ -222,40 +266,37 @@
             pos.fy = y;
             pos.vx = 0;
             pos.vy = 0;
-            positions = new Map(positions);
         }
     }
 
     function handleMouseUp() {
         if (draggedNode) {
-            const pos = positions.get(draggedNode);
+            const pos = positions[draggedNode];
             if (pos) {
-                pos.fx = null;
-                pos.fy = null;
+                // [PERSISTENCE_v1] Dispatch layout change immediately after drag to sync with Firestore
+                const serializable: Record<string, { x: number, y: number }> = {};
+                Object.entries(positions).forEach(([k, v]) => {
+                    serializable[k] = { x: v.x, y: v.y };
+                });
+                onlayoutChanged?.({ positions: serializable });
             }
             draggedNode = null;
-            // Restart simulation briefly
             isSimulating = true;
-            simulationTick = 200;
+            simulationTick = 400; // Reset tick to allow settling
         }
         isPanning = false;
     }
 
     function handleZoom(event: WheelEvent) {
         event.preventDefault();
-        const zoomSpeed = 0.001;
+        const zoomSpeed = 0.0012;
         const delta = -event.deltaY;
-        const newZoom = Math.max(
-            0.2,
-            Math.min(3, zoomLevel + delta * zoomSpeed),
-        );
+        const newZoom = Math.max(0.15, Math.min(4, zoomLevel + delta * zoomSpeed));
 
-        // Target focus
-        const rect = svgElement.getBoundingClientRect();
+        const rect = svgElement!.getBoundingClientRect();
         const mouseX = event.clientX - rect.left;
         const mouseY = event.clientY - rect.top;
 
-        // Adjust pan to zoom toward mouse
         const zoomRatio = newZoom / zoomLevel;
         panX = mouseX - (mouseX - panX) * zoomRatio;
         panY = mouseY - (mouseY - panY) * zoomRatio;
@@ -267,6 +308,7 @@
             isPanning = true;
             event.preventDefault();
         }
+        selectedNode = null; // [PSYCHO_v1] Deselect on background click
     }
 
     function handleGlobalMouseMove(event: MouseEvent) {
@@ -279,96 +321,87 @@
     }
 
     function getNodeColor(type: string, collapsed?: boolean): string {
-        // Collapsed cluster nodes get a special gold color
         if (collapsed) return "#fbbf24";
-
+        const typeLower = type.toLowerCase();
+        
         const colors: Record<string, string> = {
-            Root: "#f59e0b",
-            CONCEPT: "#8b5cf6",
-            THEORY: "#a78bfa",
-            METHOD: "#06b6d4",
-            TECHNIQUE: "#14b8a6",
-            DEFINITION: "#60a5fa",
-            EXAMPLE: "#34d399",
-            FORMULA: "#c084fc",
-            TECHNOLOGY: "#22d3ee",
-            TASK: "#00c8ff",
-            DECISION: "#4dd2ff",
-            PERSON: "#a78bfa",
-            DEADLINE: "#ef4444",
-            RISK: "#f59e0b",
-            ACTION_ITEM: "#10b981",
-            Speaker: "#22d3ee",
-            Topic: "#6366f1",
-            TOPIC: "#06b6d4",
-            Tone: "#f472b6",
-            Category: "#818cf8",
-            Entity: "#34d399",
-            entity: "#34d399",
-            PROJECT: "#f97316",
-            LOCATION: "#84cc16",
-            DATE: "#e879f9",
-            ORG: "#fb923c",
-            URGENCY: "#dc2626",
-            SENTIMENT: "#a855f7",
-            QUERY: "#2dd4bf",
-            Cluster: "#fbbf24",
-            default: "#00c8ff",
+            task: "#3B82F6",
+            decision: "#22C55E",
+            risk: "#EF4444",
+            entity: "#8B5CF6",
+            topic: "#F59E0B",
+            cluster: "#fbbf24",
+            speaker: "#22d3ee",
+            default: "#94a3b8",
         };
-        return colors[type] || colors.default;
+
+        if (typeLower.includes('task')) return colors.task;
+        if (typeLower.includes('decision')) return colors.decision;
+        if (typeLower.includes('risk') || typeLower.includes('urgency')) return colors.risk;
+        if (typeLower.includes('entity') || typeLower.includes('person')) return colors.entity;
+        if (typeLower.includes('topic') || typeLower.includes('project')) return colors.topic;
+        if (typeLower.includes('speaker')) return colors.speaker;
+        
+        return colors.default;
     }
 
-    // === FULLSCREEN / CONTROLS ===
-    function toggleFullscreen() {
-        isFullscreen = !isFullscreen;
-        if (isFullscreen) {
-            // Recalculate dimensions for fullscreen
+    async function toggleFullscreen() {
+        if (!isFullscreen) {
+            try {
+                if (containerEl?.requestFullscreen) {
+                    await containerEl.requestFullscreen();
+                }
+            } catch (err) {
+                console.warn("Fullscreen API failed, falling back to overlay", err);
+            }
+            isFullscreen = true;
             setTimeout(() => {
                 if (containerEl) {
                     const rect = containerEl.getBoundingClientRect();
-                    containerWidth = rect.width || 1200;
-                    containerHeight = rect.height || 800;
-                    resetView();
+                    containerWidth = rect.width || window.innerWidth;
+                    containerHeight = rect.height || window.innerHeight;
+                    fitToView();
                 }
-            }, 50);
+            }, 100);
         } else {
-            setTimeout(() => {
-                if (svgElement?.parentElement) {
-                    const rect =
-                        svgElement.parentElement.getBoundingClientRect();
-                    containerWidth = rect.width || 600;
-                    containerHeight = rect.height || 400;
-                    resetView();
+            try {
+                if (document.fullscreenElement) {
+                    await document.exitFullscreen();
                 }
-            }, 50);
+            } catch (err) {
+                console.warn("Exit fullscreen failed", err);
+            }
+            isFullscreen = false;
+            setTimeout(() => {
+                const measurable = containerEl?.parentElement || document.body;
+                const rect = measurable.getBoundingClientRect();
+                containerWidth = rect.width || 800;
+                containerHeight = rect.height || 600;
+                fitToView();
+            }, 100);
         }
     }
 
     function resetView() {
-        zoomLevel = 1.0;
-        panX = 0;
-        panY = 0;
+        if (nodes.length === 0) {
+            zoomLevel = 1.0;
+            panX = 0;
+            panY = 0;
+        } else {
+            fitToView();
+        }
         isSimulating = true;
         simulationTick = 0;
-        initializePositions();
     }
 
-    function zoomIn() {
-        zoomLevel = Math.min(3, zoomLevel + 0.2);
-    }
-
-    function zoomOut() {
-        zoomLevel = Math.max(0.2, zoomLevel - 0.2);
-    }
+    function zoomIn() { zoomLevel = Math.min(3, zoomLevel + 0.2); }
+    function zoomOut() { zoomLevel = Math.max(0.2, zoomLevel - 0.2); }
 
     function fitToView() {
-        if (nodes.length === 0) return;
-        let minX = Infinity,
-            minY = Infinity,
-            maxX = -Infinity,
-            maxY = -Infinity;
+        if (nodes.length === 0 || !positions) return;
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
         for (const node of nodes) {
-            const pos = positions.get(node.id);
+            const pos = positions[node.id];
             if (pos) {
                 minX = Math.min(minX, pos.x);
                 minY = Math.min(minY, pos.y);
@@ -416,7 +449,7 @@
 
         const img = new Image();
         img.onload = () => {
-            ctx.fillStyle = "#0a0c0f";
+            ctx.fillStyle = "#FFFFFF";
             ctx.fillRect(0, 0, canvas.width, canvas.height);
             ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
             const link = document.createElement("a");
@@ -425,29 +458,19 @@
             document.body.appendChild(link);
             link.click();
             document.body.removeChild(link);
+            URL.revokeObjectURL(img.src);
         };
-        img.src =
-            "data:image/svg+xml;base64," +
-            btoa(unescape(encodeURIComponent(svgData)));
+        // INTELLIGENT_PARSING_FIXED: use Blob URL instead of base64 to support Unicode SVG content
+        const blob = new Blob([svgData], { type: "image/svg+xml;charset=utf-8" });
+        img.src = URL.createObjectURL(blob);
     }
 
     function exportGraphJSON() {
         const data = {
-            nodes: nodes.map((n) => ({
-                id: n.id,
-                type: n.type,
-                label: n.label || n.id,
-                weight: n.weight,
-            })),
-            edges: edges.map((e) => ({
-                from: e.from,
-                to: e.to,
-                relation: e.relation,
-            })),
+            nodes: nodes.map((n) => ({ id: n.id, type: n.type, label: n.label || n.id, weight: n.weight })),
+            edges: edges.map((e) => ({ from: e.from, to: e.to, relation: e.relation })),
         };
-        const blob = new Blob([JSON.stringify(data, null, 2)], {
-            type: "application/json",
-        });
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
         const url = URL.createObjectURL(blob);
         const link = document.createElement("a");
         link.href = url;
@@ -460,63 +483,95 @@
 
     function handleNodeClick(nodeId: string) {
         const node = nodes.find((n) => n.id === nodeId);
-        // If it's a collapsed cluster, dispatch expand event
         if (node?.collapsed) {
-            dispatch("toggleCluster", { nodeId });
+            ontoggleCluster?.({ nodeId });
             return;
         }
         selectedNode = selectedNode === nodeId ? null : nodeId;
     }
 
-    // Track previous SVG element for cleanup
     let prevSvgElement: SVGSVGElement | null = null;
 
-    // Re-measure container and re-attach wheel listener when SVG element appears/changes
     function measureAndAttach() {
-        // Detach from previous SVG if it changed
         if (prevSvgElement && prevSvgElement !== svgElement) {
             prevSvgElement.removeEventListener("wheel", handleZoom);
         }
-        // Measure from the container or SVG parent
         const measurable = containerEl || svgElement?.parentElement;
         if (measurable) {
             const rect = measurable.getBoundingClientRect();
             if (rect.width > 0 && rect.height > 0) {
+                const changed = containerWidth !== rect.width || containerHeight !== rect.height;
                 containerWidth = rect.width;
                 containerHeight = rect.height;
+                if (changed && nodes.length > 0) {
+                    fitToView();
+                }
             }
         }
-        // Attach wheel listener to current SVG
         if (svgElement && svgElement !== prevSvgElement) {
-            svgElement.addEventListener("wheel", handleZoom, {
-                passive: false,
-            });
+            svgElement.addEventListener("wheel", handleZoom, { passive: false });
             prevSvgElement = svgElement;
         }
     }
 
-    // Reactive updates — fires when nodes change
-    $: if (nodes.length > 0) {
-        // Defer measurement to next tick so the SVG element exists in the DOM
-        setTimeout(() => {
-            measureAndAttach();
-            initializePositions();
+    $effect(() => {
+        if (nodes.length > 0) {
+            // untrack: measureAndAttach and initializePositions both read AND write local state
+            // (positions, containerWidth, containerHeight). Without untrack, Svelte tracks those
+            // reads as deps and the effect re-fires every time they're written → infinite loop.
+            untrack(() => {
+                measureAndAttach();
+                initializePositions();
+            });
             isSimulating = true;
             simulationTick = 0;
-            // Auto fit after simulation settles a bit
             setTimeout(() => fitToView(), 500);
-        }, 0);
-    }
+        }
+    });
+
+    // KG_UNIFIED_v1: Re-apply saved positions when session changes (session restore fix).
+    // initialPositions is inside untrack() in the nodes effect → not tracked as dep → positions
+    // were never re-applied on session load. This separate effect tracks initialPositions directly.
+    $effect(() => {
+        const saved = initialPositions;
+        if (saved && Object.keys(saved).length > 0) {
+            untrack(() => {
+                for (const [id, pos] of Object.entries(saved)) {
+                    if (positions[id]) {
+                        positions[id].x = pos.x;
+                        positions[id].y = pos.y;
+                        positions[id].vx = 0;
+                        positions[id].vy = 0;
+                    }
+                }
+                setTimeout(() => fitToView(), 100);
+            });
+        }
+    });
 
     onMount(() => {
-        // Initial dimension measurement
         measureAndAttach();
+        const measurable = containerEl || svgElement?.parentElement;
+        let resizeObserver: ResizeObserver | null = null;
+        if (measurable) {
+            resizeObserver = new ResizeObserver(() => {
+                measureAndAttach();
+            });
+            resizeObserver.observe(measurable);
+        }
+        
         initializePositions();
         animate();
-
-        // Add global mouse handlers
         window.addEventListener("mousemove", handleGlobalMouseMove);
         window.addEventListener("mouseup", handleMouseUp);
+
+        return () => {
+            if (resizeObserver) resizeObserver.disconnect();
+            if (animationFrame) cancelAnimationFrame(animationFrame);
+            window.removeEventListener("mousemove", handleGlobalMouseMove);
+            window.removeEventListener("mouseup", handleMouseUp);
+            if (svgElement) svgElement.removeEventListener("wheel", handleZoom);
+        };
     });
 
     onDestroy(() => {
@@ -530,33 +585,33 @@
 <!-- Fullscreen overlay -->
 {#if isFullscreen}
     <div
-        class="fixed inset-0 z-[9999] bg-black/95 flex flex-col"
+        class="fixed inset-0 z-[9999] bg-white flex flex-col"
         bind:this={containerEl}
     >
         <!-- Fullscreen toolbar -->
         <div
-            class="flex items-center justify-between px-4 py-2 bg-slate-900/90 border-b border-cyan-500/20"
+            class="flex items-center justify-between px-4 py-2 bg-white/90 border-b border-blue-200"
         >
             <div class="flex items-center gap-3">
-                <span class="text-cyan-400 font-semibold text-sm"
+                <span class="text-blue-500 font-semibold text-sm"
                     >Knowledge Graph</span
                 >
-                <span class="text-xs text-slate-500"
+                <span class="text-xs text-gray-400"
                     >{nodes.length} nodes / {edges.length} edges</span
                 >
             </div>
-            <div class="flex items-center gap-1">
+            <div class="flex items-center gap-1 sm:gap-2 flex-wrap justify-end">
                 <button
                     onclick={zoomOut}
-                    class="p-1.5 rounded hover:bg-slate-700/60 text-slate-400 hover:text-cyan-400 transition-colors"
+                    class="p-1.5 rounded hover:bg-gray-100/60 text-gray-500 hover:text-blue-500 transition-colors"
                     title="Zoom Out"
                 >
                     <svg
-                        class="w-4 h-4"
+                        class="w-2.5 h-2.5"
                         viewBox="0 0 24 24"
                         fill="none"
                         stroke="currentColor"
-                        stroke-width="2"
+                        stroke-width="1"
                         ><circle cx="11" cy="11" r="8" /><line
                             x1="21"
                             y1="21"
@@ -565,20 +620,20 @@
                         /><line x1="8" y1="11" x2="14" y2="11" /></svg
                     >
                 </button>
-                <span class="text-xs text-slate-500 w-12 text-center"
+                <span class="text-xs text-gray-400 w-12 text-center"
                     >{Math.round(zoomLevel * 100)}%</span
                 >
                 <button
                     onclick={zoomIn}
-                    class="p-1.5 rounded hover:bg-slate-700/60 text-slate-400 hover:text-cyan-400 transition-colors"
+                    class="p-1.5 rounded hover:bg-gray-100/60 text-gray-500 hover:text-blue-500 transition-colors"
                     title="Zoom In"
                 >
                     <svg
-                        class="w-4 h-4"
+                        class="w-2.5 h-2.5"
                         viewBox="0 0 24 24"
                         fill="none"
                         stroke="currentColor"
-                        stroke-width="2"
+                        stroke-width="1"
                         ><circle cx="11" cy="11" r="8" /><line
                             x1="21"
                             y1="21"
@@ -592,10 +647,10 @@
                         /></svg
                     >
                 </button>
-                <div class="w-px h-5 bg-slate-700 mx-1"></div>
+                <div class="w-px h-5 bg-gray-100 mx-1"></div>
                 <button
                     onclick={fitToView}
-                    class="p-1.5 rounded hover:bg-slate-700/60 text-slate-400 hover:text-cyan-400 transition-colors"
+                    class="p-1.5 rounded hover:bg-gray-100/60 text-gray-500 hover:text-blue-500 transition-colors"
                     title="Fit to View"
                 >
                     <svg
@@ -603,7 +658,7 @@
                         viewBox="0 0 24 24"
                         fill="none"
                         stroke="currentColor"
-                        stroke-width="2"
+                        stroke-width="1"
                         ><path
                             d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"
                         /></svg
@@ -611,7 +666,7 @@
                 </button>
                 <button
                     onclick={resetView}
-                    class="p-1.5 rounded hover:bg-slate-700/60 text-slate-400 hover:text-cyan-400 transition-colors"
+                    class="p-1.5 rounded hover:bg-gray-100/60 text-gray-500 hover:text-blue-500 transition-colors"
                     title="Reset View"
                 >
                     <svg
@@ -619,16 +674,16 @@
                         viewBox="0 0 24 24"
                         fill="none"
                         stroke="currentColor"
-                        stroke-width="2"
+                        stroke-width="1"
                         ><polyline points="1 4 1 10 7 10" /><path
                             d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"
                         /></svg
                     >
                 </button>
-                <div class="w-px h-5 bg-slate-700 mx-1"></div>
+                <div class="w-px h-5 bg-gray-100 mx-1"></div>
                 <button
                     onclick={downloadSVG}
-                    class="p-1.5 rounded hover:bg-slate-700/60 text-slate-400 hover:text-cyan-400 transition-colors"
+                    class="p-1.5 rounded hover:bg-gray-100/60 text-gray-500 hover:text-blue-500 transition-colors"
                     title="Download SVG"
                 >
                     <svg
@@ -636,7 +691,7 @@
                         viewBox="0 0 24 24"
                         fill="none"
                         stroke="currentColor"
-                        stroke-width="2"
+                        stroke-width="1"
                         ><path
                             d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"
                         /><polyline points="7 10 12 15 17 10" /><line
@@ -649,7 +704,7 @@
                 </button>
                 <button
                     onclick={downloadPNG}
-                    class="p-1.5 rounded hover:bg-slate-700/60 text-slate-400 hover:text-cyan-400 transition-colors"
+                    class="p-1.5 rounded hover:bg-gray-100/60 text-gray-500 hover:text-blue-500 transition-colors"
                     title="Download PNG"
                 >
                     <svg
@@ -657,12 +712,12 @@
                         viewBox="0 0 24 24"
                         fill="none"
                         stroke="currentColor"
-                        stroke-width="2"
+                        stroke-width="1"
                         ><rect
                             x="3"
                             y="3"
-                            width="18"
-                            height="18"
+                            width="12"
+                            height="12"
                             rx="2"
                             ry="2"
                         /><circle cx="8.5" cy="8.5" r="1.5" /><polyline
@@ -672,7 +727,7 @@
                 </button>
                 <button
                     onclick={exportGraphJSON}
-                    class="p-1.5 rounded hover:bg-slate-700/60 text-slate-400 hover:text-cyan-400 transition-colors"
+                    class="p-1.5 rounded hover:bg-gray-100/60 text-gray-500 hover:text-blue-500 transition-colors"
                     title="Export JSON"
                 >
                     <svg
@@ -680,16 +735,16 @@
                         viewBox="0 0 24 24"
                         fill="none"
                         stroke="currentColor"
-                        stroke-width="2"
+                        stroke-width="1"
                         ><path
                             d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"
                         /><polyline points="14 2 14 8 20 8" /></svg
                     >
                 </button>
-                <div class="w-px h-5 bg-slate-700 mx-1"></div>
+                <div class="w-px h-5 bg-gray-100 mx-1"></div>
                 <button
                     onclick={toggleFullscreen}
-                    class="p-1.5 rounded hover:bg-slate-700/60 text-red-400 hover:text-red-300 transition-colors"
+                    class="p-1.5 rounded hover:bg-gray-100/60 text-red-500 hover:text-red-600 transition-colors"
                     title="Exit Fullscreen"
                 >
                     <svg
@@ -697,7 +752,7 @@
                         viewBox="0 0 24 24"
                         fill="none"
                         stroke="currentColor"
-                        stroke-width="2"
+                        stroke-width="1"
                         ><line x1="18" y1="6" x2="6" y2="18" /><line
                             x1="6"
                             y1="6"
@@ -719,6 +774,7 @@
                 aria-label="Knowledge graph visualization - fullscreen"
             >
                 <defs>
+                    <pattern id="dotGrid" width="16" height="16" patternUnits="userSpaceOnUse"><circle cx="2" cy="2" r="1.5" fill="var(--kg-dot-color)"/></pattern>
                     <filter
                         id="glow"
                         x="-50%"
@@ -742,15 +798,15 @@
                     >
                         <stop
                             offset="0%"
-                            style="stop-color:#00c8ff;stop-opacity:0.1"
+                            style="stop-color:#3B82F6;stop-opacity:0.1"
                         />
                         <stop
                             offset="50%"
-                            style="stop-color:#00c8ff;stop-opacity:0.4"
+                            style="stop-color:#3B82F6;stop-opacity:0.4"
                         />
                         <stop
                             offset="100%"
-                            style="stop-color:#00c8ff;stop-opacity:0.1"
+                            style="stop-color:#3B82F6;stop-opacity:0.1"
                         />
                     </linearGradient>
                     <marker
@@ -763,16 +819,17 @@
                     >
                         <polygon
                             points="0 0, 10 3, 0 6"
-                            fill="#00c8ff"
+                            fill="#3B82F6"
                             opacity="0.5"
                         />
                     </marker>
                 </defs>
+                <rect width="100%" height="100%" fill="url(#dotGrid)" pointer-events="none" />
                 <g transform="translate({panX}, {panY}) scale({zoomLevel})">
                     <g class="edges">
                         {#each edges as edge}
-                            {@const from = positions.get(edge.from)}
-                            {@const to = positions.get(edge.to)}
+                            {@const from = positions[edge.from]}
+                            {@const to = positions[edge.to]}
                             {#if from && to}
                                 {@const dx = to.x - from.x}
                                 {@const dy = to.y - from.y}
@@ -792,99 +849,111 @@
                                     (dy / Math.max(dist, 1)) * nodeRadius}
                                 {@const midX = (startX + endX) / 2}
                                 {@const midY = (startY + endY) / 2}
+                                {@const isConnected = selectedNode === edge.from || selectedNode === edge.to}
                                 <line
                                     x1={startX}
                                     y1={startY}
                                     x2={endX}
                                     y2={endY}
-                                    stroke="#00c8ff"
-                                    stroke-opacity="0.5"
-                                    stroke-width="2"
+                                    stroke="#3B82F6"
+                                    stroke-opacity={selectedNode ? (isConnected ? 0.8 : 0.05) : 0.5}
+                                    stroke-width={isConnected ? 2 : 1}
                                     marker-end="url(#arrowhead)"
                                 />
-                                <rect
-                                    x={midX - edge.relation.length * 3.2}
-                                    y={midY - 8}
-                                    width={edge.relation.length * 6.4}
-                                    height={14}
-                                    fill="#0a0c0f"
-                                    fill-opacity="0.85"
-                                    rx="3"
-                                />
-                                <text
-                                    x={midX}
-                                    y={midY + 3}
-                                    fill="#00c8ff"
-                                    font-size="10"
-                                    opacity="0.8"
-                                    text-anchor="middle"
-                                    class="font-sans">{edge.relation}</text
-                                >
+                                {#if !selectedNode || isConnected}
+                                    <rect
+                                        x={midX - edge.relation.length * 3.2}
+                                        y={midY - 8}
+                                        width={edge.relation.length * 6.4}
+                                        height={14}
+                                        fill="#FFFFFF"
+                                        fill-opacity="0.85"
+                                        rx="3"
+                                    />
+                                    <text
+                                        x={midX}
+                                        y={midY + 3}
+                                        fill="#3B82F6"
+                                        font-size="10"
+                                        opacity="0.8"
+                                        text-anchor="middle"
+                                        class="font-sans">{edge.relation}</text
+                                    >
+                                {/if}
                             {/if}
                         {/each}
                     </g>
                     <g class="nodes">
                         {#each nodes as node}
-                            {@const pos = positions.get(node.id)}
+                            {@const pos = positions[node.id]}
                             {#if pos}
                                 {@const color = getNodeColor(
                                     node.type,
                                     node.collapsed,
                                 )}
                                 {@const isCluster = node.collapsed}
-                                {@const nodeR = isCluster ? 32 : 22}
+                                {@const nodeR = isCluster ? 36 : 28}
+                                {@const isDimmed = selectedNode && selectedNode !== node.id && !edges.some(e => (e.from === selectedNode && e.to === node.id) || (e.to === selectedNode && e.from === node.id))}
                                 <g
                                     transform="translate({pos.x}, {pos.y})"
-                                    class="cursor-grab transition-transform {draggedNode ===
-                                    node.id
-                                        ? 'cursor-grabbing'
-                                        : 'hover:scale-110'}"
+                                    class="cursor-grab transition-all duration-300 {draggedNode === node.id ? 'cursor-grabbing' : 'hover:scale-110'}"
+                                    style="opacity: {isDimmed ? 0.15 : 1}"
                                     onmousedown={(e) =>
                                         handleMouseDown(e, node.id)}
                                     onclick={() => handleNodeClick(node.id)}
+                                    onkeydown={(e) => {
+                                        if (e.key === 'Enter' || e.key === ' ') {
+                                            e.preventDefault();
+                                            handleNodeClick(node.id);
+                                        }
+                                    }}
                                     role="button"
                                     tabindex="0"
+                                    aria-label="Node: {node.label || node.id}, Type: {node.type}"
                                 >
+                                    {#if highlightedNodes.has(node.id)}
+                                        <!-- [PRIORITY 1] Search highlight ring -->
+                                        <circle
+                                            r={nodeR + 12}
+                                            fill="none"
+                                            stroke="#F59E0B"
+                                            stroke-width="2"
+                                            stroke-opacity="0.9"
+                                        />
+                                        <circle
+                                            r={nodeR + 17}
+                                            fill="none"
+                                            stroke="#F59E0B"
+                                            stroke-width="1"
+                                            stroke-opacity="0.35"
+                                            class="animate-pulse"
+                                        />
+                                    {/if}
                                     <circle
                                         r={nodeR + 6}
                                         fill="none"
-                                        stroke={color}
+                                        stroke={highlightedNodes.has(node.id) ? "#F59E0B" : color}
                                         stroke-width={isCluster ? 2 : 1}
                                         stroke-opacity={draggedNode === node.id
                                             ? 0.5
-                                            : 0.2}
-                                        stroke-dasharray={isCluster
-                                            ? "4 3"
-                                            : "none"}
-                                        class={draggedNode === node.id
-                                            ? ""
-                                            : "animate-pulse"}
+                                            : highlightedNodes.has(node.id) ? 0.7 : 0.2}
+                                        stroke-dasharray={isCluster ? "4 3" : "none"}
+                                        class={draggedNode === node.id ? "" : "animate-pulse"}
                                     />
                                     <circle
                                         r={nodeR}
-                                        fill={color}
-                                        fill-opacity={isCluster
-                                            ? 0.2
-                                            : draggedNode === node.id
-                                              ? 0.25
-                                              : 0.1}
-                                        stroke={color}
-                                        stroke-width={draggedNode === node.id
-                                            ? 3
-                                            : 2}
-                                        filter="url(#glow)"
+                                        fill="var(--kg-node-fill)"
+                                        stroke={highlightedNodes.has(node.id) ? "#F59E0B" : color}
+                                        stroke-width="var(--kg-node-stroke-width)"
+                                        filter={draggedNode === node.id ? "url(#glow)" : ""}
                                     />
-                                    <circle
-                                        r={nodeR - 6}
-                                        fill={color}
-                                        fill-opacity="0.05"
-                                    />
+                                    
                                     <text
                                         text-anchor="middle"
                                         dy={isCluster ? "-2" : "4"}
                                         fill={color}
-                                        font-size="10"
-                                        font-weight="500"
+                                        font-size="11"
+                                        font-weight="600"
                                         class="font-sans pointer-events-none select-none"
                                         >{(node.label || node.id).slice(
                                             0,
@@ -917,16 +986,16 @@
                                             cx="18"
                                             cy="-18"
                                             r="8"
-                                            fill="#00c8ff"
+                                            fill="#3B82F6"
                                             fill-opacity="0.3"
-                                            stroke="#00c8ff"
+                                            stroke="#3B82F6"
                                             stroke-width="1"
                                         />
                                         <text
                                             x="18"
                                             y="-14"
                                             text-anchor="middle"
-                                            fill="#00c8ff"
+                                            fill="#3B82F6"
                                             font-size="9"
                                             font-weight="bold"
                                             class="pointer-events-none select-none"
@@ -947,36 +1016,36 @@
                         (e) => e.from === selectedNode || e.to === selectedNode,
                     )}
                     <div
-                        class="absolute bottom-4 right-4 bg-slate-900/95 border border-cyan-500/30 rounded-lg p-3 min-w-[200px] max-w-[300px]"
+                        class="absolute bottom-4 right-4 bg-white/95 border border-blue-300 rounded-lg p-3 min-w-[134px] max-w-[201px]"
                     >
                         <div class="flex items-center justify-between mb-2">
-                            <span class="text-xs font-medium text-cyan-400"
+                            <span class="text-xs font-medium text-blue-500"
                                 >{selNode.type}</span
                             >
                             <button
                                 onclick={() => (selectedNode = null)}
-                                class="text-slate-500 hover:text-slate-300 text-xs"
+                                class="text-gray-400 hover:text-gray-700 text-xs"
                                 >Close</button
                             >
                         </div>
-                        <p class="text-sm text-slate-200 font-medium">
+                        <p class="text-sm text-gray-800 font-medium">
                             {selNode.label || selNode.id}
                         </p>
                         {#if selNode.weight}
-                            <p class="text-xs text-slate-500 mt-1">
+                            <p class="text-xs text-gray-400 mt-1">
                                 Weight: {selNode.weight}
                             </p>
                         {/if}
                         {#if connEdges.length > 0}
                             <div class="mt-2 border-t border-slate-700 pt-2">
-                                <p class="text-xs text-slate-500 mb-1">
+                                <p class="text-xs text-gray-400 mb-1">
                                     {connEdges.length} connection{connEdges.length >
                                     1
                                         ? "s"
                                         : ""}
                                 </p>
                                 {#each connEdges.slice(0, 5) as ce}
-                                    <p class="text-xs text-slate-400 truncate">
+                                    <p class="text-xs text-gray-500 truncate">
                                         {ce.from === selectedNode
                                             ? ce.to
                                             : ce.from} ({ce.relation})
@@ -994,20 +1063,30 @@
 <!-- Normal (inline) view -->
 <div
     class="w-full h-full rounded-lg relative overflow-hidden {compact
-        ? 'min-h-[180px]'
-        : 'min-h-[400px]'}"
+        ? 'min-h-[121px]'
+        : 'min-h-[268px]'} bg-gray-50/50 border border-gray-200"
     class:hidden={isFullscreen}
     bind:this={containerEl}
-    style="background: linear-gradient(135deg, rgba(13, 17, 23, 0.95) 0%, rgba(10, 12, 15, 0.9) 100%); border: 1px solid rgba(0, 200, 255, 0.15);"
 >
-    <!-- Controls toolbar -->
+    <!-- Controls toolbar — INTELLIGENT_PARSING_FIXED: added search + node counter -->
     {#if !compact}
         <div
-            class="absolute top-2 right-2 z-10 flex items-center gap-0.5 bg-slate-900/80 rounded-lg border border-slate-700/50 px-1 py-0.5 backdrop-blur-sm"
+            class="absolute top-2 right-2 z-10 flex items-center gap-0.5 bg-white/80 rounded-lg border border-gray-200 px-1 py-0.5 backdrop-blur-sm"
         >
+            <!-- Search input -->
+            <input
+                type="search"
+                bind:value={localSearchTerm}
+                placeholder="Search…"
+                class="text-[8px] w-14 px-1.5 py-0.5 border border-gray-200 rounded bg-white/90 text-gray-700 placeholder-gray-400 focus:outline-none focus:border-blue-300"
+                title="Search nodes"
+            />
+            <!-- Node/edge counter -->
+            <span class="text-[7px] text-gray-400 tabular-nums px-0.5">{nodes.length}N/{edges.length}E</span>
+            <div class="w-px h-4 bg-gray-100 mx-0.5"></div>
             <button
                 onclick={zoomOut}
-                class="p-1 rounded hover:bg-slate-700/60 text-slate-400 hover:text-cyan-400 transition-colors"
+                class="p-1 rounded hover:bg-gray-100/60 text-gray-500 hover:text-blue-500 transition-colors"
                 title="Zoom Out"
             >
                 <svg
@@ -1015,7 +1094,7 @@
                     viewBox="0 0 24 24"
                     fill="none"
                     stroke="currentColor"
-                    stroke-width="2"
+                    stroke-width="1"
                     ><circle cx="11" cy="11" r="8" /><line
                         x1="21"
                         y1="21"
@@ -1024,12 +1103,12 @@
                     /><line x1="8" y1="11" x2="14" y2="11" /></svg
                 >
             </button>
-            <span class="text-[10px] text-slate-500 w-8 text-center"
+            <span class="text-[7px] text-gray-400 w-8 text-center"
                 >{Math.round(zoomLevel * 100)}%</span
             >
             <button
                 onclick={zoomIn}
-                class="p-1 rounded hover:bg-slate-700/60 text-slate-400 hover:text-cyan-400 transition-colors"
+                class="p-1 rounded hover:bg-gray-100/60 text-gray-500 hover:text-blue-500 transition-colors"
                 title="Zoom In"
             >
                 <svg
@@ -1037,7 +1116,7 @@
                     viewBox="0 0 24 24"
                     fill="none"
                     stroke="currentColor"
-                    stroke-width="2"
+                    stroke-width="1"
                     ><circle cx="11" cy="11" r="8" /><line
                         x1="21"
                         y1="21"
@@ -1051,10 +1130,10 @@
                     /></svg
                 >
             </button>
-            <div class="w-px h-4 bg-slate-700 mx-0.5"></div>
+            <div class="w-px h-4 bg-gray-100 mx-0.5"></div>
             <button
                 onclick={fitToView}
-                class="p-1 rounded hover:bg-slate-700/60 text-slate-400 hover:text-cyan-400 transition-colors"
+                class="p-1 rounded hover:bg-gray-100/60 text-gray-500 hover:text-blue-500 transition-colors"
                 title="Fit to View"
             >
                 <svg
@@ -1062,13 +1141,13 @@
                     viewBox="0 0 24 24"
                     fill="none"
                     stroke="currentColor"
-                    stroke-width="2"
+                    stroke-width="1"
                     ><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" /></svg
                 >
             </button>
             <button
                 onclick={resetView}
-                class="p-1 rounded hover:bg-slate-700/60 text-slate-400 hover:text-cyan-400 transition-colors"
+                class="p-1 rounded hover:bg-gray-100/60 text-gray-500 hover:text-blue-500 transition-colors"
                 title="Reset View"
             >
                 <svg
@@ -1076,16 +1155,16 @@
                     viewBox="0 0 24 24"
                     fill="none"
                     stroke="currentColor"
-                    stroke-width="2"
+                    stroke-width="1"
                     ><polyline points="1 4 1 10 7 10" /><path
                         d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"
                     /></svg
                 >
             </button>
-            <div class="w-px h-4 bg-slate-700 mx-0.5"></div>
+            <div class="w-px h-4 bg-gray-100 mx-0.5"></div>
             <button
                 onclick={downloadSVG}
-                class="p-1 rounded hover:bg-slate-700/60 text-slate-400 hover:text-cyan-400 transition-colors"
+                class="p-1 rounded hover:bg-gray-100/60 text-gray-500 hover:text-blue-500 transition-colors"
                 title="Download SVG"
             >
                 <svg
@@ -1093,7 +1172,7 @@
                     viewBox="0 0 24 24"
                     fill="none"
                     stroke="currentColor"
-                    stroke-width="2"
+                    stroke-width="1"
                     ><path
                         d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"
                     /><polyline points="7 10 12 15 17 10" /><line
@@ -1106,7 +1185,7 @@
             </button>
             <button
                 onclick={downloadPNG}
-                class="p-1 rounded hover:bg-slate-700/60 text-slate-400 hover:text-cyan-400 transition-colors"
+                class="p-1 rounded hover:bg-gray-100/60 text-gray-500 hover:text-blue-500 transition-colors"
                 title="Download PNG"
             >
                 <svg
@@ -1114,12 +1193,12 @@
                     viewBox="0 0 24 24"
                     fill="none"
                     stroke="currentColor"
-                    stroke-width="2"
+                    stroke-width="1"
                     ><rect
                         x="3"
                         y="3"
-                        width="18"
-                        height="18"
+                        width="12"
+                        height="12"
                         rx="2"
                         ry="2"
                     /><circle cx="8.5" cy="8.5" r="1.5" /><polyline
@@ -1129,7 +1208,7 @@
             </button>
             <button
                 onclick={exportGraphJSON}
-                class="p-1 rounded hover:bg-slate-700/60 text-slate-400 hover:text-cyan-400 transition-colors"
+                class="p-1 rounded hover:bg-gray-100/60 text-gray-500 hover:text-blue-500 transition-colors"
                 title="Export JSON"
             >
                 <svg
@@ -1137,16 +1216,16 @@
                     viewBox="0 0 24 24"
                     fill="none"
                     stroke="currentColor"
-                    stroke-width="2"
+                    stroke-width="1"
                     ><path
                         d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"
                     /><polyline points="14 2 14 8 20 8" /></svg
                 >
             </button>
-            <div class="w-px h-4 bg-slate-700 mx-0.5"></div>
+            <div class="w-px h-4 bg-gray-100 mx-0.5"></div>
             <button
                 onclick={toggleFullscreen}
-                class="p-1 rounded hover:bg-slate-700/60 text-slate-400 hover:text-cyan-400 transition-colors"
+                class="p-1 rounded hover:bg-gray-100/60 text-gray-500 hover:text-blue-500 transition-colors"
                 title="Fullscreen"
             >
                 <svg
@@ -1154,7 +1233,7 @@
                     viewBox="0 0 24 24"
                     fill="none"
                     stroke="currentColor"
-                    stroke-width="2"
+                    stroke-width="1"
                     ><polyline points="15 3 21 3 21 9" /><polyline
                         points="9 21 3 21 3 15"
                     /><line x1="21" y1="3" x2="14" y2="10" /><line
@@ -1173,7 +1252,7 @@
         <div class="absolute top-1 right-1 z-10">
             <button
                 onclick={toggleFullscreen}
-                class="p-1 rounded bg-slate-900/70 hover:bg-slate-700/80 text-slate-400 hover:text-cyan-400 transition-colors border border-slate-700/50"
+                class="p-1 rounded bg-white/70 hover:bg-gray-100/80 text-gray-500 hover:text-blue-500 transition-colors border border-slate-700/50"
                 title="Fullscreen"
             >
                 <svg
@@ -1181,7 +1260,7 @@
                     viewBox="0 0 24 24"
                     fill="none"
                     stroke="currentColor"
-                    stroke-width="2"
+                    stroke-width="1"
                     ><polyline points="15 3 21 3 21 9" /><polyline
                         points="9 21 3 21 3 15"
                     /><line x1="21" y1="3" x2="14" y2="10" /><line
@@ -1196,26 +1275,30 @@
     {/if}
 
     {#if nodes.length === 0}
-        <div class="absolute inset-0 flex items-center justify-center">
-            <div class="text-center">
-                <svg
-                    class="w-10 h-10 mx-auto mb-3 opacity-50 text-cyan-500"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="1.5"
-                >
-                    <circle cx="12" cy="5" r="3" />
-                    <circle cx="5" cy="19" r="3" />
-                    <circle cx="19" cy="19" r="3" />
-                    <line x1="12" y1="8" x2="5" y2="16" />
-                    <line x1="12" y1="8" x2="19" y2="16" />
-                </svg>
-                <p class="text-sm text-cyan-500/50">
-                    Knowledge graph will appear here
-                </p>
-                <p class="text-xs text-slate-500 mt-1">
-                    Start recording or simulate to add nodes
+        <div class="absolute inset-0 flex items-center justify-center p-6 text-center animate-fadeIn">
+            <div class="relative group">
+                <!-- Illustrated Placeholder -->
+                <div class="relative w-20 h-20 mx-auto mb-6">
+                    <div class="absolute inset-0 bg-blue-500/10 rounded-full blur-2xl group-hover:bg-blue-500/20 transition-all duration-700"></div>
+                    <svg
+                        class="relative z-10 w-full h-full text-blue-500/40 group-hover:text-blue-500/60 transition-all duration-700 active:scale-95"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="1.2"
+                    >
+                        <circle cx="12" cy="12" r="3" class="animate-pulse" />
+                        <circle cx="4" cy="4" r="2" />
+                        <circle cx="20" cy="4" r="2" />
+                        <circle cx="4" cy="20" r="2" />
+                        <circle cx="20" cy="20" r="2" />
+                        <path d="M7 7l3.5 3.5M13.5 13.5L17 17M17 7l-3.5 3.5M10.5 13.5L7 17" opacity="0.3" stroke-dasharray="2 2" />
+                    </svg>
+                </div>
+                
+                <h3 class="text-fluid-xs font-bold text-slate-900 uppercase tracking-widest mb-1.5">Knowledge Graph Empty</h3>
+                <p class="text-[7px] text-slate-400 max-w-[121px] mx-auto leading-relaxed">
+                    Start recording to extract <span class="text-blue-500 font-bold">knowledge entities</span> — tasks, decisions, risks and topics appear here in real time.
                 </p>
             </div>
         </div>
@@ -1229,6 +1312,7 @@
             aria-label="Knowledge graph visualization"
         >
             <defs>
+                    <pattern id="dotGrid" width="16" height="16" patternUnits="userSpaceOnUse"><circle cx="2" cy="2" r="1.5" fill="var(--kg-dot-color)"/></pattern>
                 <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
                     <feGaussianBlur stdDeviation="3" result="coloredBlur" />
                     <feMerge>
@@ -1245,40 +1329,41 @@
                 >
                     <stop
                         offset="0%"
-                        style="stop-color:#00c8ff;stop-opacity:0.1"
+                        style="stop-color:#3B82F6;stop-opacity:0.1"
                     />
                     <stop
                         offset="50%"
-                        style="stop-color:#00c8ff;stop-opacity:0.4"
+                        style="stop-color:#3B82F6;stop-opacity:0.4"
                     />
                     <stop
                         offset="100%"
-                        style="stop-color:#00c8ff;stop-opacity:0.1"
+                        style="stop-color:#3B82F6;stop-opacity:0.1"
                     />
                 </linearGradient>
                 <marker
                     id="arrowhead"
-                    markerWidth="10"
-                    markerHeight="10"
+                    viewBox="0 0 10 10"
+                    markerWidth="6"
+                    markerHeight="6"
                     refX="9"
-                    refY="3"
-                    orient="auto"
+                    refY="5"
+                    orient="auto-start-reverse"
                 >
-                    <polygon
-                        points="0 0, 10 3, 0 6"
-                        fill="#00c8ff"
-                        opacity="0.5"
-                    />
+                    <path d="M 0 0 L 10 5 L 0 10 z" fill="#3B82F6" />
                 </marker>
             </defs>
+            <rect width="100%" height="100%" fill="url(#dotGrid)" pointer-events="none" />
 
             <g transform="translate({panX}, {panY}) scale({zoomLevel})">
                 <!-- Edges -->
                 <g class="edges">
                     {#each edges as edge}
-                        {@const from = positions.get(edge.from)}
-                        {@const to = positions.get(edge.to)}
-                        {#if from && to}
+                        {@const nodeFrom = nodes.find(n => n.id === edge.from)}
+                        {@const nodeTo = nodes.find(n => n.id === edge.to)}
+                        {#if nodeFrom && nodeTo}
+                            {@const from = positions[edge.from]}
+                            {@const to = positions[edge.to]}
+                            {#if from && to}
                             {@const dx = to.x - from.x}
                             {@const dy = to.y - from.y}
                             {@const dist = Math.sqrt(dx * dx + dy * dy)}
@@ -1293,59 +1378,71 @@
                                 to.y - (dy / Math.max(dist, 1)) * nodeRadius}
                             {@const midX = (startX + endX) / 2}
                             {@const midY = (startY + endY) / 2}
+                            {@const isConnected = selectedNode === edge.from || selectedNode === edge.to}
                             <line
                                 x1={startX}
                                 y1={startY}
                                 x2={endX}
                                 y2={endY}
-                                stroke="#00c8ff"
-                                stroke-opacity="0.5"
-                                stroke-width="2"
+                                stroke="#3B82F6"
+                                stroke-opacity={selectedNode ? (isConnected ? 0.8 : 0.05) : 0.5}
+                                stroke-width={isConnected ? 2 : 1}
                                 marker-end="url(#arrowhead)"
                             />
-                            <rect
-                                x={midX - edge.relation.length * 3.2}
-                                y={midY - 8}
-                                width={edge.relation.length * 6.4}
-                                height={14}
-                                fill="#0a0c0f"
-                                fill-opacity="0.85"
-                                rx="3"
-                            />
-                            <text
-                                x={midX}
-                                y={midY + 3}
-                                fill="#00c8ff"
-                                font-size="10"
-                                opacity="0.8"
-                                text-anchor="middle"
-                                class="font-sans">{edge.relation}</text
-                            >
+                            {#if !selectedNode || isConnected}
+                                <rect
+                                    x={midX - edge.relation.length * 3.2}
+                                    y={midY - 8}
+                                    width={edge.relation.length * 6.4}
+                                    height={14}
+                                    fill="#FFFFFF"
+                                    fill-opacity="0.85"
+                                    rx="3"
+                                />
+                                <text
+                                    x={midX}
+                                    y={midY + 3}
+                                    fill="#3B82F6"
+                                    font-size="10"
+                                    opacity="0.8"
+                                    text-anchor="middle"
+                                    class="font-sans">{edge.relation}</text
+                                >
+                            {/if}
                         {/if}
-                    {/each}
-                </g>
+                    {/if}
+                {/each}
+            </g>
 
                 <!-- Nodes -->
                 <g class="nodes">
                     {#each nodes as node}
-                        {@const pos = positions.get(node.id)}
+                        {@const pos = positions[node.id]}
                         {#if pos}
                             {@const color = getNodeColor(
                                 node.type,
                                 node.collapsed,
                             )}
                             {@const isCluster = node.collapsed}
-                            {@const nodeR = isCluster ? 32 : 22}
+                            {@const nodeR = isCluster ? 36 : 28}
+                            {@const isDimmed = selectedNode && selectedNode !== node.id && !edges.some(e => (e.from === selectedNode && e.to === node.id) || (e.to === selectedNode && e.from === node.id))}
                             <g
                                 transform="translate({pos.x}, {pos.y})"
-                                class="cursor-grab transition-transform {draggedNode ===
-                                node.id
+                                class="cursor-grab transition-all duration-300 {draggedNode === node.id
                                     ? 'cursor-grabbing'
-                                    : 'hover:scale-110'}"
+                                    : 'hover:opacity-80'}"
+                                style="opacity: {isDimmed ? 0.15 : 1}"
                                 onmousedown={(e) => handleMouseDown(e, node.id)}
                                 onclick={() => handleNodeClick(node.id)}
+                                onkeydown={(e) => {
+                                    if (e.key === 'Enter' || e.key === ' ') {
+                                        e.preventDefault();
+                                        handleNodeClick(node.id);
+                                    }
+                                }}
                                 role="button"
                                 tabindex="0"
+                                aria-label="Node: {node.label || node.id}, Type: {node.type}"
                             >
                                 <circle
                                     r={nodeR + 6}
@@ -1418,16 +1515,16 @@
                                         cx="18"
                                         cy="-18"
                                         r="8"
-                                        fill="#00c8ff"
+                                        fill="#3B82F6"
                                         fill-opacity="0.3"
-                                        stroke="#00c8ff"
+                                        stroke="#3B82F6"
                                         stroke-width="1"
                                     />
                                     <text
                                         x="18"
                                         y="-14"
                                         text-anchor="middle"
-                                        fill="#00c8ff"
+                                        fill="#3B82F6"
                                         font-size="9"
                                         font-weight="bold"
                                         class="pointer-events-none select-none"
@@ -1449,36 +1546,36 @@
                     (e) => e.from === selectedNode || e.to === selectedNode,
                 )}
                 <div
-                    class="absolute bottom-10 right-3 bg-slate-900/95 border border-cyan-500/30 rounded-lg p-3 min-w-[180px] max-w-[260px] z-10"
+                    class="absolute bottom-10 right-3 bg-white/95 border border-blue-300 rounded-lg p-3 min-w-[121px] max-w-[174px] z-10"
                 >
                     <div class="flex items-center justify-between mb-1">
-                        <span class="text-xs font-medium text-cyan-400"
+                        <span class="text-xs font-medium text-blue-500"
                             >{selNode.type}</span
                         >
                         <button
                             onclick={() => (selectedNode = null)}
-                            class="text-slate-500 hover:text-slate-300 text-xs"
+                            class="text-gray-400 hover:text-gray-700 text-xs"
                             >x</button
                         >
                     </div>
-                    <p class="text-sm text-slate-200 font-medium">
+                    <p class="text-sm text-gray-800 font-medium">
                         {selNode.label || selNode.id}
                     </p>
                     {#if selNode.weight}<p
-                            class="text-xs text-slate-500 mt-0.5"
+                            class="text-xs text-gray-400 mt-0.5"
                         >
                             Weight: {selNode.weight}
                         </p>{/if}
                     {#if connEdges.length > 0}
-                        <div class="mt-1.5 border-t border-slate-700 pt-1.5">
-                            <p class="text-xs text-slate-500 mb-0.5">
+                        <div class="mt-1.5 border-t border-gray-200 pt-1.5">
+                            <p class="text-xs text-gray-400 mb-0.5">
                                 {connEdges.length} connection{connEdges.length >
                                 1
                                     ? "s"
                                     : ""}
                             </p>
                             {#each connEdges.slice(0, 4) as ce}
-                                <p class="text-xs text-slate-400 truncate">
+                                <p class="text-xs text-gray-500 truncate">
                                     {ce.from === selectedNode ? ce.to : ce.from}
                                     ({ce.relation})
                                 </p>
@@ -1491,13 +1588,13 @@
     {/if}
 
     <!-- Stats overlay -->
-    <div class="absolute bottom-2 left-2 text-xs text-slate-500 flex gap-3">
+    <div class="absolute bottom-2 left-2 text-xs text-gray-400 flex gap-3">
         <span class="flex items-center gap-1">
-            <span class="w-1.5 h-1.5 rounded-full bg-cyan-500/50"></span>
+            <span class="w-1.5 h-1.5 rounded-full bg-blue-500/50"></span>
             {nodes.length} nodes
         </span>
         <span class="flex items-center gap-1">
-            <span class="w-1.5 h-1.5 rounded-full bg-cyan-500/30"></span>
+            <span class="w-1.5 h-1.5 rounded-full bg-blue-100"></span>
             {edges.length} edges
         </span>
     </div>
