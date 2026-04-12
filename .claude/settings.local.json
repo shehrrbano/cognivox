@@ -13,7 +13,17 @@
       "Bash(npx tsc:*)",
       "Bash(cargo build:*)",
       "Bash(npx vite:*)",
-      "Bash(ls:*)"
+      "Bash(ls:*)",
+      "Bash(node:*)",
+      "Bash(python3 ui-ux-pro-max-skill/src/ui-ux-pro-max/scripts/search.py \"SaaS education study buddy chat AI\" --design-system -p \"Cognivox\")",
+      "Bash(python ui-ux-pro-max-skill/src/ui-ux-pro-max/scripts/search.py \"SaaS education study buddy chat AI\" --design-system -p \"Cognivox\")",
+      "Bash(where python:*)",
+      "Bash(where python3:*)",
+      "Bash(where py:*)",
+      "Bash(ls /c/Python*/python.exe)",
+      "Read(//c/Users/omen/AppData/Local/Programs/**)",
+      "Bash(ls CODEBASE_INDEX/ZERO_CONFIG_FINAL_POLISH_AND_USER_TESTING_v1/)",
+      "Bash(mkdir -p CODEBASE_INDEX/ZERO_CONFIG_FINAL_POLISH_AND_USER_TESTING_v1/SUBAGENTS CODEBASE_INDEX/ZERO_CONFIG_FINAL_POLISH_AND_USER_TESTING_v1/VERSIONS)"
     ]
   }
 }

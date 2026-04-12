@@ -80,6 +80,15 @@
     let connectionTestResult: "success" | "error" | null = $state(null);
     let connectionTestMessage = $state("");
 
+    // RAGFlow Configuration
+    let ragflowUrl = $state('');
+    let ragflowApiKey = $state('');
+    let knowledgeBaseId = $state('');
+    let ragflowTestStatus: 'idle' | 'testing' | 'connected' | 'error' = $state('idle');
+    let ragflowTestError = $state('');
+    let ragflowDatasets: Array<{id: string; name: string}> = $state([]);
+    let isLoadingDatasets = $state(false);
+
     // Custom Models Management
     let newModelId = $state("");
     let newModelName = $state("");
@@ -103,6 +112,13 @@
                 vadSilenceTime = s.vadConfig.silenceDuration / 1000;
                 vadMinChunk = s.vadConfig.minChunkDuration / 1000;
                 enableFillerDetection = s.vadConfig.enableFillerDetection;
+
+                // RAGFlow config
+                ragflowUrl = s.ragflowUrl || '';
+                ragflowApiKey = s.ragflowApiKey || '';
+                knowledgeBaseId = s.knowledgeBaseId || '';
+                ragflowTestStatus = 'idle';
+                ragflowTestError = '';
             });
         }
     });
@@ -311,6 +327,61 @@
         }
     }
 
+    async function testRagflowConnection() {
+        ragflowTestStatus = 'testing';
+        ragflowTestError = '';
+        // Save first so the service reads current values
+        settingsStore.update(s => ({
+            ...s,
+            ragflowUrl: ragflowUrl.trim(),
+            ragflowApiKey: ragflowApiKey.trim(),
+            knowledgeBaseId: knowledgeBaseId.trim(),
+        }));
+        try {
+            const { checkRAGFlowStatus } = await import('./services/ragflowService');
+            const status = await checkRAGFlowStatus();
+            if (status.connected) {
+                ragflowTestStatus = 'connected';
+                // Auto-load datasets on successful connection
+                loadRagflowDatasets();
+            } else {
+                ragflowTestStatus = 'error';
+                ragflowTestError = status.error || 'Connection failed';
+            }
+        } catch (e: any) {
+            ragflowTestStatus = 'error';
+            ragflowTestError = e?.message || 'Unknown error';
+        }
+    }
+
+    async function loadRagflowDatasets() {
+        isLoadingDatasets = true;
+        try {
+            const { listDatasets } = await import('./services/ragflowService');
+            const datasets = await listDatasets();
+            ragflowDatasets = datasets.map(d => ({ id: d.id, name: d.name }));
+        } catch (e) {
+            ragflowDatasets = [];
+        } finally {
+            isLoadingDatasets = false;
+        }
+    }
+
+    async function createNewDataset() {
+        const name = prompt('Enter dataset name (e.g. "Machine Learning Lectures"):');
+        if (!name?.trim()) return;
+        try {
+            const { createDataset } = await import('./services/ragflowService');
+            const ds = await createDataset(name.trim());
+            if (ds) {
+                knowledgeBaseId = ds.id;
+                await loadRagflowDatasets();
+            }
+        } catch (e: any) {
+            console.error('[RAGFlow] Create dataset failed:', e);
+        }
+    }
+
     function saveSettings() {
         settingsStore.update(s => ({
             ...s,
@@ -326,7 +397,10 @@
                 silenceDuration: vadSilenceTime * 1000,
                 minChunkDuration: vadMinChunk * 1000,
                 enableFillerDetection: enableFillerDetection
-            }
+            },
+            ragflowUrl: ragflowUrl.trim(),
+            ragflowApiKey: ragflowApiKey.trim(),
+            knowledgeBaseId: knowledgeBaseId.trim(),
         }));
         // MEETING_TASKS_v1: Task 1.3 — Push tier to Rust backend on save
         if (isRunningInTauri) {
@@ -1134,12 +1208,155 @@
                     </div>
                 </section>
 
+                <!-- === RAGFLOW / STUDY BUDDY SECTION === -->
+                <section>
+                    <h3
+                        class="text-sm font-semibold text-blue-500 uppercase tracking-wider mb-4 flex items-center gap-2"
+                    >
+                        <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+                        Study Buddy (RAGFlow)
+                    </h3>
+                    <p class="text-xs text-gray-500 mb-4 leading-relaxed">
+                        Connect to a RAGFlow instance to enable AI-powered Q&A over your lecture recordings. Your transcripts are automatically ingested into the knowledge base when you save a session.
+                    </p>
+
+                    <!-- RAGFlow Server URL -->
+                    <div class="mb-3">
+                        <label for="ragflow-url-modal" class="block text-xs font-medium text-gray-600 mb-1.5">
+                            RAGFlow Server URL
+                        </label>
+                        <input
+                            id="ragflow-url-modal"
+                            type="url"
+                            bind:value={ragflowUrl}
+                            class="w-full px-3 py-2.5 rounded-lg border border-gray-200 bg-white text-sm text-gray-800 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-400 transition-all"
+                            placeholder="http://localhost:9380"
+                        />
+                        <p class="text-[11px] text-gray-400 mt-1">The URL of your deployed RAGFlow instance</p>
+                    </div>
+
+                    <!-- RAGFlow API Key -->
+                    <div class="mb-3">
+                        <label for="ragflow-apikey-modal" class="block text-xs font-medium text-gray-600 mb-1.5">
+                            RAGFlow API Key
+                        </label>
+                        <input
+                            id="ragflow-apikey-modal"
+                            type="password"
+                            bind:value={ragflowApiKey}
+                            class="w-full px-3 py-2.5 rounded-lg border border-gray-200 bg-white text-sm text-gray-800 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-400 transition-all"
+                            placeholder="ragflow-xxxxxxxxxxxxxxxx"
+                        />
+                        <p class="text-[11px] text-gray-400 mt-1">Found in RAGFlow Dashboard &gt; User Settings &gt; API Key</p>
+                    </div>
+
+                    <!-- Knowledge Base ID + Dataset Selector -->
+                    <div class="mb-4">
+                        <label for="ragflow-kb-modal" class="block text-xs font-medium text-gray-600 mb-1.5">
+                            Knowledge Base (Dataset) ID
+                        </label>
+                        <div class="flex gap-2">
+                            <input
+                                id="ragflow-kb-modal"
+                                type="text"
+                                bind:value={knowledgeBaseId}
+                                class="flex-1 px-3 py-2.5 rounded-lg border border-gray-200 bg-white text-sm text-gray-800 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-400 transition-all font-mono text-xs"
+                                placeholder="paste dataset ID here"
+                            />
+                            {#if ragflowTestStatus === 'connected'}
+                                <button
+                                    class="px-3 py-2 rounded-lg border border-blue-200 bg-blue-50 text-blue-600 text-xs font-medium hover:bg-blue-100 transition-colors whitespace-nowrap"
+                                    onclick={createNewDataset}
+                                    title="Create a new dataset in RAGFlow"
+                                    aria-label="Create new dataset"
+                                >
+                                    <svg class="w-3.5 h-3.5 inline -mt-0.5 mr-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 5v14M5 12h14"/></svg>
+                                    New
+                                </button>
+                            {/if}
+                        </div>
+                        <p class="text-[11px] text-gray-400 mt-1">The ID of the dataset where transcripts are stored. Connect first, then pick or create one.</p>
+
+                        <!-- Dataset Quick-Select (shown after successful connection) -->
+                        {#if ragflowDatasets.length > 0}
+                            <div class="mt-2 p-2 rounded-lg bg-gray-50 border border-gray-100">
+                                <span class="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Your Datasets</span>
+                                <div class="mt-1.5 flex flex-wrap gap-1.5">
+                                    {#each ragflowDatasets as ds}
+                                        <button
+                                            class="px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all {knowledgeBaseId === ds.id ? 'bg-blue-600 text-white shadow-sm' : 'bg-white border border-gray-200 text-gray-600 hover:border-blue-300 hover:text-blue-600'}"
+                                            onclick={() => (knowledgeBaseId = ds.id)}
+                                            title="Use dataset: {ds.name} ({ds.id})"
+                                            aria-label="Select dataset {ds.name}"
+                                        >
+                                            {ds.name}
+                                        </button>
+                                    {/each}
+                                </div>
+                            </div>
+                        {/if}
+                    </div>
+
+                    <!-- Test Connection Button -->
+                    <button
+                        class="w-full px-4 py-2.5 rounded-lg text-sm font-semibold transition-all duration-200 flex items-center justify-center gap-2
+                            {ragflowTestStatus === 'connected'
+                                ? 'bg-green-50 border-2 border-green-300 text-green-700'
+                                : ragflowTestStatus === 'error'
+                                    ? 'bg-red-50 border-2 border-red-300 text-red-700 hover:bg-red-100'
+                                    : 'bg-blue-600 border-2 border-blue-600 text-white hover:bg-blue-700 active:scale-[0.98]'}"
+                        onclick={testRagflowConnection}
+                        disabled={ragflowTestStatus === 'testing' || !ragflowUrl.trim()}
+                        aria-label="Test RAGFlow connection"
+                    >
+                        {#if ragflowTestStatus === 'testing'}
+                            <svg class="w-4 h-4 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
+                            Testing Connection...
+                        {:else if ragflowTestStatus === 'connected'}
+                            <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+                            Connected to RAGFlow
+                        {:else if ragflowTestStatus === 'error'}
+                            <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                            Connection Failed — Retry
+                        {:else}
+                            <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                            Test Connection
+                        {/if}
+                    </button>
+
+                    <!-- Status Feedback -->
+                    {#if ragflowTestStatus === 'connected'}
+                        <div class="mt-3 p-3 rounded-lg bg-green-50 border border-green-200">
+                            <div class="flex items-center gap-2">
+                                <span class="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
+                                <span class="text-xs font-semibold text-green-700">RAGFlow is connected</span>
+                            </div>
+                            <p class="text-[11px] text-green-600 mt-1">{ragflowUrl}</p>
+                            {#if knowledgeBaseId}
+                                <p class="text-[11px] text-green-600 mt-0.5">Dataset: <code class="bg-green-100 px-1 rounded font-mono">{knowledgeBaseId}</code></p>
+                            {:else}
+                                <p class="text-[11px] text-amber-600 mt-0.5 font-medium">Select or create a dataset above to start ingesting transcripts.</p>
+                            {/if}
+                        </div>
+                    {:else if ragflowTestStatus === 'error'}
+                        <div class="mt-3 p-3 rounded-lg bg-red-50 border border-red-200">
+                            <div class="flex items-center gap-2">
+                                <span class="w-2 h-2 rounded-full bg-red-500"></span>
+                                <span class="text-xs font-semibold text-red-700">Connection failed</span>
+                            </div>
+                            <p class="text-[11px] text-red-600 mt-1">{ragflowTestError}</p>
+                            <p class="text-[11px] text-red-500 mt-1">Check that RAGFlow is running and the URL/API key are correct.</p>
+                        </div>
+                    {/if}
+                </section>
+
                 <!-- === DEVELOPER OPTIONS === -->
                 <section>
                     <h3
                         class="text-sm font-semibold text-blue-500 uppercase tracking-wider mb-4 flex items-center gap-2"
                     >
-                        <span>🛠</span> Developer Options
+                        <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
+                        Developer Options
                     </h3>
 
                     <div class="flex items-center gap-3">

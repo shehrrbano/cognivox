@@ -19,8 +19,6 @@
         intelligenceExtractor,
         type ExtractedInsights,
     } from "$lib/intelligenceExtractor";
-    import { FirestoreSessionManager } from "$lib/firestoreSessionManager";
-    import { getCurrentUser, initFirebase, waitForAuth } from "$lib/firebase";
     import { keyManager, type KeyManagerState } from "$lib/keyManager";
     import { settingsStore } from "$lib/settingsStore";
 
@@ -43,6 +41,7 @@
     import DecisionLedger from "$lib/DecisionLedger.svelte";
     import ProjectOverview from "$lib/ProjectOverview.svelte";
     import SearchTab from "$lib/SearchTab.svelte";
+    import RAGFlowChat from "$lib/RAGFlowChat.svelte";
 
     // === SERVICE MODULES ===
     import type {
@@ -74,7 +73,7 @@
         fetchAllSessions,
         buildSessionJson,
         saveSessionToDisk,
-        syncSessionToCloud,
+
         deleteSession as deleteSessionService,
         recoverPendingSave,
     } from "$lib/services/sessionService";
@@ -95,6 +94,11 @@
         renameSpeaker as doRenameSpeaker,
         clearSpeakerProfiles as doClearSpeakerProfiles,
     } from "$lib/services/speakerService";
+    import {
+        ingestTranscriptArray,
+    } from "$lib/services/ragflowService";
+    // ZERO_CONFIG_RAGFLOW_AUTO_SETUP_v1: zero-config RAGFlow bootstrap
+    import { initializeRAGFlowAutoSetup } from "$lib/services/ragflowBootstrap";
     import {
         connectGemini as doConnectGemini,
         setupKeyManagerSubscription,
@@ -455,10 +459,6 @@
         });
     }
 
-    // MEETING_TASKS_v1: Task 3.1 — Firebase Persistence Audit
-    // VERIFIED: loadInitialData() correctly calls initFirebase() → waitForAuth() → refreshSessionList()
-    // → fetchAllSessions() which loads local disk sessions first, then merges Firestore cloud sessions.
-    // Sessions persist across reopens. No code change required — persistence is confirmed working.
     async function refreshSessionList(): Promise<void> {
         const result = await fetchAllSessions(sessionCache);
         pastSessions = result.pastSessions;
@@ -488,6 +488,15 @@
                 saveCurrentSessionToCache();
             }
         }
+    }
+
+    // RAGFlow auto-zoom: switch to graph tab and highlight the entity node
+    function handleAutoZoomEntity(entityId: string) {
+        if (!entityId) return;
+        console.log(`[RAGFlow] Auto-zoom request for entity: ${entityId}`);
+        activeTab = 'graph';
+        // GraphTab will be visible, trigger search to highlight the node
+        searchQuery = entityId;
     }
 
     async function handleSessionLoad(session: any) {
@@ -576,12 +585,34 @@
                 
                 if (isRunningInTauri) {
                     await saveSessionToDisk(JSON.stringify(sessionObj));
-                    await syncSessionToCloud(sessionObj);
                 }
                 
                 if (isFinal) {
                     await refreshSessionList();
                     status = `Session saved (${transcriptCount} transcripts)`;
+                    // ZERO_CONFIG_RAGFLOW_AUTO_SETUP_v1: Seamless ingestion.
+                    // If the knowledge base isn't set up yet (e.g. RAGFlow was
+                    // offline on launch but just came up) kick the bootstrap
+                    // one more time before ingesting so the user never has to
+                    // do anything manually.
+                    if (transcriptCount > 0) {
+                        (async () => {
+                            try {
+                                if (!$settingsStore.knowledgeBaseId) {
+                                    await initializeRAGFlowAutoSetup({ maxAttempts: 2 });
+                                }
+                                if ($settingsStore.knowledgeBaseId) {
+                                    const ok = await ingestTranscriptArray(
+                                        sessionObj.metadata?.title || 'Untitled Session',
+                                        sessionObj.transcripts || [],
+                                    );
+                                    if (ok) console.log('[RAGFlow] Transcript auto-ingested into Study Buddy');
+                                }
+                            } catch (e) {
+                                console.warn('[RAGFlow] Seamless ingestion failed:', e);
+                            }
+                        })();
+                    }
                 }
             } catch (error: any) {
                 const errMsg = typeof error === "string" ? error : error?.message || String(error);
@@ -595,15 +626,6 @@
         try {
             if (!isRunningInTauri) return;
             if (isRunningInTauri) await recoverPendingSave();
-            try {
-                initFirebase();
-                const user = await waitForAuth();
-                if (user)
-                    console.log(`[RESTORE] Authenticated as: ${user.email}`);
-                else console.log("[RESTORE] Not signed in — local only");
-            } catch (firebaseErr) {
-                console.warn("[RESTORE] Firebase init failed:", firebaseErr);
-            }
             await refreshSessionList();
             if (pastSessions.length > 0 && transcripts.length === 0) {
                 const latest = pastSessions[0];
@@ -1325,6 +1347,18 @@
                     });
             }
 
+            // ZERO_CONFIG_RAGFLOW_AUTO_SETUP_v1: Fire-and-forget zero-config RAGFlow bootstrap.
+            // Applies bundled defaults, probes the backend, auto-creates the
+            // "My Lectures" dataset, and pre-warms a chat conversation — all in
+            // the background so the user never sees a setup screen.
+            initializeRAGFlowAutoSetup().then(result => {
+                if (result.phase === 'ready') {
+                    console.log('[ZERO_CONFIG] ✓ Study Buddy ready — dataset:', result.datasetId);
+                } else {
+                    console.log('[ZERO_CONFIG] Study Buddy phase:', result.phase, '—', result.message);
+                }
+            }).catch(e => console.warn('[ZERO_CONFIG] Bootstrap failure:', e));
+
             listen("cognivox:whisper_progress", (event: any) => {
                 whisperProgress = event.payload.percent;
                 if (whisperProgress >= 100) {
@@ -1910,6 +1944,14 @@
                     <ProjectOverview {transcripts} {graphNodes} {pastSessions} />
                 {:else if activeTab === "search"}
                     <SearchTab {transcripts} {graphNodes} initialQuery={searchQuery} />
+                {:else if activeTab === "chat"}
+                    <div class="h-[600px] w-full animate-fadeIn">
+                        <RAGFlowChat
+                            {graphNodes}
+                            onautoZoomEntity={handleAutoZoomEntity}
+                            onopenSettings={openSettings}
+                        />
+                    </div>
                 {/if}
 
                 <!-- KG_SYNC_v1: GraphTab always mounted (CSS-toggled) to preserve KnowledgeGraph physics state across tab switches.

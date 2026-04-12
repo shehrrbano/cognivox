@@ -65,6 +65,21 @@
 /* Global Styles */
 html {
   font-size: 125%; /* GLOBAL_UI_SCALER_UP_v1: Scales all rem defaults to 125% of baseline */
+  scroll-behavior: smooth; /* ProMax guideline 1 */
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-primary-500);
+  outline-offset: 2px;
+}
+
+@layer utilities {
+  .promax-interaction {
+    @apply transition-all duration-200 active:scale-95;
+  }
+  .soft-glass {
+    @apply bg-white/70 backdrop-blur-md border border-white/20 shadow-xl shadow-slate-900/5;
+  }
 }
 
 :root {
@@ -124,7 +139,7 @@ body {
 
 /* Primary Button - Blue */
 .btn-primary {
-  @apply px-4 py-2 rounded-lg font-medium text-xs transition-all duration-300;
+  @apply px-4 py-2 rounded-lg font-medium text-xs transition-all duration-200 active:scale-95;
   background: linear-gradient(135deg, #2563EB 0%, #3B82F6 100%);
   color: #FFFFFF;
   border: none;
@@ -149,7 +164,7 @@ body {
 
 /* Secondary Button - Outline */
 .btn-secondary {
-  @apply px-3 py-1.5 rounded-lg font-medium text-xs transition-all duration-300;
+  @apply px-3 py-1.5 rounded-lg font-medium text-xs transition-all duration-200 active:scale-95;
   background: transparent;
   color: #2563EB;
   border: 1px solid var(--color-primary-300);
@@ -162,7 +177,7 @@ body {
 
 /* Ghost Button */
 .btn-ghost {
-  @apply px-2.5 py-1.5 rounded-lg font-medium text-xs transition-all duration-300;
+  @apply px-2.5 py-1.5 rounded-lg font-medium text-xs transition-all duration-200 active:scale-95;
   background: transparent;
   color: var(--color-gray-500);
   border: 1px solid transparent;
@@ -175,7 +190,7 @@ body {
 
 /* Action Button - For bottom bar */
 .btn-action {
-  @apply px-4 py-2 rounded-lg font-medium text-xs transition-all duration-300 flex items-center gap-1.5;
+  @apply px-4 py-2 rounded-lg font-medium text-xs transition-all duration-200 flex items-center gap-1.5 active:scale-95;
   background: #FFFFFF;
   color: var(--color-primary-600);
   border: 1px solid var(--color-gray-200);
@@ -189,7 +204,7 @@ body {
 
 /* Recording button - Red state */
 .btn-recording {
-  @apply px-5 py-2.5 rounded-lg font-semibold text-sm transition-all duration-300;
+  @apply px-5 py-2.5 rounded-lg font-semibold text-sm transition-all duration-200 active:scale-95;
   background: linear-gradient(135deg, #EF4444 0%, #DC2626 100%);
   color: white;
   animation: pulse-recording 2s infinite;
@@ -209,7 +224,7 @@ body {
 
 /* Input Fields */
 .input-field {
-  @apply w-full px-3 py-2 rounded-lg text-xs transition-all duration-300;
+  @apply w-full px-3 py-2 rounded-lg text-xs transition-all duration-200;
   background: #FFFFFF;
   border: 1px solid var(--color-gray-300);
   color: var(--color-gray-800);
@@ -293,7 +308,7 @@ body {
   border-radius: calc(12px * var(--scale-factor));
   background: #FFFFFF;
   border: 1px solid var(--color-gray-200);
-  box-shadow: 0 1px calc(3px * var(--scale-factor)) rgba(0, 0, 0, 0.06);
+  box-shadow: 0 4px 20px -5px rgba(0, 0, 0, 0.08), 0 1px 3px rgba(0, 0, 0, 0.05); /* ProMax: Sophisticated soft shadow */
 }
 
 .content-card-header {
@@ -390,7 +405,7 @@ body {
 
 /* Icon button */
 .icon-btn {
-  @apply p-2 rounded-lg transition-all duration-300;
+  @apply p-2 rounded-lg transition-all duration-200 active:scale-90; /* ProMax: More playful scale for small icons */
   color: var(--color-gray-400);
   background: transparent;
 }
@@ -402,7 +417,7 @@ body {
 
 /* Navigation icons */
 .nav-icon {
-  @apply w-10 h-10 flex items-center justify-center rounded-lg transition-all duration-300 cursor-pointer;
+  @apply w-10 h-10 flex items-center justify-center rounded-lg transition-all duration-200 cursor-pointer active:scale-90;
   color: var(--color-primary-500);
   font-size: 1.25rem;
 }
@@ -414,7 +429,7 @@ body {
 .nav-icon.active {
   background: var(--color-primary-100);
   color: var(--color-primary-700);
-  box-shadow: none;
+  box-shadow: inset 0 1px 2px rgba(0,0,0,0.05);
 }
 
 /* Header section */

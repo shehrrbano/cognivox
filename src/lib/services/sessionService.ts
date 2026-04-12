@@ -4,7 +4,6 @@
  * Pure functions that return data; Svelte state updates happen in the component.
  */
 import { invoke } from "@tauri-apps/api/core";
-import { FirestoreSessionManager } from "$lib/firestoreSessionManager";
 import type {
     Transcript,
     GraphNode,
@@ -166,28 +165,9 @@ export async function loadFullSession(
             }
             sessionCache.set(sessionId, JSON.parse(JSON.stringify(session)));
         } catch {
-            console.log(`[RESTORE] Disk load failed for ${sessionId}, trying cloud...`);
+            console.log(`[RESTORE] Disk load failed for ${sessionId}`);
         }
 
-        if (!diskLoaded && FirestoreSessionManager.isAvailable()) {
-            try {
-                const cloudSession = await FirestoreSessionManager.loadSession(sessionId);
-                if (cloudSession) {
-                    const cloudTranscripts = cloudSession.transcripts?.length || 0;
-                    const cloudNodes = cloudSession.graph_nodes?.length || 0;
-                    if (cloudTranscripts > cacheTranscripts || cloudNodes > cacheNodes || !session) {
-                        session = cloudSession;
-                        console.log(
-                            `[RESTORE] Loaded from cloud: ${cloudTranscripts} transcripts, ${cloudNodes} nodes`,
-                        );
-                    }
-                }
-            } catch (cloudErr) {
-                // Silent fallback
-                session = session || fallbackSession;
-            }
-        }
-        
         session = session || fallbackSession;
         if (session) {
             sessionCache.set(sessionId, JSON.parse(JSON.stringify(session)));
@@ -325,56 +305,7 @@ export async function fetchAllSessions(
         console.warn("[SESSIONS] Failed to load local sessions:", e);
     }
 
-    // Step 2: Merge cloud sessions if signed in
-    if (FirestoreSessionManager.isAvailable()) {
-        try {
-            const cloudSessions = await FirestoreSessionManager.listSessions();
-            console.log(`[SESSIONS] Found ${cloudSessions.length} cloud sessions`);
-            for (const cs of cloudSessions) {
-                const existing = sessionMap.get(cs.id);
-                if (!existing) {
-                    sessionMap.set(cs.id, cs);
-                    try {
-                        await invoke("save_session", {
-                            sessionJson: JSON.stringify(cs),
-                        });
-                        console.log(
-                            `[SESSIONS] Synced cloud→local: ${cs.metadata?.title}`,
-                        );
-                    } catch (syncErr) {
-                        console.warn(`[SESSIONS] Cloud→local sync failed:`, syncErr);
-                    }
-                } else {
-                    const localTranscripts = existing.transcripts?.length || 0;
-                    const cloudTranscripts = cs.transcripts?.length || 0;
-                    const localNodes = existing.graph_nodes?.length || 0;
-                    const cloudNodes = cs.graph_nodes?.length || 0;
-                    const localContent = localTranscripts + localNodes;
-                    const cloudContent = cloudTranscripts + cloudNodes;
-
-                    if (cloudContent > localContent) {
-                        sessionMap.set(cs.id, cs);
-                        console.log(
-                            `[SESSIONS] Cloud wins for ${cs.id}: ${cloudContent} > ${localContent} items`,
-                        );
-                    } else if (
-                        cloudContent === localContent &&
-                        new Date(cs.updated_at) > new Date(existing.updated_at)
-                    ) {
-                        sessionMap.set(cs.id, cs);
-                    } else {
-                        console.log(
-                            `[SESSIONS] Local wins for ${cs.id}: ${localContent} >= ${cloudContent} items`,
-                        );
-                    }
-                }
-            }
-        } catch (e) {
-            console.warn("[SESSIONS] Cloud load failed (using local only):", e);
-        }
-    }
-
-    // Step 3: Build deduplicated array, sorted newest first
+    // Step 2: Build sorted array (newest first)
     const deduped = Array.from(sessionMap.values()).sort(
         (a: any, b: any) =>
             new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime(),
@@ -452,7 +383,7 @@ export function buildSessionJson(
             key_points: extractedSummary.keyPoints || [],
         }
         : null;
-    // Include memories and UI state for full Firebase restoration
+    // Include memories and UI state for full session restoration
     session._extractedMemories = extractedMemories
         ? JSON.parse(JSON.stringify(extractedMemories))
         : null;
@@ -476,28 +407,6 @@ export async function saveSessionToDisk(sessionJson: string): Promise<boolean> {
 }
 
 /**
- * Sync session to cloud (Firestore) if available.
- */
-export async function syncSessionToCloud(session: any): Promise<boolean> {
-    if (!FirestoreSessionManager.isAvailable()) {
-        console.log("[PERSISTENCE] Cloud sync skipped (not signed in)");
-        return false;
-    }
-    try {
-        await FirestoreSessionManager.saveSession(session);
-        console.log("[PERSISTENCE] ✓ Synced to Google Cloud Firestore");
-        return true;
-    } catch (cloudErr: any) {
-        const cloudMsg =
-            typeof cloudErr === "string"
-                ? cloudErr
-                : cloudErr?.message || String(cloudErr);
-        console.warn("[PERSISTENCE] Cloud sync failed (local save OK):", cloudMsg);
-        return false;
-    }
-}
-
-/**
  * Delete a session from disk and cloud.
  */
 export async function deleteSession(sessionId: string): Promise<void> {
@@ -506,15 +415,6 @@ export async function deleteSession(sessionId: string): Promise<void> {
         console.log("[SESSION] Deleted from local storage");
     } catch (e) {
         console.warn("[SESSION] Local delete failed:", e);
-    }
-
-    if (FirestoreSessionManager.isAvailable()) {
-        try {
-            await FirestoreSessionManager.deleteSession(sessionId);
-            console.log("[SESSION] Deleted from cloud");
-        } catch (e) {
-            console.warn("[SESSION] Cloud delete failed:", e);
-        }
     }
 }
 

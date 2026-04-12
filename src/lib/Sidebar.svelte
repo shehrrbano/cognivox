@@ -73,14 +73,16 @@
                 { id: 'graph', label: 'Knowledge Map', icon: 'M12 2l10 5-10 5-10-5 10-5z M2 17l10 5 10-5 M2 12l10 5 10-5' },
                 { id: 'analytics', label: 'Analytics Stats', icon: 'M22 12h-4l-3 9L9 3 6 12H2' },
                 { id: 'speakers', label: 'Voice Profiles', icon: 'M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2 M9 7a4 4 0 100-8 4 4 0 000 8z M23 21v-2a4 4 0 00-3-3.87 M16 3.13a4 4 0 010 7.75' },
-                { id: 'tasks', label: 'Action Center', icon: 'M12 20h9 M16.5 3.5a2.12 2.12 0 013 3L7 19l-4 1 1-4L16.5 3.5z' }
+                { id: 'tasks', label: 'Action Center', icon: 'M12 20h9 M16.5 3.5a2.12 2.12 0 013 3L7 19l-4 1 1-4L16.5 3.5z' },
+                { id: 'chat', label: 'Study Buddy', icon: 'M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z' }
             ] as tab}
                 <button
-                    class="w-full flex items-center gap-3 p-2.5 rounded-xl transition-all duration-300 group {activeTab === tab.id ? 'bg-blue-600 shadow-lg shadow-blue-500/20 text-white' : 'text-slate-500 hover:bg-white hover:shadow-sm hover:text-blue-600 border border-transparent hover:border-slate-100'}"
+                    class="w-full flex items-center gap-3 p-2.5 rounded-xl transition-all duration-200 promax-interaction group {activeTab === tab.id ? 'bg-blue-600 shadow-lg shadow-blue-500/20 text-white' : 'text-slate-500 hover:bg-white hover:shadow-sm hover:text-blue-600 border border-transparent hover:border-slate-100'}"
                     onclick={() => handleTabChange(tab.id)}
+                    aria-label="Switch to {tab.label}"
                 >
                     <div class="flex-shrink-0 w-8 h-8 flex items-center justify-center rounded-lg {activeTab === tab.id ? 'bg-white/20' : 'bg-slate-100 group-hover:bg-blue-50'}">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true">
                             <path d={tab.icon} />
                         </svg>
                     </div>

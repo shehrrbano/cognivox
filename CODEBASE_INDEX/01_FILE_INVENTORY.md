@@ -33,8 +33,8 @@ This inventory provides a central location to access the detailed analysis for e
 | src/lib/CognivoxControls.svelte | [CODE] | [SCANNED] | [View Report](./FILES/src/lib/CognivoxControls.svelte.md) |
 | src/lib/DebugBar.svelte | [CODE] | [SCANNED] | [View Report](./FILES/src/lib/DebugBar.svelte.md) |
 | src/lib/Diagnostics.svelte | [CODE] | [SCANNED] | [View Report](./FILES/src/lib/Diagnostics.svelte.md) |
-| src/lib/firebase.ts | [CODE] | [SCANNED] | [View Report](./FILES/src/lib/firebase.ts.md) |
-| src/lib/firestoreSessionManager.ts | [CODE] | [SCANNED] | [View Report](./FILES/src/lib/firestoreSessionManager.ts.md) |
+| src/lib/firebase.ts | [DELETED] | [REMOVED_BY_COMPLETE_FIREBASE_REMOVAL_v1] | — |
+| src/lib/firestoreSessionManager.ts | [DELETED] | [REMOVED_BY_COMPLETE_FIREBASE_REMOVAL_v1] | — |
 | src/lib/GraphTab.svelte | [CODE] | [SCANNED] | [View Report](./FILES/src/lib/GraphTab.svelte.md) |
 | src/lib/Icon.svelte | [CODE] | [SCANNED] | [View Report](./FILES/src/lib/Icon.svelte.md) |
 | src/lib/InsightsPanel.svelte | [CODE] | [SCANNED] | [View Report](./FILES/src/lib/InsightsPanel.svelte.md) |

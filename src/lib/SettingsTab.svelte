@@ -42,6 +42,8 @@
     let ragflowUrl = $settingsStore.ragflowUrl || '';
     let ragflowApiKey = $settingsStore.ragflowApiKey || '';
     let knowledgeBaseId = $settingsStore.knowledgeBaseId || '';
+    let ragflowTestStatus: 'idle' | 'testing' | 'connected' | 'error' = 'idle';
+    let ragflowTestError = '';
 
     function saveRagflowConfig() {
         settingsStore.update(s => ({
@@ -50,6 +52,25 @@
             ragflowApiKey: ragflowApiKey.trim(),
             knowledgeBaseId: knowledgeBaseId.trim()
         }));
+    }
+
+    async function testRagflowConnection() {
+        ragflowTestStatus = 'testing';
+        ragflowTestError = '';
+        saveRagflowConfig();
+        try {
+            const { checkRAGFlowStatus } = await import('./services/ragflowService');
+            const status = await checkRAGFlowStatus();
+            if (status.connected) {
+                ragflowTestStatus = 'connected';
+            } else {
+                ragflowTestStatus = 'error';
+                ragflowTestError = status.error || 'Connection failed';
+            }
+        } catch (e: any) {
+            ragflowTestStatus = 'error';
+            ragflowTestError = e?.message || 'Unknown error';
+        }
     }
 </script>
 
@@ -238,12 +259,59 @@
     </div>
 
     <!-- ============================================================ -->
-    <!-- RagFlow Intelligence Backend (Tasks 1.3 + 1.4 + 3.1 BATCH2) -->
+    <!-- ZERO_CONFIG_RAGFLOW_AUTO_SETUP_v1                            -->
+    <!-- Normal users see only a friendly status pill. Dev Mode        -->
+    <!-- (debugMode=true) unlocks the raw URL / API key / KB ID       -->
+    <!-- fields for advanced debugging.                                -->
     <!-- ============================================================ -->
+    {#if !$settingsStore.debugMode}
+        <div class="mb-6 border border-blue-100 rounded-xl p-4 bg-blue-50/50 flex items-start gap-3">
+            <div class="w-10 h-10 rounded-xl bg-blue-100 flex items-center justify-center flex-shrink-0">
+                <svg class="w-5 h-5 text-blue-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/>
+                </svg>
+            </div>
+            <div class="flex-1 min-w-0">
+                <h4 class="text-xs font-bold text-blue-700 uppercase tracking-widest mb-1">Study Buddy</h4>
+                <p class="text-[11px] text-slate-600 leading-relaxed">
+                    Auto-configured and running in the background. Every recording is
+                    automatically added to your personal knowledge base — no setup required.
+                </p>
+                <p class="text-[10px] text-slate-400 mt-1.5">
+                    Need to tweak the connection? Enable <span class="font-bold text-slate-500">Dev Mode</span> below.
+                </p>
+            </div>
+        </div>
+        <!-- Dev Mode toggle — always visible so power users can unlock advanced settings -->
+        <div class="mb-6 flex items-center justify-between p-3 rounded-xl border border-slate-200 bg-slate-50/50">
+            <div>
+                <span class="block text-xs font-semibold text-slate-700">Dev Mode</span>
+                <span class="block text-[10px] text-slate-400">Expose raw RAGFlow configuration for advanced users</span>
+            </div>
+            <button
+                class="px-3 py-1.5 rounded-lg text-xs font-bold transition-all
+                    {$settingsStore.debugMode ? 'bg-blue-600 text-white hover:bg-blue-700' : 'bg-slate-200 text-slate-600 hover:bg-slate-300'}"
+                onclick={() => settingsStore.update(s => ({ ...s, debugMode: !s.debugMode }))}
+                aria-label="Toggle Dev Mode"
+            >
+                {$settingsStore.debugMode ? 'ON' : 'OFF'}
+            </button>
+        </div>
+    {:else}
     <div class="mb-6 border border-blue-100 rounded-xl p-4 bg-blue-50/50">
-        <h4 class="text-xs font-bold text-blue-700 uppercase tracking-widest mb-3 flex items-center gap-2">
-            <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
-            RagFlow Intelligence Backend
+        <h4 class="text-xs font-bold text-blue-700 uppercase tracking-widest mb-3 flex items-center justify-between">
+            <span class="flex items-center gap-2">
+                <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+                RagFlow Backend (Dev Mode)
+            </span>
+            <button
+                class="px-2 py-0.5 rounded bg-blue-600 text-white text-[9px] font-bold uppercase hover:bg-blue-700"
+                onclick={() => settingsStore.update(s => ({ ...s, debugMode: false }))}
+                aria-label="Disable Dev Mode"
+                title="Disable Dev Mode"
+            >
+                Exit Dev
+            </button>
         </h4>
         <!-- Task 3.1: Connect audio recording to RagFlow — Worker URL -->
         <div class="mb-3">
@@ -286,19 +354,39 @@
                 placeholder="kb_lectures_prof_xyz"
             />
         </div>
-        <button
-            class="btn-primary w-full text-xs py-2"
-            onclick={saveRagflowConfig}
-        >
-            Save RagFlow Config
-        </button>
-        {#if $settingsStore.ragflowUrl}
+        <div class="flex gap-2">
+            <button
+                class="btn-primary flex-1 text-xs py-2"
+                onclick={saveRagflowConfig}
+            >
+                Save Config
+            </button>
+            <button
+                class="btn-primary flex-1 text-xs py-2"
+                onclick={testRagflowConnection}
+                disabled={ragflowTestStatus === 'testing' || !ragflowUrl.trim()}
+            >
+                {ragflowTestStatus === 'testing' ? 'Testing...' : 'Test Connection'}
+            </button>
+        </div>
+        {#if ragflowTestStatus === 'connected'}
             <p class="text-[10px] text-green-600 mt-2 flex items-center gap-1">
                 <span class="w-1.5 h-1.5 rounded-full bg-green-500 inline-block"></span>
                 Connected to: {$settingsStore.ragflowUrl}
             </p>
+        {:else if ragflowTestStatus === 'error'}
+            <p class="text-[10px] text-red-600 mt-2 flex items-center gap-1">
+                <span class="w-1.5 h-1.5 rounded-full bg-red-500 inline-block"></span>
+                Error: {ragflowTestError}
+            </p>
+        {:else if $settingsStore.ragflowUrl}
+            <p class="text-[10px] text-slate-400 mt-2 flex items-center gap-1">
+                <span class="w-1.5 h-1.5 rounded-full bg-slate-300 inline-block"></span>
+                URL saved — click "Test Connection" to verify
+            </p>
         {/if}
     </div>
+    {/if}
 
     <CognivoxControls onSettingsChange={handleSettingsChange} />
 </div>

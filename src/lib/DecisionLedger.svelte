@@ -100,8 +100,11 @@
                     A high-fidelity chronological record of organizational outcomes, strategic rationales, and verified stakeholders.
                 </p>
             </div>
-            <button class="bg-[#0b66ff] hover:bg-blue-600 text-white text-[12px] font-bold px-4 py-2.5 rounded-lg shadow-sm shadow-blue-500/30 flex items-center gap-2 transition-all active:scale-95">
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+            <button 
+                class="bg-[#0b66ff] hover:bg-blue-600 text-white text-[12px] font-bold px-4 py-2.5 rounded-lg shadow-sm shadow-blue-500/30 flex items-center gap-2 transition-all promax-interaction"
+                aria-label="Log New Decision"
+            >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
                 Log New Decision
             </button>
         </div>
@@ -156,7 +159,7 @@
                     <!-- Right Column: Content -->
                     <div class="flex-1 pr-6">
                         <!-- 3-dot Menu (absolute top right of card) -->
-                        <button class="absolute top-6 right-5 text-gray-300 hover:text-gray-500 transition-colors">
+                        <button class="absolute top-6 right-5 text-gray-300 hover:text-gray-500 transition-colors promax-interaction" aria-label="Decision actions">
                             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/></svg>
                         </button>
 
@@ -205,9 +208,9 @@
                 COGNIVOX Audit-Ready Ledger
             </div>
             <div class="flex items-center gap-5">
-                <a href="#" class="hover:text-gray-600 transition-colors">Data Security</a>
-                <a href="#" class="hover:text-gray-600 transition-colors">Privacy Policy</a>
-                <a href="#" class="hover:text-gray-600 transition-colors">Export Data</a>
+                <a href="javascript:void(0)" class="hover:text-gray-600 transition-colors">Data Security</a>
+                <a href="javascript:void(0)" class="hover:text-gray-600 transition-colors">Privacy Policy</a>
+                <a href="javascript:void(0)" class="hover:text-gray-600 transition-colors">Export Data</a>
                 <span class="text-gray-300">© 2023 Cognivox Systems</span>
             </div>
         </div>

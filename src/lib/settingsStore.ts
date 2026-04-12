@@ -22,6 +22,7 @@ export interface Settings {
     ragflowUrl: string;          // Server URL for the deployed RagFlow instance
     ragflowApiKey: string;       // LLM API key input into RagFlow (OpenAI or open-source)
     knowledgeBaseId: string;     // Active Knowledge Base ID for the current user/subject
+    ragflowConversationId: string; // Active RAGFlow chat conversation ID
     filters: {
         tasks: boolean;
         decisions: boolean;
@@ -61,10 +62,13 @@ const DEFAULT_SETTINGS: Settings = {
     autoConnect: false,
     debugMode: false,
     captureMode: 'both',
-    // Tasks 1.3 + 1.4 + 3.1: RagFlow defaults — empty until configured by user
-    ragflowUrl: '',
+    // ZERO_CONFIG_RAGFLOW_AUTO_SETUP_v1: ragflowUrl pre-points at the default
+    // native GPU instance. Bootstrap fills in apiKey (from bundled env) and
+    // knowledgeBaseId (auto-created "My Lectures" dataset) on first launch.
+    ragflowUrl: 'http://localhost:9380',
     ragflowApiKey: '',
     knowledgeBaseId: '',
+    ragflowConversationId: '',
     filters: {
         tasks: true,
         decisions: true,
@@ -101,6 +105,7 @@ function createSettingsStore() {
     const savedRagflowUrl = typeof localStorage !== 'undefined' ? localStorage.getItem('ragflow_url') : null;
     const savedRagflowApiKey = typeof localStorage !== 'undefined' ? localStorage.getItem('ragflow_api_key') : null;
     const savedKnowledgeBaseId = typeof localStorage !== 'undefined' ? localStorage.getItem('ragflow_kb_id') : null;
+    const savedRagflowConversationId = typeof localStorage !== 'undefined' ? localStorage.getItem('ragflow_conversation_id') : null;
     const savedUserTier = typeof localStorage !== 'undefined' ? localStorage.getItem('user_tier') : null; // MEETING_TASKS_v1: Task 1.3
     const savedAvailableModels = typeof localStorage !== 'undefined' ? localStorage.getItem('available_models') : null;
 
@@ -120,6 +125,7 @@ function createSettingsStore() {
         ragflowUrl: savedRagflowUrl || DEFAULT_SETTINGS.ragflowUrl,
         ragflowApiKey: savedRagflowApiKey || DEFAULT_SETTINGS.ragflowApiKey,
         knowledgeBaseId: savedKnowledgeBaseId || DEFAULT_SETTINGS.knowledgeBaseId,
+        ragflowConversationId: savedRagflowConversationId || DEFAULT_SETTINGS.ragflowConversationId,
     };
 
     const { subscribe, set, update } = writable<Settings>(initialState);
@@ -142,6 +148,7 @@ function createSettingsStore() {
                 localStorage.setItem('ragflow_url', value.ragflowUrl || '');
                 localStorage.setItem('ragflow_api_key', value.ragflowApiKey || '');
                 localStorage.setItem('ragflow_kb_id', value.knowledgeBaseId || '');
+                localStorage.setItem('ragflow_conversation_id', value.ragflowConversationId || '');
                 localStorage.setItem('available_models', JSON.stringify(value.availableModels));
             }
             set(value);
@@ -164,6 +171,7 @@ function createSettingsStore() {
                     localStorage.setItem('ragflow_url', next.ragflowUrl || '');
                     localStorage.setItem('ragflow_api_key', next.ragflowApiKey || '');
                     localStorage.setItem('ragflow_kb_id', next.knowledgeBaseId || '');
+                    localStorage.setItem('ragflow_conversation_id', next.ragflowConversationId || '');
                     localStorage.setItem('available_models', JSON.stringify(next.availableModels));
                 }
                 return next;

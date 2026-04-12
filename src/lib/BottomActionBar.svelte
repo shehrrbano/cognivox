@@ -63,46 +63,50 @@
     {/if}
 
     <button
-        class="btn-action {isCollapsed ? 'bg-blue-50' : ''}"
+        class="btn-action promax-interaction {isCollapsed ? 'bg-blue-50 border-blue-200 text-blue-600' : ''} min-h-[44px] px-5"
         onclick={toggleCollapse}
         disabled={transcripts.length === 0}
+        aria-label={isCollapsed ? "Expand Transcript" : "Collapse Transcript"}
     >
         <svg
             xmlns="http://www.w3.org/2000/svg"
-            width="12"
-            height="12"
+            width="14"
+            height="14"
             viewBox="0 0 24 24"
             fill="none"
             stroke="currentColor"
-            stroke-width="1"
+            stroke-width="2"
+            aria-hidden="true"
         >
             {#if isCollapsed}
-                <rect x="3" y="3" width="12" height="12" rx="2" ry="2"></rect>
+                <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
                 <line x1="3" y1="12" x2="21" y2="12"></line>
             {:else}
-                <rect x="3" y="3" width="12" height="12" rx="2" ry="2"></rect>
+                <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
                 <line x1="9" y1="3" x2="9" y2="21"></line>
             {/if}
         </svg>
-        {isCollapsed ? "Expand Transcript" : "Collapse Transcript"}
+        <span class="font-bold">{isCollapsed ? "Expand Transcript" : "Collapse Transcript"}</span>
     </button>
 
     <button
-        class="btn-action {showMemoriesPanel ? 'bg-purple-50' : ''}"
+        class="btn-action promax-interaction {showMemoriesPanel ? 'bg-purple-50 border-purple-200 text-purple-600' : ''} min-h-[44px] px-5"
         onclick={extractMemories}
         disabled={isExtractingMemories || transcripts.length === 0}
+        aria-label={isExtractingMemories ? "Extracting Memories" : "Extract Memories"}
     >
         {#if isExtractingMemories}
-            <span class="animate-spin">⏳</span>
+            <span class="animate-spin" aria-hidden="true">⏳</span>
         {:else}
             <svg
                 xmlns="http://www.w3.org/2000/svg"
-                width="12"
-                height="12"
+                width="14"
+                height="14"
                 viewBox="0 0 24 24"
                 fill="none"
                 stroke="currentColor"
-                stroke-width="1"
+                stroke-width="2"
+                aria-hidden="true"
             >
                 <circle cx="12" cy="12" r="3"></circle>
                 <circle cx="19" cy="5" r="2"></circle>
@@ -116,25 +120,27 @@
                 <line x1="9.5" y1="10.5" x2="5" y2="7"></line>
             </svg>
         {/if}
-        {isExtractingMemories ? "Extracting..." : "Extract Memories"}
+        <span class="font-bold">{isExtractingMemories ? "Extracting..." : "Extract Memories"}</span>
     </button>
 
     <button
-        class="btn-action {showSummaryPanel ? 'bg-green-50' : ''}"
+        class="btn-action promax-interaction {showSummaryPanel ? 'bg-green-50 border-green-200 text-green-600' : ''} min-h-[44px] px-5"
         onclick={extractSummary}
         disabled={isExtractingSummary || transcripts.length === 0}
+        aria-label={isExtractingSummary ? "Generating Summary" : "Generate Summary"}
     >
         {#if isExtractingSummary}
-            <span class="animate-spin">⏳</span>
+            <span class="animate-spin" aria-hidden="true">⏳</span>
         {:else}
             <svg
                 xmlns="http://www.w3.org/2000/svg"
-                width="12"
-                height="12"
+                width="14"
+                height="14"
                 viewBox="0 0 24 24"
                 fill="none"
                 stroke="currentColor"
-                stroke-width="1"
+                stroke-width="2"
+                aria-hidden="true"
             >
                 <path
                     d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"
@@ -145,7 +151,7 @@
                 <polyline points="10 9 9 9 8 9"></polyline>
             </svg>
         {/if}
-        {isExtractingSummary ? "Generating..." : "Summary"}
+        <span class="font-bold">{isExtractingSummary ? "Generating..." : "Summary"}</span>
     </button>
 
     <!-- MEETING_TASKS_v1: Task 2.2 — Audio Upload Button -->
@@ -159,25 +165,26 @@
         aria-hidden="true"
     />
     <button
-        class="btn-action"
+        class="btn-action promax-interaction min-h-[44px] px-5"
         onclick={triggerAudioUpload}
         title="Upload audio file for transcription"
         aria-label="Upload Audio File"
     >
         <svg
             xmlns="http://www.w3.org/2000/svg"
-            width="12"
-            height="12"
+            width="14"
+            height="14"
             viewBox="0 0 24 24"
             fill="none"
             stroke="currentColor"
-            stroke-width="1"
+            stroke-width="2"
+            aria-hidden="true"
         >
             <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
             <polyline points="17 8 12 3 7 8"></polyline>
             <line x1="12" y1="3" x2="12" y2="15"></line>
         </svg>
-        Upload Audio
+        <span class="font-bold">Upload Audio</span>
     </button>
 
     <!-- Diamond Icon -->

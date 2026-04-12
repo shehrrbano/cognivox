@@ -47,16 +47,16 @@
     <div class="flex items-center gap-4">
         <!-- Universal Menu Toggle -->
         <button
-            class="p-2 rounded-xl bg-slate-50 text-slate-500 hover:bg-blue-50 hover:text-blue-600 transition-all duration-300 active:scale-95 border border-slate-100 shadow-sm flex-shrink-0"
+            class="min-h-[44px] min-w-[44px] p-2 rounded-xl bg-slate-50 text-slate-500 hover:bg-blue-50 hover:text-blue-600 transition-all duration-200 promax-interaction border border-slate-100 shadow-sm flex-shrink-0 flex items-center justify-center"
             onclick={() => {
                 ontoggleSidebar();
             }}
-            aria-label="Toggle Sidebar"
+            aria-label={isSidebarOpen ? "Close Sidebar" : "Open Sidebar"}
         >
             {#if isSidebarOpen}
-                <svg xmlns="http://www.w3.org/2000/svg" width="11.25" height="11.25" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
             {:else}
-                <svg xmlns="http://www.w3.org/2000/svg" width="11.25" height="11.25" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
             {/if}
         </button>
 
@@ -90,7 +90,7 @@
                 </div>
 
                 <!-- Timer -->
-                <span class="text-sm font-mono font-bold text-red-600 tracking-wider">
+                <span class="text-sm font-mono font-bold text-red-600 tracking-wider tabular-nums">
                     {formatTime(recordingSeconds)}
                 </span>
 
@@ -149,15 +149,16 @@
     <!-- Right: Actions -->
     <div class="flex items-center gap-3">
         <!-- Settings Quick Access -->
-        <button class="icon-btn" onclick={openSettings} aria-label="Settings">
+        <button class="icon-btn promax-interaction min-h-[44px] min-w-[44px] flex items-center justify-center p-2.5" onclick={openSettings} aria-label="Open Settings">
             <svg
                 xmlns="http://www.w3.org/2000/svg"
-                width="10"
-                height="10"
+                width="18"
+                height="18"
                 viewBox="0 0 24 24"
                 fill="none"
                 stroke="currentColor"
-                stroke-width="1"
+                stroke-width="1.8"
+                aria-hidden="true"
             >
                 <circle cx="12" cy="12" r="3"></circle>
                 <path
@@ -198,7 +199,7 @@
         <button
             class="{isRecording
                 ? 'bg-gradient-to-r from-red-600 to-red-500 hover:from-red-700 hover:to-red-600 text-white shadow-red-200 ring-2 ring-red-100 border-red-400'
-                : 'btn-primary'} flex items-center gap-2 px-4 py-2 rounded-xl font-bold text-sm transition-all duration-300 active:scale-95 shadow-sm border"
+                : 'btn-primary'} flex items-center gap-2 px-4 py-2 min-h-[44px] rounded-xl font-bold text-sm transition-all duration-200 promax-interaction shadow-sm border"
             onclick={toggleCapture}
             disabled={isProcessing || (isRecordingStarting && !isRecording)}
         >

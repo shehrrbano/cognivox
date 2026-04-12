@@ -16,7 +16,9 @@ Cognivox follows a clear separation of concerns between its reactive frontend (S
 3. **Transcription**: `whisper_client.rs` converts audio to text.
 4. **Identification**: `speaker_id.rs` attributes speech to specific individuals.
 5. **Intelligence**: `gemini_client.rs` sends transcripts to the Gemini API for tone, summary, and graph extraction.
-7. **Persistence**: `session_manager.rs` (Local) and `firestoreSessionManager.ts` (Cloud) save the session data.
+7. **Persistence**: `session_manager.rs` (Local) saves the session data. All storage is local-only (Firebase removed in COMPLETE_FIREBASE_REMOVAL_v1).
+8. **RAG Intelligence**: `ragflowService.ts` ingests transcripts into RAGFlow datasets for GPU-accelerated parsing + embedding. `RAGFlowChat.svelte` provides grounded Q&A via RAGFlow chat API with auto KG zoom.
+9. **Zero-Config Bootstrap**: `ragflowBootstrap.ts` runs in `+page.svelte` onMount. It applies the bundled default URL (`VITE_RAGFLOW_DEFAULT_URL`) + bundled API key (`VITE_RAGFLOW_DEFAULT_API_KEY`), probes RAGFlow with retries, auto-creates the `My Lectures` dataset, and pre-warms a conversation. End users never see URL, API key, or dataset picker UI (unless they flip on `debugMode` / Dev Mode).
 
 ## Knowledge Graph Logic Flow
 ```mermaid
@@ -50,6 +52,14 @@ graph LR
 > **Target Scale**: 0.67
 > **Date**: 2026-03-20
 > **Status**: SCALED_TO_67_PERCENT (Replaced by UPSCALE_v1)
+
+> [!IMPORTANT] RAGFLOW_FULL_FEATURE_VERIFICATION_v1 STAMP
+> **Date**: 2026-04-10
+> **Status**: ALL 20 RAGFlow features verified. 6 fixes applied (deleteDataset, listDocuments, deleteDocuments, dead ternary fix, isRAGFlowConfigured precedence fix, SettingsTab Test Connection button). 0 new errors.
+
+> [!IMPORTANT] ZERO_CONFIG_RAGFLOW_AUTO_SETUP_v1 STAMP
+> **Date**: 2026-04-11 09:09
+> **Status**: App is plug-and-play. `ragflowBootstrap.ts` wires URL + API key + `My Lectures` dataset + conversation on every launch. Normal users never see setup UI. Dev Mode (reuses `debugMode`) unlocks the legacy RAGFlow config panel for power users.
 
 > [!IMPORTANT] GLOBAL_UI_SCALER_UP_v1 STAMP
 > **Target Scale**: 1.25 (125% of ORIGINAL baseline)

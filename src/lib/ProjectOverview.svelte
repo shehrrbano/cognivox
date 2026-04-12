@@ -114,11 +114,11 @@
                 </p>
             </div>
             <div class="flex items-center gap-3">
-                <button class="bg-white border border-gray-200 text-gray-700 hover:bg-gray-50 text-[12px] font-bold px-4 py-2.5 rounded-lg shadow-sm flex items-center gap-2 transition-all">
+                <button class="bg-white border border-gray-200 text-gray-700 hover:bg-gray-50 text-[12px] font-bold px-4 py-2.5 rounded-lg shadow-sm flex items-center gap-2 transition-all promax-interaction" aria-label="Undo last action">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M3 7v6h6"/><path d="M21 17a9 9 0 00-9-9 9 9 0 00-6 2.3L3 13"/></svg>
                     Undo Last Action
                 </button>
-                <button class="bg-[#0b66ff] hover:bg-blue-600 text-white text-[12px] font-bold px-4 py-2.5 rounded-lg shadow-sm shadow-blue-500/30 flex items-center gap-2 transition-all">
+                <button class="bg-[#0b66ff] hover:bg-blue-600 text-white text-[12px] font-bold px-4 py-2.5 rounded-lg shadow-sm shadow-blue-500/30 flex items-center gap-2 transition-all promax-interaction" aria-label="Create new task">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
                     New Task
                 </button>
@@ -229,7 +229,7 @@
             <div class="bg-white p-6 rounded-2xl border border-gray-100 shadow-[0_2px_15px_-5px_rgba(0,0,0,0.05)] h-[280px] flex flex-col">
                 <div class="flex justify-between items-center mb-5">
                     <h2 class="text-[16px] font-black text-gray-900 tracking-tight">Priority Risks</h2>
-                    <a href="#" class="text-[11px] font-bold text-[#0b66ff] hover:underline">View All</a>
+                    <a href="javascript:void(0)" class="text-[11px] font-bold text-[#0b66ff] hover:underline" aria-label="View all priority risks">View All</a>
                 </div>
 
                 <div class="flex-1 space-y-3 overflow-y-auto no-scrollbar pr-1">
@@ -341,8 +341,8 @@
                                 <!-- Col 6: Actions -->
                                 <td class="py-4 pr-4">
                                     <div class="flex items-center justify-end gap-3 text-gray-400">
-                                        <button class="hover:text-blue-500 transition-colors"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg></button>
-                                        <button class="hover:text-red-500 transition-colors"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
+                                        <button class="hover:text-blue-500 transition-colors promax-interaction" aria-label="Edit mitigation item"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg></button>
+                                        <button class="hover:text-red-500 transition-colors promax-interaction" aria-label="Delete mitigation item"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
                                     </div>
                                 </td>
                             </tr>

@@ -27,6 +27,43 @@ Cognivox is a passive meeting intelligence engine designed to capture, transcrib
     - **YELLOW**: 6 files
     - **RED**: 0 files
 
+> [!IMPORTANT] ZERO_CONFIG_RAGFLOW_AUTO_SETUP_v1 STAMP
+> **Date**: 2026-04-11 09:09
+> **Status**: COMPLETE — App is 100% plug-and-play. Zero manual RAGFlow setup required.
+> Files created: `src/lib/services/ragflowBootstrap.ts` (idempotent auto-bootstrap: applies bundled URL/API key → probes RAGFlow → auto-creates "My Lectures" dataset → pre-warms conversation → retries 10×3s).
+> Files modified: `src/lib/settingsStore.ts` (default `ragflowUrl='http://localhost:9380'`), `src/routes/+page.svelte` (onMount bootstrap + save-hook fallback + non-blocking retry on first ingest), `src/lib/RAGFlowChat.svelte` (three legacy setup empty-states replaced by single "Warming up Study Buddy" spinner; dev-mode gate for diagnostics), `src/lib/SettingsTab.svelte` (entire RagFlow URL/API/KB panel hidden unless `debugMode` — Dev Mode toggle surfaced in normal view), `.env.example` (new `VITE_RAGFLOW_DEFAULT_URL` / `VITE_RAGFLOW_DEFAULT_API_KEY` build-time vars for bundled credentials).
+> Architecture: Launch → onMount → initializeRAGFlowAutoSetup() → applyBundledDefaults → probe → ensureDefaultDataset("My Lectures") → createConversation → READY. Every recording's final save auto-triggers `ingestTranscriptArray`. Normal users never see URL/API key/KB ID fields. `debugMode` is the single Dev Mode gate.
+> Build: 17 errors → 17 errors (zero new). Zero new npm deps. Zero new Tauri commands.
+> Folder: `CODEBASE_INDEX/ZERO_CONFIG_RAGFLOW_AUTO_SETUP_v1/`
+
+> [!IMPORTANT] RAGFLOW_NATIVE_GPU_INTEGRATION_v1 STAMP
+> **Date**: 2026-04-10
+> **Status**: COMPLETE — RAGFlow native GPU backend integrated as core intelligence engine
+> **SUPERSEDED UX**: Setup screens removed by `ZERO_CONFIG_RAGFLOW_AUTO_SETUP_v1`. Bootstrap service now owns URL/API/dataset wiring.
+> Files created: `src/lib/services/ragflowService.ts` (RAGFlow REST API client — datasets, documents, chat, search), `src/lib/RAGFlowChat.svelte` (Study Buddy chat UI with source citations + KG auto-zoom)
+> Files modified: `src/routes/+page.svelte` (RAGFlowChat import, chat tab rendering, transcript ingestion on final save, auto-zoom handler), `src/lib/Sidebar.svelte` (added "Study Buddy" chat tab), `src/lib/settingsStore.ts` (added ragflowConversationId field + localStorage persistence)
+> Architecture: Audio → Whisper → Transcript → RAGFlow Dataset (GPU parsing). Question → RAGFlow Chat (GPU: embed + vector search + rerank + LLM) → Grounded Answer + Source Citations → Auto KG zoom.
+> RAGFlow is OPTIONAL — app works fully without it. Zero new npm dependencies (uses native fetch).
+> Folder: `CODEBASE_INDEX/RAGFLOW_NATIVE_GPU_INTEGRATION_v1/`
+
+> [!IMPORTANT] RAGFLOW_FULL_FEATURE_VERIFICATION_v1 STAMP
+> **Date**: 2026-04-10
+> **Status**: COMPLETE — ALL 20 RAGFLOW FEATURES VERIFIED, 6 FIXES APPLIED, 0 REGRESSIONS
+> **SUPERSEDED UX**: Setup/Test Connection UI replaced by auto-bootstrap in `ZERO_CONFIG_RAGFLOW_AUTO_SETUP_v1`. All 20 API features still work; users simply no longer need to trigger them manually.
+> Fixes applied: (1) Added `deleteDataset()` for complete dataset lifecycle. (2) Added `listDocuments()` + `deleteDocuments()` for document management. (3) Fixed dead ternary in `askQuestion()`. (4) Fixed `isRAGFlowConfigured()` operator precedence bug. (5) Added "Test Connection" button to SettingsTab with real status check.
+> Files modified: `src/lib/services/ragflowService.ts` (3 new API functions + 2 bug fixes), `src/lib/SettingsTab.svelte` (Test Connection button + status display)
+> Build: 17 errors → 17 errors (0 new, 0 RAGFlow-related)
+> Folder: `CODEBASE_INDEX/RAGFLOW_FULL_FEATURE_VERIFICATION_v1/`
+
+> [!CAUTION] COMPLETE_FIREBASE_REMOVAL_v1 STAMP
+> **Date**: 2026-04-10
+> **Status**: COMPLETE — ALL FIREBASE CODE REMOVED — APP 100% LOCAL-ONLY STORAGE
+> Files deleted: `src/lib/firebase.ts`, `src/lib/firestoreSessionManager.ts`, `src/routes/+page.svelte.bak`
+> Files modified: `src/routes/+page.svelte` (removed Firebase imports, initFirebase, waitForAuth, syncSessionToCloud), `src/lib/services/sessionService.ts` (removed FirestoreSessionManager import, cloud fallback in loadFullSession, cloud merge in fetchAllSessions, syncSessionToCloud function, cloud delete), `src/lib/SessionManager.svelte` (complete rewrite — removed auth UI, Google sign-in, cloud status, sync button; kept save/load/export/summary as local-only), `src/lib/KnowledgeGraph.svelte` (updated comments), `.env.example` (removed VITE_FIREBASE_* vars), `package.json` (removed firebase dependency)
+> Architecture: Local-First,Cloud-Optional → **Local-Only**. All session persistence uses Tauri `save_session`/`load_session`/`list_sessions` commands exclusively.
+> Zero Firebase references remain in src/. Zero Firebase dependencies in package.json.
+> Folder: `CODEBASE_INDEX/COMPLETE_FIREBASE_REMOVAL_v1/`
+
 > [!IMPORTANT] KG_FEED_MAP_UNIFICATION_SYNC_AND_BUTTON_FIX_v1 STAMP
 > **Date**: 2026-03-26 02:00
 > **Status**: COMPLETE — ALL KG BUTTONS FUNCTIONAL, FEED/MAP UNIFIED, SESSION RESTORE FIXED

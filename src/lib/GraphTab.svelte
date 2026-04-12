@@ -70,15 +70,17 @@
                     <!-- KG_CLEANUP_SELF_HEALING_v1: Self-heal button removes junk nodes instantly -->
                     <button
                         onclick={handleSelfHeal}
-                        class="px-2 py-1 text-xs rounded bg-amber-50 hover:bg-amber-100 text-amber-600 hover:text-amber-700 border border-amber-200 transition-colors font-medium"
+                        class="px-2.5 py-1.5 text-xs rounded-lg bg-amber-50 hover:bg-amber-100 text-amber-600 hover:text-amber-700 border border-amber-200 transition-all promax-interaction font-bold min-h-[32px] flex items-center gap-1"
                         title="Remove noise nodes and deduplicate (instant, no API call)"
+                        aria-label="Clean up knowledge graph"
                     >
                         ✦ Clean Up
                     </button>
                     <button
                         onclick={handleClearGraph}
-                        class="px-2 py-1 text-xs rounded bg-gray-100/50 hover:bg-slate-600/50 text-gray-500 hover:text-gray-800 border border-slate-600/30 transition-colors"
+                        class="px-2.5 py-1.5 text-xs rounded-lg bg-gray-100/50 hover:bg-slate-600/50 text-gray-500 hover:text-gray-800 border border-slate-600/30 transition-all promax-interaction min-h-[32px] flex items-center justify-center font-bold"
                         title="Clear graph"
+                        aria-label="Clear knowledge graph"
                     >
                         Clear
                     </button>
@@ -86,15 +88,16 @@
                 <button
                     onclick={handleGenerateGraph}
                     disabled={isGenerating || transcripts.length === 0}
-                    class="px-3 py-1 text-xs rounded font-medium transition-all
+                    class="px-3 py-1.5 min-h-[32px] text-xs rounded-lg font-bold transition-all promax-interaction
                         {isGenerating
                         ? 'bg-blue-50 text-blue-400 cursor-wait'
                         : transcripts.length === 0
-                          ? 'bg-gray-100/30 text-gray-400 cursor-not-allowed'
-                          : 'bg-blue-50 hover:bg-blue-100 text-blue-500 hover:text-blue-400 border border-blue-300'}"
+                          ? 'bg-gray-100/30 text-gray-400 cursor-not-allowed opacity-50'
+                          : 'bg-blue-600 hover:bg-blue-700 text-white shadow-sm shadow-blue-500/20'}"
                     title={transcripts.length === 0
                         ? "Record a conversation first"
                         : "Generate knowledge graph from transcripts"}
+                    aria-label={graphNodes.length > 0 ? "Regenerate Graph" : "Generate Graph"}
                 >
                     {#if isGenerating}
                         <span class="flex items-center gap-1">

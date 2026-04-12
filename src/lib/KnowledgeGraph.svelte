@@ -101,7 +101,7 @@
             // Do NOT overwrite positions if the node already has a valid coordinate in the Map.
             // This prevents manual moves from being "snapped back" when new intelligence arrives.
             if (!positions[node.id]) {
-                // Try restore from initialPositions first (Firestore)
+                // Try restore from initialPositions first (saved session)
                 if (initialPositions && initialPositions[node.id]) {
                     const saved = initialPositions[node.id];
                     positions[node.id] = {
@@ -273,7 +273,7 @@
         if (draggedNode) {
             const pos = positions[draggedNode];
             if (pos) {
-                // [PERSISTENCE_v1] Dispatch layout change immediately after drag to sync with Firestore
+                // [PERSISTENCE_v1] Dispatch layout change immediately after drag to sync with local storage
                 const serializable: Record<string, { x: number, y: number }> = {};
                 Object.entries(positions).forEach(([k, v]) => {
                     serializable[k] = { x: v.x, y: v.y };
@@ -1281,11 +1281,12 @@
                 <div class="relative w-20 h-20 mx-auto mb-6">
                     <div class="absolute inset-0 bg-blue-500/10 rounded-full blur-2xl group-hover:bg-blue-500/20 transition-all duration-700"></div>
                     <svg
-                        class="relative z-10 w-full h-full text-blue-500/40 group-hover:text-blue-500/60 transition-all duration-700 active:scale-95"
+                        class="relative z-10 w-full h-full text-blue-500/40 group-hover:text-blue-500/60 transition-all promax-interaction"
                         viewBox="0 0 24 24"
                         fill="none"
                         stroke="currentColor"
                         stroke-width="1.2"
+                        aria-hidden="true"
                     >
                         <circle cx="12" cy="12" r="3" class="animate-pulse" />
                         <circle cx="4" cy="4" r="2" />

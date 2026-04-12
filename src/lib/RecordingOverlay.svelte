@@ -85,7 +85,7 @@
                         <!-- PROMINENT STOP BUTTON -->
                         <button
                             onclick={() => ontoggleCapture()}
-                            class="flex items-center gap-1.5 px-3 py-1.5 sm:px-4 sm:py-2 bg-white hover:bg-red-50 text-red-700 font-black text-xs sm:text-sm rounded-lg border-2 border-red-300 hover:border-red-500 transition-all duration-150 active:scale-95 shadow-md tracking-widest uppercase"
+                            class="flex items-center gap-1.5 px-3 py-1.5 sm:px-4 sm:py-2 bg-white hover:bg-red-50 text-red-700 font-black text-xs sm:text-sm rounded-lg border-2 border-red-300 hover:border-red-500 transition-all promax-interaction shadow-md tracking-widest uppercase"
                             aria-label="Stop Recording"
                         >
                             <div class="w-2.5 h-2.5 bg-red-600 rounded-sm flex-shrink-0"></div>

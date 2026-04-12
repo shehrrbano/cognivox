@@ -132,7 +132,7 @@
         <div class="flex justify-between items-center mb-6">
             <h1 class="text-[18px] font-black text-gray-900 tracking-tight">Analytics Dashboard</h1>
             <div class="flex items-center gap-4">
-                <button class="text-gray-400 hover:text-gray-600">
+                <button class="text-gray-400 hover:text-gray-600 transition-all promax-interaction" aria-label="Toggle notifications">
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.63-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.64 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2zm-2 1H8v-6c0-2.48 1.51-4.5 4-4.5s4 2.02 4 4.5v6z"/></svg>
                 </button>
                 <button class="bg-[#0b66ff] hover:bg-blue-600 text-white text-[12px] font-bold px-4 py-2 rounded-lg shadow-sm shadow-blue-500/30 flex items-center gap-2 transition-all">

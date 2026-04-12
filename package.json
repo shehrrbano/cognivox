@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite dev",
+    "dev:ragflow": "node scripts/start-ragflow.mjs",
+    "dev:full": "node scripts/start-ragflow.mjs && vite dev",
     "build": "vite build",
     "preview": "vite preview",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
@@ -16,8 +18,7 @@
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-dialog": "^2.4.2",
     "@tauri-apps/plugin-fs": "^2.4.4",
-    "@tauri-apps/plugin-opener": "^2",
-    "firebase": "^12.9.0"
+    "@tauri-apps/plugin-opener": "^2"
   },
   "devDependencies": {
     "@sveltejs/adapter-static": "^3.0.6",

@@ -110,16 +110,16 @@
                 </span>
             </div>
             <div class="flex items-center gap-2">
-                <span class="text-[9px] font-bold text-gray-400 bg-white px-2 py-0.5 rounded border border-gray-200 shadow-sm">{transcripts.length} ENTRIES</span>
+                <span class="text-[9px] font-bold text-gray-400 bg-white px-2 py-0.5 rounded border border-gray-200 shadow-sm tabular-nums">{transcripts.length} ENTRIES</span>
                 <!-- MEETING_TASKS_v1: Task 3.2 — Export to .txt button -->
                 {#if transcripts.length > 0}
                     <button
                         onclick={exportTranscriptAsTxt}
                         title="Export transcript as .txt"
-                        class="flex items-center gap-1 text-[9px] font-bold text-gray-400 bg-white hover:text-blue-600 hover:border-blue-200 px-2 py-0.5 rounded border border-gray-200 shadow-sm transition-colors"
+                        class="flex items-center gap-1 text-[9px] font-bold text-gray-400 bg-white hover:text-blue-600 hover:border-blue-200 px-2 py-0.5 rounded border border-gray-200 shadow-sm transition-all promax-interaction"
                         aria-label="Export transcript as text file"
                     >
-                        <svg class="w-2.5 h-2.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                        <svg class="w-2.5 h-2.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true">
                             <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
                             <polyline points="7 10 12 15 17 10"/>
                             <line x1="12" y1="15" x2="12" y2="3"/>
@@ -170,9 +170,10 @@
                                 <span class="text-[9px] font-medium text-gray-400">{t.timestamp || new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</span>
                                 <!-- Task 2.3 (BATCH2): Inline rename button — hidden until hover -->
                                 <button
-                                    class="opacity-0 group-hover:opacity-100 transition-opacity text-[8px] text-gray-400 hover:text-blue-500 px-1.5 py-0.5 rounded border border-gray-200 hover:border-blue-300 bg-white ml-auto"
+                                    class="opacity-0 group-hover:opacity-100 transition-all promax-interaction text-[8px] text-gray-400 hover:text-blue-500 px-1.5 py-0.5 rounded border border-gray-200 hover:border-blue-300 bg-white ml-auto"
                                     onclick={() => renameSpeakerInline(t.speakerId?.toString(), speakerLabel)}
                                     title="Rename this speaker"
+                                    aria-label="Rename speaker {speakerLabel}"
                                 >✏ Rename</button>
                             </div>
                             
