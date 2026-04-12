@@ -120,18 +120,23 @@ export async function checkRAGFlowStatus(): Promise<RAGFlowStatus> {
         return { connected: false, error: 'RAGFlow URL not configured' };
     }
 
+    const url = `${config.baseUrl}/api/v1/datasets?page=1&page_size=1`;
+    console.log(`[RAGFlow] Checking status at: ${url}`);
     try {
-        const resp = await fetch(`${config.baseUrl}/api/v1/datasets?page=1&page_size=1`, {
+        const resp = await fetch(url, {
             method: 'GET',
             headers: getHeaders(config.apiKey),
             signal: AbortSignal.timeout(5000),
         });
+        console.log(`[RAGFlow] Status response: ${resp.status}`);
         if (resp.ok) {
             return { connected: true, version: 'native-gpu' };
         }
         const text = await resp.text();
+        console.warn(`[RAGFlow] Status check failed: ${resp.status}`, text);
         return { connected: false, error: `HTTP ${resp.status}: ${text.slice(0, 200)}` };
     } catch (e: any) {
+        console.error('[RAGFlow] Status check exception:', e);
         return { connected: false, error: e?.message || 'Connection failed' };
     }
 }
@@ -410,7 +415,9 @@ Rules:
 export async function askQuestion(
     conversationId: string,
     question: string,
+    datasetId?: string,
 ): Promise<RAGFlowAnswer> {
+
     const emptyAnswer: RAGFlowAnswer = {
         answer: '',
         chunks: [],
@@ -419,14 +426,18 @@ export async function askQuestion(
     };
 
     const config = getConfig();
-    if (!config.knowledgeBaseId) {
+    const activeDsId = datasetId || config.knowledgeBaseId;
+    
+    if (!activeDsId) {
         emptyAnswer.answer = 'No knowledge base configured. Please check your RAGFlow settings.';
         return emptyAnswer;
     }
 
+
     try {
         // Step 1: Retrieve relevant chunks from RAGFlow
-        const chunks = await searchChunks(question, 8);
+        const chunks = await searchChunks(question, 8, activeDsId);
+
 
         if (chunks.length === 0) {
             emptyAnswer.answer = 'No relevant content found in your knowledge base. Try uploading some lecture recordings or documents first, then ask again.';
@@ -589,23 +600,33 @@ function extractEntitiesFromAnswer(answer: string): string[] {
 export async function searchChunks(
     query: string,
     topK: number = 5,
+    datasetId?: string,
 ): Promise<RAGFlowChunk[]> {
-    const config = getConfig();
-    if (!config.knowledgeBaseId) return [];
 
+    const config = getConfig();
+    const activeDsId = datasetId || config.knowledgeBaseId;
+    if (!activeDsId) return [];
+
+
+    const url = `${config.baseUrl}/api/v1/retrieval`;
+    console.log(`[RAGFlow] Searching chunks at: ${url}`, { query, kb_ids: [activeDsId] });
     try {
-        const resp = await fetch(`${config.baseUrl}/api/v1/retrieval`, {
+        const resp = await fetch(url, {
             method: 'POST',
             headers: getHeaders(config.apiKey),
             body: JSON.stringify({
                 question: query,
-                dataset_ids: [config.knowledgeBaseId],
+                dataset_ids: [activeDsId],
+                kb_ids: [activeDsId], // Included as alias for compatibility
                 top_k: topK,
             }),
+
         });
+        console.log(`[RAGFlow] Search response: ${resp.status}`);
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const data = await resp.json();
-        return (data.data?.chunks || []).map((c: any) => ({
+        const chunks = Array.isArray(data.data) ? data.data : (data.data?.chunks || []);
+        return chunks.map((c: any) => ({
             id: c.id || '',
             content: c.content || '',
             document_id: c.document_id || '',
@@ -616,5 +637,58 @@ export async function searchChunks(
     } catch (e: any) {
         console.error('[RAGFlow] Search failed:', e);
         return [];
+    }
+}
+
+/**
+ * Extract entities and relationships from a list of RAGFlow chunks.
+ * Uses Gemini to build a Knowledge Graph from the raw material.
+ */
+export async function buildGraphFromMaterials(chunks: RAGFlowChunk[]): Promise<{ nodes: any[], edges: any[] }> {
+    if (chunks.length === 0) return { nodes: [], edges: [] };
+
+    const apiKey = keyManager.getCurrentKey()?.key;
+    if (!apiKey) throw new Error('Gemini API key required for graph extraction');
+
+    const combinedText = chunks.map((c, i) => `[Excerpt ${i + 1}]\n${c.content}`).join('\n\n');
+    
+    const settings = get(settingsStore);
+    const model = settings.geminiModel || 'gemini-1.5-flash';
+
+    const prompt = `
+        Analyze the following excerpts and extract a structured Knowledge Graph of the most important concepts.
+        Provide the output in JSON format with 'nodes' (id, label, type, description) and 'edges' (source, target, label).
+        
+        Focus on defining the core subject matter and how the concepts interconnect.
+        
+        --- MATERIALS ---
+        ${combinedText}
+        --- END MATERIALS ---
+    `;
+
+    try {
+        const resp = await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+            {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    contents: [{ parts: [{ text: prompt }] }],
+                    generationConfig: { response_mime_type: "application/json" }
+                }),
+            }
+        );
+
+        if (!resp.ok) throw new Error(`Gemini Error: ${resp.status}`);
+        const data = await resp.json();
+        const json = JSON.parse(data.candidates?.[0]?.content?.parts?.[0]?.text || '{}');
+        
+        return {
+            nodes: json.nodes || [],
+            edges: json.edges || []
+        };
+    } catch (e: any) {
+        console.error('[RAGFlow] Graph extraction failed:', e);
+        return { nodes: [], edges: [] };
     }
 }

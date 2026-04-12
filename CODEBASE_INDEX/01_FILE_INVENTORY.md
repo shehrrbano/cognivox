@@ -89,7 +89,14 @@ This inventory provides a central location to access the detailed analysis for e
 | src-tauri/src/speaker_id.rs | [CODE] | [SCANNED] | [View Report](./FILES/src-tauri/src/speaker_id.rs.md) |
 | src-tauri/src/whisper_client.rs | [CODE] | [SCANNED] | [View Report](./FILES/src-tauri/src/whisper_client.rs.md) |
 | src-tauri/target/... | [OTHER] | [SCANNED] | [View Target Directory](./FILES/src-tauri/target/) |
+| src/lib/CourseCreationModal.svelte | [CODE] | [SCANNED] | [View Report](./FILES/src/lib/CourseCreationModal.svelte.md) |
+| src/lib/CourseInterface.svelte | [CODE] | [SCANNED] | [View Report](./FILES/src/lib/CourseInterface.svelte.md) |
+| src/lib/CourseMemoryScreen.svelte | [CODE] | [SCANNED] | [View Report](./FILES/src/lib/CourseMemoryScreen.svelte.md) |
+| src/lib/CoursesView.svelte | [CODE] | [SCANNED] | [View Report](./FILES/src/lib/CoursesView.svelte.md) |
+| src/lib/courseStore.ts | [CODE] | [SCANNED] | [View Report](./FILES/src/lib/courseStore.ts.md) |
+| src/lib/services/courseParsingService.ts | [CODE] | [SCANNED] | [View Report](./FILES/src/lib/services/courseParsingService.ts.md) |
 | static/cyber_eye.png | [OTHER] | [SCANNED] | [View Report](./FILES/static/cyber_eye.png.md) |
+
 | static/favicon.png | [OTHER] | [SCANNED] | [View Report](./FILES/static/favicon.png.md) |
 | static/gemini_conduit.png | [OTHER] | [SCANNED] | [View Report](./FILES/static/gemini_conduit.png.md) |
 | static/knowledge_graph_bg.png | [OTHER] | [SCANNED] | [View Report](./FILES/static/knowledge_graph_bg.png.md) |

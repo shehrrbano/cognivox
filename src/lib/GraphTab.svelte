@@ -6,22 +6,39 @@
     import KnowledgeGraph from "./KnowledgeGraph.svelte";
     import type { GraphNode, GraphEdge, Transcript } from "./types";
 
+    interface Props {
+        graphNodes?: GraphNode[];
+        graphEdges?: GraphEdge[];
+        transcripts?: Transcript[];
+        isGenerating?: boolean;
+        searchQuery?: string;
+        isRecording?: boolean;
+        isRecordingStarting?: boolean;
+        initialPositions?: any;
+        hideToolbar?: boolean;
+        ongenerateGraph?: () => void;
+        onclearGraph?: () => void;
+        onselfHealGraph?: () => void;
+        ontoggleCluster?: (d: { nodeId: string }) => void;
+        onlayoutChanged?: (d: { positions: any }) => void;
+    }
+
     let {
-        graphNodes = [] as GraphNode[],
-        graphEdges = [] as GraphEdge[],
-        transcripts = [] as Transcript[],
+        graphNodes = [],
+        graphEdges = [],
+        transcripts = [],
         isGenerating = false,
         searchQuery = "",
         isRecording = false,
         isRecordingStarting = false,
-        initialPositions = null as any,
-        // Callback props (Svelte 5 style — replaces createEventDispatcher)
-        ongenerateGraph = undefined as (() => void) | undefined,
-        onclearGraph = undefined as (() => void) | undefined,
-        onselfHealGraph = undefined as (() => void) | undefined,
-        ontoggleCluster = undefined as ((d: { nodeId: string }) => void) | undefined,
-        onlayoutChanged = undefined as ((d: { positions: any }) => void) | undefined,
-    } = $props();
+        initialPositions = null,
+        hideToolbar = false,
+        ongenerateGraph,
+        onclearGraph,
+        onselfHealGraph,
+        ontoggleCluster,
+        onlayoutChanged,
+    }: Props = $props();
 
     let graphRef = $state<any>(null);
 
@@ -65,79 +82,86 @@
                     </div>
                 </div>
             </div>
-            <div class="flex items-center gap-2">
-                {#if graphNodes.length > 0}
-                    <!-- KG_CLEANUP_SELF_HEALING_v1: Self-heal button removes junk nodes instantly -->
-                    <button
-                        onclick={handleSelfHeal}
-                        class="px-2.5 py-1.5 text-xs rounded-lg bg-amber-50 hover:bg-amber-100 text-amber-600 hover:text-amber-700 border border-amber-200 transition-all promax-interaction font-bold min-h-[32px] flex items-center gap-1"
-                        title="Remove noise nodes and deduplicate (instant, no API call)"
-                        aria-label="Clean up knowledge graph"
-                    >
-                        ✦ Clean Up
-                    </button>
-                    <button
-                        onclick={handleClearGraph}
-                        class="px-2.5 py-1.5 text-xs rounded-lg bg-gray-100/50 hover:bg-slate-600/50 text-gray-500 hover:text-gray-800 border border-slate-600/30 transition-all promax-interaction min-h-[32px] flex items-center justify-center font-bold"
-                        title="Clear graph"
-                        aria-label="Clear knowledge graph"
-                    >
-                        Clear
-                    </button>
-                {/if}
-                <button
-                    onclick={handleGenerateGraph}
-                    disabled={isGenerating || transcripts.length === 0}
-                    class="px-3 py-1.5 min-h-[32px] text-xs rounded-lg font-bold transition-all promax-interaction
-                        {isGenerating
-                        ? 'bg-blue-50 text-blue-400 cursor-wait'
-                        : transcripts.length === 0
-                          ? 'bg-gray-100/30 text-gray-400 cursor-not-allowed opacity-50'
-                          : 'bg-blue-600 hover:bg-blue-700 text-white shadow-sm shadow-blue-500/20'}"
-                    title={transcripts.length === 0
-                        ? "Record a conversation first"
-                        : "Generate knowledge graph from transcripts"}
-                    aria-label={graphNodes.length > 0 ? "Regenerate Graph" : "Generate Graph"}
-                >
-                    {#if isGenerating}
-                        <span class="flex items-center gap-1">
-                            <svg
-                                class="w-3 h-3 animate-spin"
-                                viewBox="0 0 24 24"
-                                fill="none"
-                            >
-                                <circle
-                                    cx="12"
-                                    cy="12"
-                                    r="10"
-                                    stroke="currentColor"
-                                    stroke-width="2"
-                                    stroke-dasharray="31"
-                                    stroke-dashoffset="10"
-                                />
-                            </svg>
-                            Generating...
-                        </span>
-                    {:else}
-                        <span class="flex items-center gap-1">
-                            <svg
-                                class="w-3 h-3"
-                                viewBox="0 0 24 24"
-                                fill="none"
-                                stroke="currentColor"
-                                stroke-width="1"
-                            >
-                                <circle cx="12" cy="5" r="3" />
-                                <circle cx="5" cy="19" r="3" />
-                                <circle cx="19" cy="19" r="3" />
-                                <line x1="12" y1="8" x2="5" y2="16" />
-                                <line x1="12" y1="8" x2="19" y2="16" />
-                            </svg>
-                            {graphNodes.length > 0 ? "Regenerate" : "Generate"} Graph
-                        </span>
+            {#if !hideToolbar}
+                <div class="flex items-center gap-2">
+                    {#if graphNodes.length > 0}
+                        <!-- KG_CLEANUP_SELF_HEALING_v1: Self-heal button removes junk nodes instantly -->
+                        <button
+                            onclick={handleSelfHeal}
+                            class="px-2.5 py-1.5 text-xs rounded-lg bg-amber-50 hover:bg-amber-100 text-amber-600 hover:text-amber-700 border border-amber-200 transition-all promax-interaction font-bold min-h-[32px] flex items-center gap-1"
+                            title="Remove noise nodes and deduplicate (instant, no API call)"
+                            aria-label="Clean up knowledge graph"
+                        >
+                            ✦ Clean Up
+                        </button>
+                        <button
+                            onclick={handleClearGraph}
+                            class="px-2.5 py-1.5 text-xs rounded-lg bg-gray-100/50 hover:bg-slate-600/50 text-gray-500 hover:text-gray-800 border border-slate-600/30 transition-all promax-interaction min-h-[32px] flex items-center justify-center font-bold"
+                            title="Clear graph"
+                            aria-label="Clear knowledge graph"
+                        >
+                            Clear
+                        </button>
                     {/if}
-                </button>
-            </div>
+                    <button
+                        onclick={handleGenerateGraph}
+                        disabled={isGenerating || transcripts.length === 0}
+                        class="px-3 py-1.5 min-h-[32px] text-xs rounded-lg font-bold transition-all promax-interaction
+                            {isGenerating
+                            ? 'bg-blue-50 text-blue-400 cursor-wait'
+                            : transcripts.length === 0
+                              ? 'bg-gray-100/30 text-gray-400 cursor-not-allowed opacity-50'
+                              : 'bg-blue-600 hover:bg-blue-700 text-white shadow-sm shadow-blue-500/20'}"
+                        title={transcripts.length === 0
+                            ? "Record a conversation first"
+                            : "Generate knowledge graph from transcripts"}
+                        aria-label={graphNodes.length > 0 ? "Regenerate Graph" : "Generate Graph"}
+                    >
+                        {#if isGenerating}
+                            <span class="flex items-center gap-1">
+                                <svg
+                                    class="w-3 h-3 animate-spin"
+                                    viewBox="0 0 24 24"
+                                    fill="none"
+                                >
+                                    <circle
+                                        cx="12"
+                                        cy="12"
+                                        r="10"
+                                        stroke="currentColor"
+                                        stroke-width="2"
+                                        stroke-dasharray="31"
+                                        stroke-dashoffset="10"
+                                    />
+                                </svg>
+                                Generating...
+                            </span>
+                        {:else}
+                            <span class="flex items-center gap-1">
+                                <svg
+                                    class="w-3 h-3"
+                                    viewBox="0 0 24 24"
+                                    fill="none"
+                                    stroke="currentColor"
+                                    stroke-width="3"
+                                    stroke-linecap="round"
+                                    stroke-linejoin="round"
+                                >
+                                    <path d="M12 2v4"></path>
+                                    <path d="m4.93 4.93 2.83 2.83"></path>
+                                    <path d="M2 12h4"></path>
+                                    <path d="m4.93 19.07 2.83-2.83"></path>
+                                    <path d="M12 22v-4"></path>
+                                    <path d="m19.07 19.07-2.83-2.83"></path>
+                                    <path d="M22 12h-4"></path>
+                                    <path d="m19.07 4.93-2.83 2.83"></path>
+                                </svg>
+                                {graphNodes.length > 0 ? "Regenerate" : "Generate"}
+                            </span>
+                        {/if}
+                    </button>
+                </div>
+            {/if}
         </div>
     </div>
     <div class="h-full p-2 sm:p-fluid-gap">

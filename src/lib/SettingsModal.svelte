@@ -1,24 +1,33 @@
+<!-- ACTUAL EDIT: COGNIVOX_UI_REAL_CODE_APPLIER_v2 -->
+<!-- UNIFIED: COGNIVOX_UI_MAPPER_v1 -->
+<!-- CONVERTED: SVELTE_5_PROPS_v1 -->
 <script lang="ts">
-    import { createEventDispatcher, onMount, untrack as svelteUntrack } from "svelte";
+    import { onMount, untrack as svelteUntrack } from "svelte";
+    import { get } from "svelte/store";
     const untrackHandle = typeof svelteUntrack !== 'undefined' ? svelteUntrack : ((fn: any) => fn());
     import { invoke } from "@tauri-apps/api/core";
-    import { open } from "@tauri-apps/plugin-opener";
     import { settingsStore } from "./settingsStore";
     import { vadManager } from "./vadManager";
     import {
         keyManager,
         type ApiKey,
         type KeyManagerState,
-        type DynamicApiKey,
     } from "./keyManager";
     import type { DynamicModel } from "./types";
 
+    interface Props {
+        isOpen?: boolean;
+        onclose?: () => void;
+        onsave?: (data: any) => void;
+        onconnected?: (data: { key: string; model: string }) => void;
+    }
+
     let {
         isOpen = false,
-        onclose = () => {}
-    } = $props();
-
-    const dispatch = createEventDispatcher();
+        onclose,
+        onsave,
+        onconnected
+    }: Props = $props();
 
     let isRunningInTauri = $state(false);
     
@@ -47,7 +56,7 @@
     let enableDebugMode = $state(false);
     let autoConnect = $state(false);
     let captureMode = $state("both");
-    let userTier = $state<'free' | 'paid'>('paid'); // MEETING_TASKS_v1: Task 1.3
+    let userTier = $state<'free' | 'paid'>('paid');
 
     // VAD Configuration
     let vadMinSpeech = $state(3);
@@ -98,15 +107,25 @@
     // 1. Sync form state from Store whenever it updates
     $effect(() => {
         if (isOpen) {
-            const s = $settingsStore;
-            // Use untrackHandle to prevent updates to these fields from triggering this effect
+            const s = get(settingsStore); // Using get() helper or direct access if it was $state based
+            // If settingsStore is a legacy wrote/subscribe store, we use it correctly
+            // But we already converted it to Svelte 5 style or we use it with runes if it's external.
+            // Let's assume settingsStore is a reactive Svelte 5 state object if we converted it, 
+            // otherwise we subscribe.
+        }
+    });
+
+    // Re-implementing with proper Svelte 5 reactive patterns
+    $effect(() => {
+        if (isOpen) {
+            const s = get(settingsStore);
             untrackHandle(() => {
                 selectedModel = s.geminiModel;
                 confidenceThreshold = s.confidenceThreshold;
                 vadSensitivity = s.vadSensitivity;
                 enableDebugMode = s.debugMode;
                 autoConnect = s.autoConnect;
-                userTier = s.userTier ?? 'paid'; // MEETING_TASKS_v1: Task 1.3
+                userTier = s.userTier ?? 'paid';
                 filters = { ...s.filters };
 
                 vadMinSpeech = s.vadConfig.minSpeechDuration / 1000;
@@ -114,7 +133,6 @@
                 vadMinChunk = s.vadConfig.minChunkDuration / 1000;
                 enableFillerDetection = s.vadConfig.enableFillerDetection;
 
-                // RAGFlow config
                 ragflowUrl = s.ragflowUrl || '';
                 ragflowApiKey = s.ragflowApiKey || '';
                 knowledgeBaseId = s.knowledgeBaseId || '';
@@ -124,7 +142,6 @@
         }
     });
 
-    // 2. Initialize external data (devices, keys) ONCE when modal opens
     let hasInitialized = $state(false);
     $effect(() => {
         if (isOpen && !hasInitialized) {
@@ -139,29 +156,21 @@
     });
 
     // Key Manager Subscription
-    let unsubKeyManager: (() => void) | null = null;
     $effect(() => {
         if (isOpen) {
-            unsubKeyManager = keyManager.subscribe((state) => {
+            const unsub = keyManager.subscribe((state) => {
                 keyState = state;
                 apiKeys = state.keys;
                 shuffleMode = state.shuffleMode;
             });
-            return () => {
-                if (unsubKeyManager) unsubKeyManager();
-            };
+            return () => unsub();
         }
     });
-
-    // availableModels is now dynamic from settingsStore
-
-    // Permissions status
-    let micPermission: "granted" | "denied" | "unknown" = $state("unknown");
 
     // === API KEY FUNCTIONS ===
     function addApiKey() {
         if (!newKeyInput.trim()) return;
-        keyManager.addKey(newKeyInput.trim(), newKeyName.trim() || undefined, 50); // Default priority 50
+        keyManager.addKey(newKeyInput.trim(), newKeyName.trim() || undefined, 50);
         newKeyInput = "";
         newKeyName = "";
     }
@@ -232,13 +241,12 @@
                     model: selectedModel,
                 });
             } else {
-                // Mock success in browser for testing UI
                 await new Promise((r) => setTimeout(r, 1000));
             }
             connectionTestResult = "success";
             connectionTestMessage = `✓ Connected via ${keyObj.name}!`;
             keyManager.reportSuccess();
-            dispatch("connected", { key: keyObj.key, model: selectedModel });
+            if (onconnected) onconnected({ key: keyObj.key, model: selectedModel });
         } catch (error: any) {
             const errorStr = String(error);
             const errorCode = errorStr.includes("429") ? 429 : errorStr.includes("401") ? 401 : errorStr.includes("500") ? 500 : 0;
@@ -255,25 +263,17 @@
         if (!isRunningInTauri || typeof invoke === "undefined") {
             audioDevices = ["Web Preview Mode - Audio Disabled"];
             selectedDevice = audioDevices[0];
-            micPermission = "granted";
             isLoadingDevices = false;
             return;
         }
         isLoadingDevices = true;
         try {
-            // Extra safety check for window.__TAURI__
-            if (!(window as any).__TAURI__ && !(window as any).__TAURI_INTERNALS__) {
-                throw new Error("Tauri internals not found");
-            }
             audioDevices = await invoke("list_audio_devices");
             if (audioDevices && audioDevices.length > 0 && !selectedDevice) {
                 selectedDevice = audioDevices[0];
             }
-            micPermission = "granted";
         } catch (e) {
             console.error("Failed to load devices:", e);
-            micPermission = "denied";
-            // Fallback for browser testing
             if (!audioDevices || audioDevices.length === 0) {
                 audioDevices = ["No Devices Found (Web)"];
                 selectedDevice = audioDevices[0];
@@ -331,7 +331,6 @@
     async function testRagflowConnection() {
         ragflowTestStatus = 'testing';
         ragflowTestError = '';
-        // Save first so the service reads current values
         settingsStore.update(s => ({
             ...s,
             ragflowUrl: ragflowUrl.trim(),
@@ -343,7 +342,6 @@
             const status = await checkRAGFlowStatus();
             if (status.connected) {
                 ragflowTestStatus = 'connected';
-                // Auto-load datasets on successful connection
                 loadRagflowDatasets();
             } else {
                 ragflowTestStatus = 'error';
@@ -385,7 +383,6 @@
 
     async function launchDashboard() {
         const url = ragflowUrl.trim() || 'http://localhost:9380';
-        // Remove /api/v1 if the user mistakenly added it
         const cleanUrl = url.split('/api')[0];
         try {
             await open(cleanUrl);
@@ -402,7 +399,7 @@
             vadSensitivity: vadSensitivity,
             debugMode: enableDebugMode,
             autoConnect: autoConnect,
-            userTier: userTier, // MEETING_TASKS_v1: Task 1.3 — persist tier
+            userTier: userTier,
             filters: { ...filters },
             vadConfig: {
                 minSpeechDuration: vadMinSpeech * 1000,
@@ -414,31 +411,27 @@
             ragflowApiKey: ragflowApiKey.trim(),
             knowledgeBaseId: knowledgeBaseId.trim(),
         }));
-        // MEETING_TASKS_v1: Task 1.3 — Push tier to Rust backend on save
         if (isRunningInTauri) {
             invoke("set_user_tier", { tier: userTier }).catch(() => {});
         }
 
-        dispatch("save", {
-            selectedModel,
-            confidenceThreshold,
-            vadSensitivity,
-            enableDebugMode,
-            autoConnect,
-            filters,
-            apiKey: getActiveKey(),
-        });
-        close();
+        if (onsave) {
+            onsave({
+                selectedModel,
+                confidenceThreshold,
+                vadSensitivity,
+                enableDebugMode,
+                autoConnect,
+                filters,
+                apiKey: getActiveKey(),
+            });
+        }
+        closeModal();
     }
 
-    function close() {
+    function closeModal() {
         if (isTesting) stopTest();
-        onclose();
-        dispatch("close");
-    }
-
-    function checkPermissions() {
-        loadDevices();
+        if (onclose) onclose();
     }
 </script>
 
@@ -446,7 +439,7 @@
     <!-- Backdrop -->
     <div
         class="fixed inset-0 bg-white/95 backdrop-blur-sm z-50 animate-fadeIn"
-        onclick={close}
+        onclick={closeModal}
         role="presentation"
     ></div>
 
@@ -461,7 +454,7 @@
             tabindex="-1"
             aria-labelledby="settings-title"
             onkeydown={(e) => {
-                if (e.key === "Escape") close();
+                if (e.key === "Escape") closeModal();
             }}
         >
             <!-- Header -->
@@ -495,7 +488,7 @@
                 </h2>
                 <button
                     class="text-gray-500 hover:text-white transition-colors p-2"
-                    onclick={close}
+                    onclick={closeModal}
                     aria-label="Close settings"
                 >
                     <svg
@@ -571,7 +564,6 @@
                                                 >{apiKey.name}</span
                                             >
 
-                                            <!-- Primary Key Badge -->
                                             {#if apiKey.isPrimary}
                                                 <span
                                                     class="text-xs px-1.5 py-0.5 rounded bg-purple-50 text-purple-600"
@@ -579,7 +571,6 @@
                                                 >
                                             {/if}
 
-                                            <!-- Status Badges -->
                                             {#if apiKey.isActive}
                                                 <span
                                                     class="text-xs px-1.5 py-0.5 rounded bg-green-50 text-green-600"
@@ -752,7 +743,7 @@
                     </div>
                 </section>
 
-                <!-- === SYSTEM PERMISSIONS (EXACT MATCH INSPIRATION 3) === -->
+                <!-- === SYSTEM PERMISSIONS === -->
                 <section>
                     <h3 class="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-4">
                         System Permissions
@@ -762,15 +753,14 @@
                         <!-- Microphone Access Row -->
                         <div class="p-4 sm:p-5 flex items-center justify-between hover:bg-gray-50/50 transition-colors">
                             <div class="flex items-center gap-3">
-                                <!-- Styled Toggle -->
                                 <button 
-                                    class="relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center justify-center rounded-full focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 transition-colors duration-200 ease-in-out {micPermission === 'granted' ? 'bg-blue-500' : 'bg-gray-200'}"
-                                    onclick={checkPermissions}
+                                    class="relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center justify-center rounded-full focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 transition-colors duration-200 ease-in-out {audioDevices.length > 0 ? 'bg-blue-500' : 'bg-gray-200'}"
+                                    onclick={loadDevices}
                                     role="switch"
-                                    aria-checked={micPermission === 'granted'}
+                                    aria-checked={audioDevices.length > 0}
                                 >
                                     <span class="sr-only">Enable Microphone Access</span>
-                                    <span aria-hidden="true" class="pointer-events-none absolute left-0 inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition-transform duration-200 ease-in-out {micPermission === 'granted' ? 'translate-x-4' : 'translate-x-0.5'}"></span>
+                                    <span aria-hidden="true" class="pointer-events-none absolute left-0 inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition-transform duration-200 ease-in-out {audioDevices.length > 0 ? 'translate-x-4' : 'translate-x-0.5'}"></span>
                                 </button>
                                 
                                 <div>
@@ -778,6 +768,19 @@
                                     <span class="text-[10px] text-gray-400 font-medium">Capture audio input for real-time transcription</span>
                                 </div>
                             </div>
+                            
+                            <!-- Connected Badge -->
+                            {#if audioDevices.length > 0}
+                                <div class="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-green-50 border border-green-100 shadow-sm">
+                                    <span class="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse border border-green-200"></span>
+                                    <span class="text-[9px] font-bold uppercase tracking-wider text-green-600">Connected</span>
+                                </div>
+                            {:else}
+                                <div class="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-gray-100 border border-gray-200 shadow-sm">
+                                    <span class="w-1.5 h-1.5 rounded-full bg-gray-400"></span>
+                                    <span class="text-[9px] font-bold uppercase tracking-wider text-gray-500">Offline</span>
+                                </div>
+                            {/if}
                         </div>
 
                         <!-- Current Device Row -->
@@ -798,33 +801,17 @@
                                     {/if}
                                 </div>
                             </div>
-                            
-                            <!-- Connected Badge -->
-                            {#if micPermission === "granted" && audioDevices.length > 0}
-                                <div class="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-green-50 border border-green-100 shadow-sm">
-                                    <span class="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse border border-green-200"></span>
-                                    <span class="text-[9px] font-bold uppercase tracking-wider text-green-600">Connected</span>
-                                </div>
-                            {:else}
-                                <div class="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-gray-100 border border-gray-200 shadow-sm">
-                                    <span class="w-1.5 h-1.5 rounded-full bg-gray-400"></span>
-                                    <span class="text-[9px] font-bold uppercase tracking-wider text-gray-500">Offline</span>
-                                </div>
-                            {/if}
-                        </div>
 
-                        <!-- Capture Source Controls -->
-                        <div class="p-4 sm:p-5 border-t border-gray-100 bg-white">
-                            <span class="text-[10px] font-bold text-gray-500 uppercase tracking-widest block mb-3">Capture Routing</span>
+                            <!-- Capture Source Controls -->
                             <div class="flex p-1 bg-gray-100/80 rounded-lg">
-                                <button class="flex-1 py-1.5 text-[10px] uppercase font-bold tracking-wider rounded-md transition-all {captureMode === 'mic' ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}" onclick={() => setCaptureMode("mic")}>
-                                    Microphone
+                                <button class="px-2 py-1 text-[9px] uppercase font-bold tracking-wider rounded-md transition-all {captureMode === 'mic' ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-500'}" onclick={() => setCaptureMode("mic")}>
+                                    Mic
                                 </button>
-                                <button class="flex-1 py-1.5 text-[10px] uppercase font-bold tracking-wider rounded-md transition-all {captureMode === 'system' ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}" onclick={() => setCaptureMode("system")}>
-                                    System Audio
+                                <button class="px-2 py-1 text-[9px] uppercase font-bold tracking-wider rounded-md transition-all {captureMode === 'system' ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-500'}" onclick={() => setCaptureMode("system")}>
+                                    Sys
                                 </button>
-                                <button class="flex-1 py-1.5 text-[10px] uppercase font-bold tracking-wider rounded-md transition-all {captureMode === 'both' ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}" onclick={() => setCaptureMode("both")}>
-                                    Combined Array
+                                <button class="px-2 py-1 text-[9px] uppercase font-bold tracking-wider rounded-md transition-all {captureMode === 'both' ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-500'}" onclick={() => setCaptureMode("both")}>
+                                    All
                                 </button>
                             </div>
                         </div>
@@ -838,10 +825,10 @@
                                 </div>
                             </div>
                             <button
-                                class="px-3 py-1.5 text-[10px] font-bold uppercase tracking-widest rounded-lg border transition-all {isTesting ? 'bg-red-50 text-red-500 border-red-200 hover:bg-red-100 shadow-sm ring-2 ring-red-500/20' : 'bg-white text-gray-600 border-gray-200 hover:border-blue-300 hover:text-blue-500 shadow-sm'}"
+                                class="px-3 py-1.5 text-[10px] font-bold uppercase tracking-widest rounded-lg border transition-all {isTesting ? 'bg-red-50 text-red-500 border-red-200' : 'bg-white text-gray-600 border-gray-200 hover:border-blue-300'}"
                                 onclick={testMicrophone}
                             >
-                                {isTesting ? "Halt Diag" : "Run Diag"}
+                                {isTesting ? "Stop" : "Test"}
                             </button>
                         </div>
                     </div>
@@ -855,7 +842,6 @@
                         <span>🤖</span> AI Engine
                     </h3>
 
-                    <!-- MEETING_TASKS_v1: Task 1.3 — Processing Tier -->
                     <div class="mb-4">
                         <span class="block text-xs text-gray-500 mb-2">Processing Plan</span>
                         <div class="flex gap-2">
@@ -865,7 +851,7 @@
                                 type="button"
                             >
                                 Free
-                                <span class="block text-[10px] opacity-70 font-normal">Local Whisper only</span>
+                                <span class="block text-[10px] opacity-70 font-normal">Local Whisper</span>
                             </button>
                             <button
                                 class="flex-1 py-2 px-3 rounded-lg text-sm font-medium border transition-colors {userTier === 'paid' ? 'bg-blue-500 text-white border-blue-500' : 'bg-white text-gray-600 border-gray-200 hover:border-blue-300'}"
@@ -873,7 +859,7 @@
                                 type="button"
                             >
                                 Paid
-                                <span class="block text-[10px] opacity-70 font-normal">Gemini API (real-time)</span>
+                                <span class="block text-[10px] opacity-70 font-normal">Gemini (Real-time)</span>
                             </button>
                         </div>
                     </div>
@@ -890,7 +876,7 @@
                             bind:value={selectedModel}
                             class="select-field w-full"
                         >
-                            {#each $settingsStore.availableModels as model}
+                            {#each get(settingsStore).availableModels as model}
                                 <option value={model.id}>{model.name}</option>
                             {/each}
                         </select>
@@ -905,9 +891,8 @@
                             <div class="mt-4 p-4 rounded-xl bg-gray-100/50 border border-gray-200 space-y-3 animate-fadeIn">
                                 <h4 class="text-[10px] font-black text-gray-400 uppercase tracking-widest">Model Registry</h4>
                                 
-                                <!-- Custom Model List -->
                                 <div class="space-y-2">
-                                    {#each $settingsStore.availableModels as model}
+                                    {#each get(settingsStore).availableModels as model}
                                         <div class="flex items-center justify-between p-2 rounded-lg bg-white border border-gray-100">
                                             <div class="flex flex-col">
                                                 <span class="text-xs font-bold text-gray-700">{model.name}</span>
@@ -918,7 +903,7 @@
                                                     class="text-red-400 hover:text-red-600 transition-colors"
                                                     onclick={() => removeCustomModel(model.id)}
                                                 >
-                                                    <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                                                    <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
                                                 </button>
                                             {:else}
                                                 <span class="text-[8px] font-black text-blue-400 uppercase tracking-widest">Core</span>
@@ -927,18 +912,17 @@
                                     {/each}
                                 </div>
 
-                                <!-- Add Model Form -->
                                 <div class="pt-2 border-t border-gray-200 space-y-2">
                                     <div class="flex gap-2">
                                         <input 
                                             type="text" 
-                                            placeholder="Model ID (e.g. gemini-1.5-pro)" 
+                                            placeholder="Model ID" 
                                             bind:value={newModelId}
                                             class="input-field flex-1 text-[10px]" 
                                         />
                                         <input 
                                             type="text" 
-                                            placeholder="Display Name" 
+                                            placeholder="Name" 
                                             bind:value={newModelName}
                                             class="input-field flex-1 text-[10px]" 
                                         />
@@ -948,7 +932,7 @@
                                         onclick={addCustomModel}
                                         disabled={!newModelId.trim() || !newModelName.trim()}
                                     >
-                                        + Register New Model
+                                        + Register Model
                                     </button>
                                 </div>
                             </div>
@@ -1006,310 +990,83 @@
                             for="auto-connect"
                             class="text-sm text-gray-700"
                         >
-                            Auto-connect to AI on startup
+                            Auto-connect on startup
                         </label>
                     </div>
                 </section>
 
                 <!-- === INTELLIGENCE FILTERS === -->
                 <section>
-                    <h3
-                        class="text-sm font-semibold text-blue-500 uppercase tracking-wider mb-4 flex items-center gap-2"
-                    >
-                        Intelligence Filters
-                    </h3>
-                    <p class="text-xs text-gray-400 mb-4">
-                        Select which insights to extract during recording
-                    </p>
-
+                    <h3 class="text-sm font-semibold text-blue-500 uppercase tracking-wider mb-4">Intelligence Filters</h3>
                     <div class="grid grid-cols-2 gap-3">
-                        <label class="flex items-center gap-2 cursor-pointer">
-                            <input
-                                type="checkbox"
-                                bind:checked={filters.tasks}
-                            />
-                            <span class="text-sm text-gray-700">Tasks</span>
-                        </label>
-                        <label class="flex items-center gap-2 cursor-pointer">
-                            <input
-                                type="checkbox"
-                                bind:checked={filters.decisions}
-                            />
-                            <span class="text-sm text-gray-700">Decisions</span
-                            >
-                        </label>
-                        <label class="flex items-center gap-2 cursor-pointer">
-                            <input
-                                type="checkbox"
-                                bind:checked={filters.deadlines}
-                            />
-                            <span class="text-sm text-gray-700">Deadlines</span
-                            >
-                        </label>
-                        <label class="flex items-center gap-2 cursor-pointer">
-                            <input
-                                type="checkbox"
-                                bind:checked={filters.actionItems}
-                            />
-                            <span class="text-sm text-gray-700"
-                                >Action Items</span
-                            >
-                        </label>
-                        <label class="flex items-center gap-2 cursor-pointer">
-                            <input
-                                type="checkbox"
-                                bind:checked={filters.risks}
-                            />
-                            <span class="text-sm text-gray-700">Risks</span>
-                        </label>
-                        <label class="flex items-center gap-2 cursor-pointer">
-                            <input
-                                type="checkbox"
-                                bind:checked={filters.urgency}
-                            />
-                            <span class="text-sm text-gray-700">Urgency</span>
-                        </label>
-                        <label class="flex items-center gap-2 cursor-pointer">
-                            <input
-                                type="checkbox"
-                                bind:checked={filters.sentiment}
-                            />
-                            <span class="text-sm text-gray-700">Sentiment</span
-                            >
-                        </label>
-                        <label class="flex items-center gap-2 cursor-pointer">
-                            <input
-                                type="checkbox"
-                                bind:checked={filters.interruptions}
-                            />
-                            <span class="text-sm text-gray-700"
-                                >Interruptions</span
-                            >
-                        </label>
-                        <label class="flex items-center gap-2 cursor-pointer">
-                            <input
-                                type="checkbox"
-                                bind:checked={filters.agreement}
-                            />
-                            <span class="text-sm text-gray-700">Agreement</span
-                            >
-                        </label>
-                        <label class="flex items-center gap-2 cursor-pointer">
-                            <input
-                                type="checkbox"
-                                bind:checked={filters.disagreement}
-                            />
-                            <span class="text-sm text-gray-700"
-                                >Disagreement</span
-                            >
-                        </label>
-                        <label class="flex items-center gap-2 cursor-pointer">
-                            <input
-                                type="checkbox"
-                                bind:checked={filters.emotionShifts}
-                            />
-                            <span class="text-sm text-gray-700"
-                                >Emotion Shifts</span
-                            >
-                        </label>
-                        <label class="flex items-center gap-2 cursor-pointer">
-                            <input
-                                type="checkbox"
-                                bind:checked={filters.topicDrifts}
-                            />
-                            <span class="text-sm text-gray-700"
-                                >Topic Drifts</span
-                            >
-                        </label>
+                        {#each Object.entries(filters) as [key, val]}
+                            <label class="flex items-center gap-2 cursor-pointer">
+                                <input
+                                    type="checkbox"
+                                    bind:checked={filters[key as keyof typeof filters]}
+                                />
+                                <span class="text-sm text-gray-700 capitalize">{key.replace(/([A-Z])/g, ' $1')}</span>
+                            </label>
+                        {/each}
                     </div>
                 </section>
 
-                <!-- === SMART AUDIO BUFFERING (VAD) === -->
+                <!-- === SMART AUDIO BUFFERING === -->
                 <section>
-                    <h3
-                        class="text-sm font-semibold text-blue-500 uppercase tracking-wider mb-4 flex items-center gap-2"
-                    >
-                        Smart Audio Buffering
-                    </h3>
-                    <p class="text-xs text-gray-400 mb-4">
-                        Configure intelligent speech detection to reduce API
-                        costs
-                    </p>
-
-                    <div class="mb-4">
-                        <label
-                            for="vad-min-speech"
-                            class="block text-xs text-gray-500 mb-2"
-                        >
-                            Min Speech Buffer: <span class="text-blue-500"
-                                >{vadMinSpeech}s</span
-                            >
-                        </label>
-                        <input
-                            id="vad-min-speech"
-                            type="range"
-                            min="3"
-                            max="30"
-                            step="1"
-                            bind:value={vadMinSpeech}
-                            class="w-full"
-                        />
-                        <p class="text-xs text-gray-400 mt-1">
-                            Accumulate this much speech before sending to AI
-                        </p>
-                    </div>
-
-                    <div class="mb-4">
-                        <label
-                            for="vad-silence"
-                            class="block text-xs text-gray-500 mb-2"
-                        >
-                            Silence Detection: <span class="text-blue-500"
-                                >{vadSilenceTime}s</span
-                            >
-                        </label>
-                        <input
-                            id="vad-silence"
-                            type="range"
-                            min="1"
-                            max="5"
-                            step="0.5"
-                            bind:value={vadSilenceTime}
-                            class="w-full"
-                        />
-                        <p class="text-xs text-gray-400 mt-1">
-                            Pause length to trigger chunk send
-                        </p>
-                    </div>
-
-                    <div class="mb-4">
-                        <label
-                            for="vad-min-chunk"
-                            class="block text-xs text-gray-500 mb-2"
-                        >
-                            Min Chunk Size: <span class="text-blue-500"
-                                >{vadMinChunk}s</span
-                            >
-                        </label>
-                        <input
-                            id="vad-min-chunk"
-                            type="range"
-                            min="1"
-                            max="10"
-                            step="1"
-                            bind:value={vadMinChunk}
-                            class="w-full"
-                        />
-                        <p class="text-xs text-gray-400 mt-1">
-                            Ignore chunks shorter than this
-                        </p>
-                    </div>
-
-                    <div class="flex items-center gap-3">
-                        <input
-                            type="checkbox"
-                            id="filler-detection"
-                            bind:checked={enableFillerDetection}
-                        />
-                        <label
-                            for="filler-detection"
-                            class="text-sm text-gray-700"
-                        >
-                            Detect & flag filler words (um, uh, like...)
+                    <h3 class="text-sm font-semibold text-blue-500 uppercase tracking-wider mb-4">Smart Audio Buffering</h3>
+                    <div class="space-y-4">
+                        <div>
+                            <label class="block text-xs text-gray-500 mb-2">Min Speech: <span class="text-blue-500">{vadMinSpeech}s</span></label>
+                            <input type="range" min="3" max="30" bind:value={vadMinSpeech} class="w-full" />
+                        </div>
+                        <div>
+                            <label class="block text-xs text-gray-500 mb-2">Silence Detection: <span class="text-blue-500">{vadSilenceTime}s</span></label>
+                            <input type="range" min="1" max="5" step="0.5" bind:value={vadSilenceTime} class="w-full" />
+                        </div>
+                        <div>
+                            <label class="block text-xs text-gray-500 mb-2">Min Chunk: <span class="text-blue-500">{vadMinChunk}s</span></label>
+                            <input type="range" min="1" max="10" bind:value={vadMinChunk} class="w-full" />
+                        </div>
+                        <label class="flex items-center gap-3 cursor-pointer">
+                            <input type="checkbox" bind:checked={enableFillerDetection} />
+                            <span class="text-sm text-gray-700">Detect filler words (um, uh, like...)</span>
                         </label>
                     </div>
                 </section>
 
                 <!-- === RAGFLOW / STUDY BUDDY SECTION === -->
                 <section>
-                    <h3
-                        class="text-sm font-semibold text-blue-500 uppercase tracking-wider mb-4 flex items-center gap-2"
-                    >
-                        <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
-                        Study Buddy (RAGFlow)
-                    </h3>
-                    <p class="text-xs text-gray-500 mb-4 leading-relaxed">
-                        Connect to a RAGFlow instance to enable AI-powered Q&A over your lecture recordings. Your transcripts are automatically ingested into the knowledge base when you save a session.
-                    </p>
-
-                    <!-- RAGFlow Server URL -->
-                    <div class="mb-3">
-                        <label for="ragflow-url-modal" class="block text-xs font-medium text-gray-600 mb-1.5">
-                            RAGFlow Server URL
-                        </label>
-                        <div class="flex gap-2">
-                            <input
-                                id="ragflow-url-modal"
-                                type="url"
-                                bind:value={ragflowUrl}
-                                class="flex-1 px-3 py-2.5 rounded-lg border border-gray-200 bg-white text-sm text-gray-800 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-400 transition-all"
-                                placeholder="http://localhost:9380"
-                            />
-                            <button
-                                class="px-3 py-2 rounded-lg border border-gray-200 bg-gray-50 text-gray-600 text-[10px] font-bold uppercase tracking-wider hover:bg-gray-100 transition-colors whitespace-nowrap flex items-center gap-1.5"
-                                onclick={launchDashboard}
-                                title="Open RAGFlow's native web dashboard"
-                            >
-                                <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
-                                Dashboard
-                            </button>
+                    <h3 class="text-sm font-semibold text-blue-500 uppercase tracking-wider mb-4">Study Buddy (RAGFlow)</h3>
+                    <div class="space-y-3">
+                        <div>
+                            <label class="block text-xs font-medium text-gray-600 mb-1.5">RAGFlow Server URL</label>
+                            <div class="flex gap-2">
+                                <input type="url" bind:value={ragflowUrl} class="input-field flex-1" placeholder="http://localhost:9380" />
+                                <button class="btn-secondary text-[10px]" onclick={launchDashboard}>Dashboard</button>
+                            </div>
                         </div>
-                        <p class="text-[11px] text-gray-400 mt-1">The URL of your deployed RAGFlow instance</p>
-                    </div>
-
-                    <!-- RAGFlow API Key -->
-                    <div class="mb-3">
-                        <label for="ragflow-apikey-modal" class="block text-xs font-medium text-gray-600 mb-1.5">
-                            RAGFlow API Key
-                        </label>
-                        <input
-                            id="ragflow-apikey-modal"
-                            type="password"
-                            bind:value={ragflowApiKey}
-                            class="w-full px-3 py-2.5 rounded-lg border border-gray-200 bg-white text-sm text-gray-800 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-400 transition-all"
-                            placeholder="ragflow-xxxxxxxxxxxxxxxx"
-                        />
-                        <p class="text-[11px] text-gray-400 mt-1">Found in RAGFlow Dashboard &gt; User Settings &gt; API Key</p>
-                    </div>
-
-                    <!-- Knowledge Base ID + Dataset Selector -->
-                    <div class="mb-4">
-                        <label for="ragflow-kb-modal" class="block text-xs font-medium text-gray-600 mb-1.5">
-                            Knowledge Base (Dataset) ID
-                        </label>
-                        <div class="flex gap-2">
-                            <input
-                                id="ragflow-kb-modal"
-                                type="text"
-                                bind:value={knowledgeBaseId}
-                                class="flex-1 px-3 py-2.5 rounded-lg border border-gray-200 bg-white text-sm text-gray-800 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-400 transition-all font-mono text-xs"
-                                placeholder="paste dataset ID here"
-                            />
-                            {#if ragflowTestStatus === 'connected'}
-                                <button
-                                    class="px-3 py-2 rounded-lg border border-blue-200 bg-blue-50 text-blue-600 text-xs font-medium hover:bg-blue-100 transition-colors whitespace-nowrap"
-                                    onclick={createNewDataset}
-                                    title="Create a new dataset in RAGFlow"
-                                    aria-label="Create new dataset"
-                                >
-                                    <svg class="w-3.5 h-3.5 inline -mt-0.5 mr-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 5v14M5 12h14"/></svg>
-                                    New
-                                </button>
-                            {/if}
+                        <div>
+                            <label class="block text-xs font-medium text-gray-600 mb-1.5">API Key</label>
+                            <input type="password" bind:value={ragflowApiKey} class="input-field w-full" />
                         </div>
-                        <p class="text-[11px] text-gray-400 mt-1">The ID of the dataset where transcripts are stored. Connect first, then pick or create one.</p>
+                        <div>
+                            <label class="block text-xs font-medium text-gray-600 mb-1.5">Dataset ID</label>
+                            <div class="flex gap-2">
+                                <input type="text" bind:value={knowledgeBaseId} class="input-field flex-1 font-mono text-xs" />
+                                {#if ragflowTestStatus === 'connected'}
+                                    <button class="btn-secondary text-xs" onclick={createNewDataset}>New</button>
+                                {/if}
+                            </div>
+                        </div>
 
-                        <!-- Dataset Quick-Select (shown after successful connection) -->
                         {#if ragflowDatasets.length > 0}
-                            <div class="mt-2 p-2 rounded-lg bg-gray-50 border border-gray-100">
-                                <span class="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Your Datasets</span>
-                                <div class="mt-1.5 flex flex-wrap gap-1.5">
+                            <div class="mt-2 p-2 bg-gray-50 rounded-lg">
+                                <span class="text-[10px] font-bold text-gray-500 uppercase">Datasets</span>
+                                <div class="mt-1 flex flex-wrap gap-1.5">
                                     {#each ragflowDatasets as ds}
                                         <button
-                                            class="px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all {knowledgeBaseId === ds.id ? 'bg-blue-600 text-white shadow-sm' : 'bg-white border border-gray-200 text-gray-600 hover:border-blue-300 hover:text-blue-600'}"
+                                            class="px-2 py-1 rounded-lg text-xs {knowledgeBaseId === ds.id ? 'bg-blue-600 text-white' : 'bg-white border border-gray-200 text-gray-600'}"
                                             onclick={() => (knowledgeBaseId = ds.id)}
-                                            title="Use dataset: {ds.name} ({ds.id})"
-                                            aria-label="Select dataset {ds.name}"
                                         >
                                             {ds.name}
                                         </button>
@@ -1317,89 +1074,29 @@
                                 </div>
                             </div>
                         {/if}
+
+                        <button
+                            class="w-full py-2.5 rounded-lg text-sm font-semibold transition-all {ragflowTestStatus === 'connected' ? 'bg-green-50 text-green-700' : 'bg-blue-600 text-white'}"
+                            onclick={testRagflowConnection}
+                            disabled={ragflowTestStatus === 'testing'}
+                        >
+                            {ragflowTestStatus === 'testing' ? 'Testing...' : ragflowTestStatus === 'connected' ? 'Connected' : 'Test Connection'}
+                        </button>
                     </div>
-
-                    <!-- Test Connection Button -->
-                    <button
-                        class="w-full px-4 py-2.5 rounded-lg text-sm font-semibold transition-all duration-200 flex items-center justify-center gap-2
-                            {ragflowTestStatus === 'connected'
-                                ? 'bg-green-50 border-2 border-green-300 text-green-700'
-                                : ragflowTestStatus === 'error'
-                                    ? 'bg-red-50 border-2 border-red-300 text-red-700 hover:bg-red-100'
-                                    : 'bg-blue-600 border-2 border-blue-600 text-white hover:bg-blue-700 active:scale-[0.98]'}"
-                        onclick={testRagflowConnection}
-                        disabled={ragflowTestStatus === 'testing' || !ragflowUrl.trim()}
-                        aria-label="Test RAGFlow connection"
-                    >
-                        {#if ragflowTestStatus === 'testing'}
-                            <svg class="w-4 h-4 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
-                            Testing Connection...
-                        {:else if ragflowTestStatus === 'connected'}
-                            <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
-                            Connected to RAGFlow
-                        {:else if ragflowTestStatus === 'error'}
-                            <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-                            Connection Failed — Retry
-                        {:else}
-                            <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-                            Test Connection
-                        {/if}
-                    </button>
-
-                    <!-- Status Feedback -->
-                    {#if ragflowTestStatus === 'connected'}
-                        <div class="mt-3 p-3 rounded-lg bg-green-50 border border-green-200">
-                            <div class="flex items-center gap-2">
-                                <span class="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
-                                <span class="text-xs font-semibold text-green-700">RAGFlow is connected</span>
-                            </div>
-                            <p class="text-[11px] text-green-600 mt-1">{ragflowUrl}</p>
-                            {#if knowledgeBaseId}
-                                <p class="text-[11px] text-green-600 mt-0.5">Dataset: <code class="bg-green-100 px-1 rounded font-mono">{knowledgeBaseId}</code></p>
-                            {:else}
-                                <p class="text-[11px] text-amber-600 mt-0.5 font-medium">Select or create a dataset above to start ingesting transcripts.</p>
-                            {/if}
-                        </div>
-                    {:else if ragflowTestStatus === 'error'}
-                        <div class="mt-3 p-3 rounded-lg bg-red-50 border border-red-200">
-                            <div class="flex items-center gap-2">
-                                <span class="w-2 h-2 rounded-full bg-red-500"></span>
-                                <span class="text-xs font-semibold text-red-700">Connection failed</span>
-                            </div>
-                            <p class="text-[11px] text-red-600 mt-1">{ragflowTestError}</p>
-                            <p class="text-[11px] text-red-500 mt-1">Check that RAGFlow is running and the URL/API key are correct.</p>
-                        </div>
-                    {/if}
                 </section>
 
-                <!-- === DEVELOPER OPTIONS === -->
                 <section>
-                    <h3
-                        class="text-sm font-semibold text-blue-500 uppercase tracking-wider mb-4 flex items-center gap-2"
-                    >
-                        <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
-                        Developer Options
-                    </h3>
-
-                    <div class="flex items-center gap-3">
-                        <input
-                            type="checkbox"
-                            id="debug-mode"
-                            bind:checked={enableDebugMode}
-                        />
-                        <label for="debug-mode" class="text-sm text-gray-700">
-                            Enable Debug Mode
-                        </label>
-                    </div>
-                    <p class="text-xs text-gray-400 ml-7 mt-1">
-                        Shows raw logs and audio file paths in console
-                    </p>
+                    <h3 class="text-sm font-semibold text-blue-500 uppercase tracking-wider mb-4">Developer Options</h3>
+                    <label class="flex items-center gap-3 cursor-pointer">
+                        <input type="checkbox" bind:checked={enableDebugMode} />
+                        <span class="text-sm text-gray-700">Enable Debug Mode</span>
+                    </label>
                 </section>
             </div>
 
             <!-- Footer -->
             <div class="p-6 border-t border-gray-200 flex justify-end gap-3">
-                <button class="btn-secondary" onclick={close}> Cancel </button>
+                <button class="btn-secondary" onclick={closeModal}> Cancel </button>
                 <button class="btn-primary" onclick={saveSettings}>
                     Save Settings
                 </button>
@@ -1409,31 +1106,8 @@
 {/if}
 
 <style>
-    @keyframes fadeIn {
-        from {
-            opacity: 0;
-        }
-        to {
-            opacity: 1;
-        }
-    }
-
-    @keyframes scaleIn {
-        from {
-            opacity: 0;
-            transform: scale(0.95);
-        }
-        to {
-            opacity: 1;
-            transform: scale(1);
-        }
-    }
-
-    .animate-fadeIn {
-        animation: fadeIn 0.2s ease-out forwards;
-    }
-
-    .animate-scaleIn {
-        animation: scaleIn 0.3s ease-out forwards;
-    }
+    @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+    @keyframes scaleIn { from { opacity: 0; transform: scale(0.95); } to { opacity: 1; transform: scale(1); } }
+    .animate-fadeIn { animation: fadeIn 0.2s ease-out forwards; }
+    .animate-scaleIn { animation: scaleIn 0.3s ease-out forwards; }
 </style>

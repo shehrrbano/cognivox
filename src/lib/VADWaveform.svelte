@@ -4,25 +4,29 @@
     import { onMount, onDestroy } from "svelte";
     import { vadManager, type VADState } from "./vadManager";
 
-    export let isRecording = false;
-    export let currentVolume = 0;
+    interface Props {
+        isRecording?: boolean;
+        currentVolume?: number;
+    }
 
-    let vadState: VADState = vadManager.getState();
+    let { isRecording = false, currentVolume = 0 }: Props = $props();
+
+    let vadState = $state<VADState>(vadManager.getState());
     let unsubscribe: (() => void) | null = null;
 
     // Waveform bars - more for smoother visualization
     const BAR_COUNT = 50;
-    let barHistory: { level: number; isSpeech: boolean }[] = [];
+    let barHistory = $state<{ level: number; isSpeech: boolean }[]>([]);
 
     // Volume threshold for speech (calibrates over time)
     const SPEECH_THRESHOLD = 0.015;
 
-    // Waveform update interval (replaces $: reactive to avoid Svelte value-equality stalling)
+    // Waveform update interval
     let waveformInterval: ReturnType<typeof setInterval> | null = null;
     let wasRecording = false;
 
     // React to isRecording changes: start/stop waveform interval and reset state
-    $: {
+    $effect(() => {
         if (isRecording && !wasRecording) {
             // Recording just started — reset waveform state and start interval
             barHistory = [];
@@ -44,7 +48,7 @@
             }
             wasRecording = false;
         }
-    }
+    });
 
     onMount(() => {
         unsubscribe = vadManager.subscribe((state) => {
@@ -96,10 +100,10 @@
         return "text-gray-500";
     }
 
-    function getMinBufferPercent(): number {
+    let minBufferPercent = $derived.by(() => {
         const minRequired = vadManager.getConfig().minSpeechDuration;
         return Math.min(100, (vadState.bufferDuration / minRequired) * 100);
-    }
+    });
 </script>
 
 <div
@@ -163,7 +167,7 @@
         <div class="flex items-center justify-between">
             <span class="text-xs text-gray-400">Speech Buffer</span>
             <span
-                class="text-xs {getMinBufferPercent() >= 100
+                class="text-xs {minBufferPercent >= 100
                     ? 'text-green-600'
                     : 'text-blue-500'}"
             >
@@ -174,11 +178,11 @@
         </div>
         <div class="h-2 bg-gray-50/80 rounded-full overflow-hidden">
             <div
-                class="h-full transition-all duration-200 rounded-full {getMinBufferPercent() >=
+                class="h-full transition-all duration-200 rounded-full {minBufferPercent >=
                 100
                     ? 'bg-green-500'
                     : 'bg-cyan-500'}"
-                style="width: {getMinBufferPercent()}%"
+                style="width: {minBufferPercent}%"
             ></div>
         </div>
     </div>

@@ -1,6 +1,12 @@
+<!-- ACTUAL EDIT: COGNIVOX_UI_REAL_CODE_APPLIER_v2 -->
+<!-- UNIFIED: COGNIVOX_UI_MAPPER_v1 -->
+<!-- CONVERTED: SVELTE_5_PROPS_v1 -->
 <script lang="ts">
     import { onMount, onDestroy } from "svelte";
     import { intelligenceExtractor, type ExtractedInsights } from "./intelligenceExtractor";
+
+    interface Props {}
+    let {}: Props = $props();
 
     let insights = $state<ExtractedInsights>(intelligenceExtractor.getInsights());
     let unsubscribe: (() => void) | null = null;
@@ -16,9 +22,9 @@
         if (unsubscribe) unsubscribe();
     });
 
-    let todoTasks = $derived(insights.tasks.filter((_, i) => i % 3 === 0));
-    let inProgressTasks = $derived(insights.tasks.filter((_, i) => i % 3 === 1));
-    let doneTasks = $derived(insights.tasks.filter((_, i) => i % 3 === 2));
+    let todoTasks = $derived(insights.tasks.filter((_: any, i: number) => i % 3 === 0));
+    let inProgressTasks = $derived(insights.tasks.filter((_: any, i: number) => i % 3 === 1));
+    let doneTasks = $derived(insights.tasks.filter((_: any, i: number) => i % 3 === 2));
 
     function getTagStyle(text: string) {
         const t = text.length;
@@ -101,13 +107,6 @@
                                 </div>
                             </div>
                         {/each}
-                        
-                        {#if todoTasks.length === 0}
-                            <div class="p-5 border-2 border-dashed border-gray-200/80 rounded-xl text-center flex flex-col items-center justify-center bg-gray-50/50">
-                                <svg class="w-4 h-4 text-gray-300 mb-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
-                                <span class="text-[9px] text-gray-400 font-bold uppercase tracking-widest">Drop tasks here</span>
-                            </div>
-                        {/if}
                     </div>
                 </div>
 

@@ -131,6 +131,7 @@ export interface SnapshotParams {
     transcripts: Transcript[];
     graphNodes: GraphNode[];
     graphEdges: GraphEdge[];
+    graphPositions: Record<string, { x: number; y: number }> | null;
     stressLevel: number;
     engagementLevel: number;
     urgencyLevel: number;
@@ -190,3 +191,31 @@ export interface ToneAnalysis {
     clarityLevel: number;
     toneDistribution: Record<string, number>;
 }
+
+// === Course & RAGFlow Integrated Types ===
+
+export interface CourseResource {
+    id: string;
+    name: string;
+    type: 'file' | 'audio' | 'picture' | 'transcript';
+    status: 'pending' | 'parsing' | 'indexed' | 'error';
+    uploadDate: string;
+    ragflowDocId?: string;
+    description?: string; // For vision analysis results
+    size?: number;
+    extractedGraph?: {
+        nodes: GraphNode[];
+        edges: GraphEdge[];
+    };
+}
+
+export interface Course {
+    id: string;
+    name: string;
+    datasetId: string; // RAGFlow Dataset ID
+    resources: CourseResource[];
+    createdAt: string;
+    updatedAt: string;
+    description?: string;
+}
+

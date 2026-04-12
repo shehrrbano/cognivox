@@ -1,28 +1,34 @@
+<!-- ACTUAL EDIT: COGNIVOX_UI_REAL_CODE_APPLIER_v2 -->
+<!-- UNIFIED: COGNIVOX_UI_MAPPER_v1 -->
+<!-- CONVERTED: SVELTE_5_PROPS_v1 -->
 <script lang="ts">
-    // FINAL_LIVE_RECORDING_FIXED: Stripped all $effect blocks that read+write $state.
-    // Previous version had $effect reading consecutiveSilenceFrames + lastSpeechTime
-    // while also writing them → Svelte 5 effect_update_depth_exceeded infinite loop
-    // → isRecording=true never reached the DOM → button stuck as Start Recording.
-    // Fix: ZERO $effect blocks. ZERO $state mutations. Timer and STOP button only.
+    interface Props {
+        isRecording?: boolean;
+        status?: string;
+        currentVolume?: number;
+        elapsedSeconds?: number;
+        isGeminiConnected?: boolean;
+        onopenSettings?: () => void;
+        ontoggleCapture?: () => void;
+    }
 
     let {
         isRecording = false,
+        status = "Recording...",
         currentVolume = 0,
         elapsedSeconds = 0,
         isGeminiConnected = false,
         onopenSettings = () => {},
-        ontoggleCapture = (): void => {}
-    } = $props();
+        ontoggleCapture = () => {}
+    }: Props = $props();
 
     function formatTime(seconds: number): string {
         const hrs = Math.floor(seconds / 3600);
         const mins = Math.floor((seconds % 3600) / 60);
-        const secs = seconds % 60;
+        const secs = Math.floor(seconds % 60);
         return `${hrs.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
     }
 
-    // Volume → rough dB display using currentVolume prop (0..1 RMS approximation)
-    // No $effect or $state needed — pure derived template expression
     function volToDb(vol: number): number {
         return vol > 0.00001 ? Math.max(-60, Math.min(0, 20 * Math.log10(vol))) : -60;
     }
@@ -45,13 +51,16 @@
             <div class="max-w-7xl mx-auto px-3 sm:px-6 py-2.5">
                 <div class="flex items-center justify-between gap-3">
 
-                    <!-- LEFT: pulsing dot + REC -->
+                    <!-- LEFT: pulsing dot + REC + status -->
                     <div class="flex items-center gap-2.5 flex-shrink-0">
                         <div class="relative w-3.5 h-3.5">
                             <div class="w-3.5 h-3.5 bg-red-400 rounded-full animate-pulse"></div>
                             <div class="absolute inset-0 bg-red-400 rounded-full animate-ping opacity-60"></div>
                         </div>
-                        <span class="text-white font-black text-xs tracking-widest uppercase hidden sm:block">Rec</span>
+                        <div class="flex flex-col">
+                            <span class="text-white font-black text-xs tracking-widest uppercase">Rec</span>
+                            <span class="text-red-200 text-[10px] font-bold truncate max-w-[120px] hidden sm:block">{status}</span>
+                        </div>
                     </div>
 
                     <!-- CENTER: Timer + volume bar -->
@@ -60,7 +69,6 @@
                             {formatTime(elapsedSeconds)}
                         </div>
 
-                        <!-- Volume bar (template-only, no $effect) -->
                         {#if currentVolume > 0}
                             {@const db = volToDb(currentVolume)}
                             <div class="hidden sm:flex flex-col gap-0.5 w-24 flex-shrink-0">
@@ -76,16 +84,25 @@
 
                     <!-- RIGHT: AI status + STOP -->
                     <div class="flex items-center gap-2 flex-shrink-0">
+                        <button 
+                            onclick={onopenSettings}
+                            class="p-2 text-white/70 hover:text-white transition-colors hidden sm:block"
+                            title="Open Settings"
+                        >
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+                        </button>
+
+                        <div class="h-6 w-px bg-red-400 opacity-30 mx-1 hidden sm:block"></div>
+
                         {#if isGeminiConnected}
                             <span class="hidden sm:block text-green-300 text-[10px] font-bold tracking-wider">AI ✓</span>
                         {:else}
                             <span class="hidden sm:block text-yellow-300 text-[10px] font-bold tracking-wider animate-pulse">Local</span>
                         {/if}
 
-                        <!-- PROMINENT STOP BUTTON -->
                         <button
-                            onclick={() => ontoggleCapture()}
-                            class="flex items-center gap-1.5 px-3 py-1.5 sm:px-4 sm:py-2 bg-white hover:bg-red-50 text-red-700 font-black text-xs sm:text-sm rounded-lg border-2 border-red-300 hover:border-red-500 transition-all promax-interaction shadow-md tracking-widest uppercase"
+                            onclick={ontoggleCapture}
+                            class="flex items-center gap-1.5 px-3 py-1.5 sm:px-4 sm:py-2 bg-white hover:bg-red-50 text-red-700 font-black text-xs sm:text-sm rounded-lg border-2 border-red-300 hover:border-red-500 transition-all shadow-md tracking-widest uppercase"
                             aria-label="Stop Recording"
                         >
                             <div class="w-2.5 h-2.5 bg-red-600 rounded-sm flex-shrink-0"></div>

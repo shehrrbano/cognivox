@@ -1,23 +1,31 @@
 <!-- ACTUAL EDIT: COGNIVOX_UI_REAL_CODE_APPLIER_v2 -->
 <!-- UNIFIED: COGNIVOX_UI_MAPPER_v1 -->
+<!-- CONVERTED: SVELTE_5_PROPS_v1 -->
 <script lang="ts">
-    import { createEventDispatcher } from "svelte";
     import { invoke } from "@tauri-apps/api/core";
 
-    export let onSettingsChange: (settings: any) => void;
+    interface Props {
+        onsettingsChange?: (settings: any) => void;
+        onintelligenceInjected?: (intelligence: any) => void;
+    }
 
-    let confidenceThreshold = 0.7;
-    let vadSensitivity = 0.5;
-    let predictionAggression = 0.5;
-    let autoConnect = false;
-    let enableOptimistic = true;
+    let {
+        onsettingsChange,
+        onintelligenceInjected
+    }: Props = $props();
+
+    let confidenceThreshold = $state(0.7);
+    let vadSensitivity = $state(0.5);
+    let predictionAggression = $state(0.5);
+    let autoConnect = $state(false);
+    let enableOptimistic = $state(true);
     
     // Manual injection
-    let manualText = "";
-    let manualCategory = "TASK";
+    let manualText = $state("");
+    let manualCategory = $state("TASK");
 
     // All 16 categories from Cognivox
-    let categories = [
+    let categories = $state([
         { id: "TASK", label: "Tasks", checked: true },
         { id: "DECISION", label: "Decisions", checked: true },
         { id: "DEADLINE", label: "Deadlines", checked: true },
@@ -30,9 +38,7 @@
         { id: "DISAGREEMENT", label: "Disagreement", checked: false },
         { id: "EMOTION_SHIFT", label: "Emotion Shifts", checked: false },
         { id: "TOPIC_DRIFT", label: "Topic Drifts", checked: false },
-    ];
-
-    const dispatch = createEventDispatcher();
+    ]);
 
     async function updateSettings() {
         const selectedCategories = categories.filter((c) => c.checked).map((c) => c.id);
@@ -58,8 +64,7 @@
             console.error("Failed to update settings:", error);
         }
         
-        dispatch("settingsChange", settings);
-        if (onSettingsChange) onSettingsChange(settings);
+        if (onsettingsChange) onsettingsChange(settings);
     }
     
     async function injectIntelligence() {
@@ -73,7 +78,7 @@
             });
             console.log("Injected intelligence:", result);
             manualText = "";
-            dispatch("intelligenceInjected", result);
+            if (onintelligenceInjected) onintelligenceInjected(result);
         } catch (error) {
             console.error("Failed to inject intelligence:", error);
         }

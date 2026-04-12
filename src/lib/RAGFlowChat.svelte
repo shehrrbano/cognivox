@@ -11,7 +11,7 @@
         uploadDocument,
         parseDocuments,
     } from './services/ragflowService';
-    import { open } from "@tauri-apps/plugin-opener";
+    import { openUrl } from "@tauri-apps/plugin-opener";
     // ZERO_CONFIG_RAGFLOW_AUTO_SETUP_v1: Hide all manual setup UI for normal users.
     import {
         initializeRAGFlowAutoSetup,
@@ -24,7 +24,14 @@
         graphNodes = [],
         onautoZoomEntity = (entityId: string) => {},
         onopenSettings = () => {},
-    } = $props();
+        overrideDatasetId = null
+    } = $props<{
+        graphNodes?: any[];
+        onautoZoomEntity?: (id: string) => void;
+        onopenSettings?: () => void;
+        overrideDatasetId?: string | null;
+    }>();
+
 
     // ZERO_CONFIG: Dev Mode gate — only power users see raw setup fields.
     // Reuses the existing debugMode flag in settingsStore.
@@ -57,10 +64,12 @@
     $effect(() => {
         const url = $settingsStore.ragflowUrl;
         const key = $settingsStore.ragflowApiKey;
+        const dsId = overrideDatasetId || $settingsStore.knowledgeBaseId;
+        
         if (url && key) {
             checkRAGFlowStatus().then(status => {
                 ragflowStatus = status;
-                if (status.connected && $settingsStore.knowledgeBaseId) {
+                if (status.connected && dsId) {
                     loadDatasetName();
                 }
             });
@@ -70,12 +79,15 @@
     });
 
     async function loadDatasetName() {
+        const dsId = overrideDatasetId || $settingsStore.knowledgeBaseId;
+        if (!dsId) return;
         try {
             const datasets = await listDatasets();
-            const match = datasets.find(d => d.id === $settingsStore.knowledgeBaseId);
+            const match = datasets.find(d => d.id === dsId);
             datasetName = match?.name || null;
         } catch { datasetName = null; }
     }
+
 
     async function ensureConversation(): Promise<string | null> {
         if (conversationId) return conversationId;
@@ -104,16 +116,19 @@
 
         try {
             const convId = await ensureConversation();
-            if (!convId) {
+            const activeDsId = overrideDatasetId || $settingsStore.knowledgeBaseId;
+
+            if (!convId || !activeDsId) {
                 messages = [...messages, {
                     role: 'assistant',
-                    content: 'Could not create a RAGFlow conversation. Please check your RAGFlow URL, API key, and Knowledge Base ID in Settings.',
+                    content: 'Could not initialize session. Please check your RAGFlow configuration.',
                     timestamp: new Date().toLocaleTimeString(),
                 }];
                 return;
             }
 
-            const answer: RAGFlowAnswer = await askQuestion(convId, text);
+            const answer: RAGFlowAnswer = await askQuestion(convId, text, activeDsId);
+
 
             messages = [...messages, {
                 role: 'assistant',
@@ -155,7 +170,13 @@
         }
     }
 
+    export function handleExternalMessage(text: string) {
+        inputText = text;
+        sendMessage();
+    }
+
     function handleKeydown(e: KeyboardEvent) {
+
         if (e.key === 'Enter' && !e.shiftKey) {
             e.preventDefault();
             sendMessage();
@@ -174,10 +195,9 @@
     let fileInput: HTMLInputElement | undefined = $state();
 
     async function handleFileUpload(e: Event) {
-        const input = e.target as HTMLInputElement;
-        if (!input.files?.length || !$settingsStore.knowledgeBaseId) return;
-
-        const file = input.files[0];
+        const dsId = overrideDatasetId || $settingsStore.knowledgeBaseId;
+        if (!fileInput?.files?.length || !dsId) return;
+        const file = fileInput.files[0];
         isLoading = true;
         messages = [...messages, {
             role: 'assistant',
@@ -186,9 +206,10 @@
         }];
 
         try {
-            const doc = await uploadDocument($settingsStore.knowledgeBaseId, file.name, file);
+            const doc = await uploadDocument(dsId, file.name, file);
             if (doc?.id) {
-                await parseDocuments($settingsStore.knowledgeBaseId, [doc.id]);
+                await parseDocuments(dsId, [doc.id]);
+
                 messages = [...messages, {
                     role: 'assistant',
                     content: `Successfully added "${file.name}" to your knowledge base. It is now being indexed and will be available for questions in a few moments.`,
@@ -206,21 +227,22 @@
             }];
         } finally {
             isLoading = false;
-            input.value = '';
+            if (fileInput) fileInput.value = '';
         }
     }
 
     async function launchDashboard() {
         const url = ($settingsStore.ragflowUrl || 'http://localhost:9380').trim();
         const cleanUrl = url.split('/api')[0];
-        try { await open(cleanUrl); }
+        try { await openUrl(cleanUrl); }
         catch (e) { console.error('[RAGFlow] Failed to open dashboard:', e); }
     }
 
     // Derived state
     let isConfigured = $derived(!!$settingsStore.ragflowUrl && !!$settingsStore.ragflowApiKey);
-    let hasDataset = $derived(!!$settingsStore.knowledgeBaseId);
+    let hasDataset = $derived(!!(overrideDatasetId || $settingsStore.knowledgeBaseId));
     let isReady = $derived(ragflowStatus.connected && hasDataset);
+
 
     // Quick prompts for empty state
     const quickPrompts = [
@@ -285,8 +307,9 @@
                 aria-label="Launch dashboard"
             >
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                    <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+                    <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>
                 </svg>
+
             </button>
             <!-- Clear Chat -->
             {#if messages.length > 0}

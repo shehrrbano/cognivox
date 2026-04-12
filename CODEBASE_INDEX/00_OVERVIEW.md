@@ -20,12 +20,22 @@ Cognivox is a passive meeting intelligence engine designed to capture, transcrib
 - **[Individual File Reports](./FILES/)**: Deep-dive analysis for every single file in the project.
 
 ## MASTER CHECKSUM
-- **Total Files Scanned**: 124
-- **Files Marked Complete**: 124
+- **Total Files Scanned**: 132
+- **Files Marked Complete**: 132
 - **Status Breakdown**:
-    - **GREEN**: 118 files
+    - **GREEN**: 126 files
     - **YELLOW**: 6 files
     - **RED**: 0 files
+
+> [!IMPORTANT] COURSES_RAGFLOW_INTEGRATION_EINSTEIN_v1 STAMP
+> **Date**: 2026-04-12 11:00
+> **Status**: COMPLETE — ALL 6 RAGFLOW MODULES INTEGRATED INTO COURSES SYSTEM
+> **Features**: Multi-modal ingestion (Whisper, Vision, DeepDoc), three-column workspace, grounded chat with citations, auto-KG map, and Context Memory manager.
+> **Files created**: `src/lib/courseStore.ts`, `src/lib/services/courseParsingService.ts`, `src/lib/CoursesView.svelte`, `src/lib/CourseCreationModal.svelte`, `src/lib/CourseInterface.svelte`, `src/lib/CourseMemoryScreen.svelte`.
+> **Files modified**: `src/lib/types.ts` (Course/Resource types), `src/lib/Sidebar.svelte` (nav links), `src/routes/+page.svelte` (tab engine), `src/lib/RAGFlowChat.svelte` (scoped RAG support), `src/lib/services/ragflowService.ts` (dataset scaling).
+> **Architecture**: University Subject = Unique RAGFlow Dataset. Multi-Agent Vision extraction via Gemini 2.0 Flash. Transcription via local Whisper. Scoped Chat grounded 100% in Course materials.
+> **Folder**: `CODEBASE_INDEX/COURSES_RAGFLOW_INTEGRATION_EINSTEIN_v1/`
+
 
 > [!IMPORTANT] ZERO_CONFIG_RAGFLOW_AUTO_SETUP_v1 STAMP
 > **Date**: 2026-04-11 09:09

@@ -1,27 +1,35 @@
 <!-- ACTUAL EDIT: COGNIVOX_UI_REAL_CODE_APPLIER_v2 -->
 <!-- UNIFIED: COGNIVOX_UI_MAPPER_v1 -->
+<!-- CONVERTED: SVELTE_5_PROPS_v1 -->
 <script lang="ts">
     import { onMount, onDestroy } from "svelte";
     import { invoke } from "@tauri-apps/api/core";
 
-    export let isRecording = false;
-    export let isGeminiConnected = false;
+    interface Props {
+        isRecording?: boolean;
+        isGeminiConnected?: boolean;
+    }
+
+    let {
+        isRecording = false,
+        isGeminiConnected = false
+    }: Props = $props();
 
     // Real metrics from backend
-    let audioDevices: string[] = [];
-    let captureMode = "mic";
-    let currentVolume = 0;
+    let audioDevices = $state<string[]>([]);
+    let captureMode = $state("mic");
+    let currentVolume = $state(0);
     
     // Performance metrics
-    let fps = 60;
+    let fps = $state(60);
     let lastFrameTime = performance.now();
     let frameCount = 0;
-    let memoryUsage = 0;
+    let memoryUsage = $state(0);
     
     // Connection status
-    let apiEndpoint = "generativelanguage.googleapis.com";
-    let lastRequestTime = "--";
-    let requestCount = 0;
+    let apiEndpoint = $state("generativelanguage.googleapis.com");
+    let lastRequestTime = $derived(isRecording ? new Date().toLocaleTimeString() : "--");
+    let requestCount = $state(0);
 
     let interval: ReturnType<typeof setInterval>;
     let animationId: number;
@@ -78,32 +86,10 @@
         }, 500);
     });
 
-    onMount(() => {
-        loadDevices();
-        measureFPS();
-        
-        interval = setInterval(async () => {
-            await pollVolume();
-            
-            // Estimate memory usage (browser-only approximation)
-            if ((performance as any).memory) {
-                memoryUsage = Math.round((performance as any).memory.usedJSHeapSize / 1024 / 1024);
-            }
-            
-            if (isRecording) {
-                requestCount++;
-            }
-        }, 500);
-    });
-
     onDestroy(() => {
         if (interval) clearInterval(interval);
         if (animationId) cancelAnimationFrame(animationId);
     });
-
-    $: if (isRecording) {
-        lastRequestTime = new Date().toLocaleTimeString();
-    }
 </script>
 
 <div class="grid grid-cols-1 sm:grid-cols-2 gap-fluid-gap">
@@ -178,9 +164,10 @@
                 </div>
             </div>
             <div class="p-3 rounded-lg bg-gray-200/50 border border-gray-200">
-                <div class="text-xs text-gray-400 mb-1">Request Count</div>
+                <div class="text-xs text-gray-400 mb-1">Memory Usage</div>
                 <div class="text-xl font-bold text-blue-500">
-                    {requestCount}
+                    {memoryUsage}
+                    <span class="text-xs font-normal text-gray-400">MB</span>
                 </div>
             </div>
         </div>
@@ -200,7 +187,7 @@
             <div class="flex items-center gap-2 flex-1">
                 <!-- Capture Stage -->
                 <div class="flex-1 relative">
-                    <div class="h-2 rounded-full {isRecording ? 'bg-gradient-to-r from-cyan-500 to-cyan-400' : 'bg-dark-600'} transition-all">
+                    <div class="h-2 rounded-full {isRecording ? 'bg-gradient-to-r from-cyan-500 to-cyan-400' : 'bg-slate-700'} transition-all">
                         {#if isRecording && currentVolume > 0.01}
                             <div 
                                 class="absolute inset-0 bg-white/20 rounded-full animate-pulse"
@@ -213,12 +200,12 @@
                     <polyline points="9 18 15 12 9 6"></polyline>
                 </svg>
                 <!-- Process Stage -->
-                <div class="flex-1 h-2 rounded-full {isRecording ? 'bg-gradient-to-r from-cyan-400 to-blue-500' : 'bg-dark-600'} transition-all" style="transition-delay: 100ms"></div>
+                <div class="flex-1 h-2 rounded-full {isRecording ? 'bg-gradient-to-r from-cyan-400 to-blue-500' : 'bg-slate-700'} transition-all" style="transition-delay: 100ms"></div>
                 <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" class="text-blue-500 {isGeminiConnected ? 'animate-pulse' : 'opacity-30'}">
                     <polyline points="9 18 15 12 9 6"></polyline>
                 </svg>
                 <!-- Transmit Stage -->
-                <div class="flex-1 h-2 rounded-full {isGeminiConnected ? 'bg-gradient-to-r from-blue-500 to-purple-500' : 'bg-dark-600'} transition-all" style="transition-delay: 200ms"></div>
+                <div class="flex-1 h-2 rounded-full {isGeminiConnected ? 'bg-gradient-to-r from-blue-500 to-purple-500' : 'bg-slate-700'} transition-all" style="transition-delay: 200ms"></div>
             </div>
         </div>
         <div class="flex justify-between text-xs text-gray-400 mt-2">

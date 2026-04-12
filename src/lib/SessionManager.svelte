@@ -1,12 +1,25 @@
+<!-- ACTUAL EDIT: COGNIVOX_UI_REAL_CODE_APPLIER_v2 -->
+<!-- UNIFIED: COGNIVOX_UI_MAPPER_v1 -->
+<!-- CONVERTED: SVELTE_5_PROPS_v1 -->
 <script lang="ts">
     import { invoke } from "@tauri-apps/api/core";
     import { save } from "@tauri-apps/plugin-dialog";
-    import { onMount } from "svelte";
+
+    interface Props {
+        currentSession?: any | null;
+        pastSessions?: any[];
+        onsessionLoad?: (session: any) => void;
+        onsessionDelete?: (data: { sessionId: string; event: MouseEvent }) => void;
+        onrefreshSessions?: () => void;
+    }
 
     let {
         currentSession = $bindable(null),
-        onSessionLoad = (session: any) => {}
-    } = $props();
+        pastSessions = [],
+        onsessionLoad,
+        onsessionDelete,
+        onrefreshSessions
+    }: Props = $props();
 
     let sessions = $state<any[]>([]);
     let showSaveDialog = $state(false);
@@ -19,10 +32,21 @@
     let isGeneratingSummary = $state(false);
     let sessionSummary = $state<any>(null);
 
+    // Sync local sessions with props if needed, or keep local
+    $effect(() => {
+        if (pastSessions.length > 0) {
+            sessions = pastSessions;
+        }
+    });
+
     // ===== SESSION OPERATIONS (Local-Only Storage) =====
     async function loadSessions() {
-        const sessionMap = new Map<string, any>();
+        if (onrefreshSessions) {
+            onrefreshSessions();
+            return;
+        }
 
+        const sessionMap = new Map<string, any>();
         try {
             const localJson = (await invoke("list_sessions")) as string;
             const localSessions = JSON.parse(localJson);
@@ -57,20 +81,24 @@
     async function loadSession(sessionId: string) {
         try {
             const session = sessions.find((s) => s.id === sessionId);
-            onSessionLoad(session || { id: sessionId });
+            if (onsessionLoad) onsessionLoad(session || { id: sessionId });
             showLoadDialog = false;
         } catch (error) {
             console.error("Failed to load session:", error);
         }
     }
 
-    async function deleteSession(sessionId: string) {
-        if (!confirm("Are you sure you want to delete this session?")) return;
-        try {
-            await invoke("delete_session", { sessionId });
-            await loadSessions();
-        } catch (error) {
-            console.error("Failed to delete session:", error);
+    async function handleDeleteSession(sessionId: string, event: MouseEvent) {
+        if (onsessionDelete) {
+            onsessionDelete({ sessionId, event });
+        } else {
+            if (!confirm("Are you sure you want to delete this session?")) return;
+            try {
+                await invoke("delete_session", { sessionId });
+                await loadSessions();
+            } catch (error) {
+                console.error("Failed to delete session:", error);
+            }
         }
     }
 
@@ -185,60 +213,24 @@
 <!-- Save Dialog -->
 {#if showSaveDialog}
     <div
-        class="fixed inset-0 bg-white/95 backdrop-blur-sm flex items-center justify-center z-50"
+        class="fixed inset-0 bg-white/95 backdrop-blur-sm flex items-center justify-center z-50 px-4"
     >
-        <div class="glass-card p-6 max-w-md w-full mx-4">
+        <div class="glass-card p-6 max-w-md w-full">
             <h3 class="text-lg font-bold text-gray-900 mb-4">Save Session</h3>
-
-            <!-- Storage indicator -->
-            <div
-                class="flex items-center gap-2 mb-3 p-2 rounded-lg bg-green-500/10 border border-green-500/20"
-            >
-                <svg
-                    xmlns="http://www.w3.org/2000/svg"
-                    width="9"
-                    height="9"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="1"
-                    class="text-green-400"
-                >
-                    <path d="M22 12H2"/><path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>
-                </svg>
-                <span class="text-xs text-green-400"
-                    >Saving to local storage</span
-                >
+            <div class="flex items-center gap-2 mb-3 p-2 rounded-lg bg-green-50 border border-green-100">
+                <span class="text-xs text-green-600 font-medium tracking-tight">Saving to local store</span>
             </div>
-
-            <label
-                for="session-title"
-                class="text-xs text-gray-500 block mb-2"
-            >
-                Session Title
-            </label>
+            <label for="session-title" class="text-xs font-bold text-gray-400 uppercase tracking-widest block mb-2">Session Title</label>
             <input
                 id="session-title"
                 type="text"
                 bind:value={sessionTitle}
-                placeholder="Enter session title..."
+                placeholder="Meeting Title..."
                 class="input-field mb-4"
             />
-
-            <div class="flex gap-2">
-                <button
-                    class="btn-primary flex-1"
-                    onclick={saveCurrentSession}
-                    disabled={isSaving}
-                >
-                    {isSaving ? "Saving..." : "Save Session"}
-                </button>
-                <button
-                    class="btn-secondary flex-1"
-                    onclick={() => (showSaveDialog = false)}
-                >
-                    Cancel
-                </button>
+            <div class="flex gap-3">
+                <button class="btn-primary flex-1 py-3" onclick={saveCurrentSession} disabled={isSaving}>{isSaving ? "Saving..." : "Save Session"}</button>
+                <button class="btn-secondary flex-1 py-3" onclick={() => (showSaveDialog = false)}>Cancel</button>
             </div>
         </div>
     </div>
@@ -246,120 +238,58 @@
 
 <!-- Load Dialog -->
 {#if showLoadDialog}
-    <div
-        class="fixed inset-0 bg-white/95 backdrop-blur-sm flex items-center justify-center z-50"
-    >
-        <div
-            class="glass-card p-4 sm:p-6 max-w-2xl w-full h-full sm:h-auto sm:max-h-[80vh] overflow-y-auto rounded-none sm:rounded-2xl"
-        >
-            <div class="flex items-center justify-between mb-4">
-                <h3 class="text-lg font-bold text-gray-900">Load Session</h3>
-                <span
-                    class="text-xs px-2 py-1 rounded bg-green-500/20 text-green-500"
-                >
-                    Local Storage
-                </span>
+    <div class="fixed inset-0 bg-white/95 backdrop-blur-sm flex items-center justify-center z-50">
+        <div class="glass-card p-6 max-w-2xl w-full max-h-[80vh] overflow-y-auto m-4">
+            <div class="flex items-center justify-between mb-6">
+                <h3 class="text-lg font-black text-gray-900 uppercase tracking-tight">Load Session</h3>
+                <span class="text-[9px] font-black px-2 py-1 rounded bg-green-100 text-green-600 uppercase tracking-widest">Local</span>
             </div>
-
             {#if sessions.length === 0}
-                <p class="text-sm text-gray-400 text-center py-8">
-                    No saved sessions found
-                </p>
+                <div class="py-12 text-center">
+                    <p class="text-[11px] font-bold text-gray-400 uppercase tracking-widest">No saved sessions found</p>
+                </div>
             {:else}
-                <div class="space-y-2">
+                <div class="space-y-3">
                     {#each sessions as session}
-                        <div
-                            class="glass-card p-4 hover:border-blue-300 transition-all cursor-pointer"
-                        >
-                            <div class="flex items-start justify-between mb-2">
-                                <div>
-                                    <h4
-                                        class="text-sm font-bold text-gray-800"
-                                    >
-                                        {session.metadata.title}
-                                    </h4>
-                                    <p class="text-xs text-gray-400">
-                                        {new Date(
-                                            session.created_at,
-                                        ).toLocaleString()}
-                                    </p>
+                        <div class="group bg-gray-50/50 p-4 rounded-xl border border-gray-100 hover:border-blue-300 hover:bg-blue-50/30 transition-all cursor-default">
+                            <div class="flex items-start justify-between mb-3">
+                                <div class="min-w-0">
+                                    <h4 class="text-xs font-black text-gray-900 truncate pr-4">{session.metadata.title}</h4>
+                                    <p class="text-[9px] font-bold text-gray-400 mt-0.5">{new Date(session.updated_at).toLocaleString()}</p>
                                 </div>
-                                <div class="flex gap-2">
-                                    <button
-                                        class="btn-primary text-xs px-3 py-1"
-                                        onclick={() => loadSession(session.id)}
-                                    >
-                                        Load
-                                    </button>
-                                    <button
-                                        class="btn-ghost text-xs px-3 py-1 text-red-500 hover:text-red-600"
-                                        onclick={() =>
-                                            deleteSession(session.id)}
-                                    >
-                                        Delete
-                                    </button>
+                                <div class="flex gap-2 shrink-0">
+                                    <button class="px-3 py-1.5 text-[10px] font-black uppercase tracking-widest bg-blue-600 text-white rounded-lg shadow-sm shadow-blue-200" onclick={() => loadSession(session.id)}>Load</button>
+                                    <button class="px-3 py-1.5 text-[10px] font-black uppercase tracking-widest bg-white text-red-500 border border-red-100 rounded-lg" onclick={(e) => handleDeleteSession(session.id, e as any)}>Delete</button>
                                 </div>
                             </div>
-                            <div class="text-xs text-gray-400 flex gap-4">
-                                <span
-                                    >{session.metadata.total_transcripts} transcripts</span
-                                >
-                                <span
-                                    >{session.graph_nodes?.length || 0} nodes</span
-                                >
-                                <span>{session.metadata.duration_seconds}s</span
-                                >
+                            <div class="flex gap-4 text-[9px] font-bold text-gray-400">
+                                <span class="flex items-center gap-1"><span class="w-1 h-1 rounded-full bg-blue-400"></span> {session.metadata.total_transcripts} Entries</span>
+                                <span class="flex items-center gap-1"><span class="w-1 h-1 rounded-full bg-purple-400"></span> {session.graph_nodes?.length || 0} Nodes</span>
+                                <span class="flex items-center gap-1"><span class="w-1 h-1 rounded-full bg-green-400"></span> {session.metadata.duration_seconds}s</span>
                             </div>
                         </div>
                     {/each}
                 </div>
             {/if}
-
-            <button
-                class="btn-secondary w-full mt-4"
-                onclick={() => (showLoadDialog = false)}
-            >
-                Close
-            </button>
+            <button class="btn-secondary w-full mt-6 py-3 font-black uppercase tracking-widest text-[10px]" onclick={() => (showLoadDialog = false)}>Close Panel</button>
         </div>
     </div>
 {/if}
 
 <!-- Export Dialog -->
 {#if showExportDialog}
-    <div
-        class="fixed inset-0 bg-white/95 backdrop-blur-sm flex items-center justify-center z-50"
-    >
-        <div class="glass-card p-6 max-w-md w-full mx-4">
-            <h3 class="text-lg font-bold text-gray-900 mb-4">
-                Export Session
-            </h3>
-
-            <div class="text-xs text-gray-500 block mb-2">Export Format</div>
-            <div class="grid grid-cols-3 gap-2 mb-4">
+    <div class="fixed inset-0 bg-white/95 backdrop-blur-sm flex items-center justify-center z-50">
+        <div class="glass-card p-6 max-w-md w-full m-4">
+            <h3 class="text-lg font-black text-gray-900 uppercase tracking-tight mb-6">Export Session</h3>
+            <div class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-3">Target Format</div>
+            <div class="grid grid-cols-3 gap-2 mb-6">
                 {#each ["json", "csv", "markdown", "graphml", "entities"] as format}
-                    <button
-                        class="px-3 py-2 text-xs rounded-lg border transition-all {exportFormat ===
-                        format
-                            ? 'bg-blue-50 border-blue-400 text-blue-400'
-                            : 'bg-gray-200 border-blue-200 text-gray-500 hover:border-blue-300'}"
-                        onclick={() => (exportFormat = format as any)}
-                    >
-                        {format.toUpperCase()}
-                    </button>
+                    <button class="px-3 py-2.5 text-[9px] font-black uppercase tracking-widest rounded-xl border transition-all {exportFormat === format ? 'bg-blue-600 border-blue-600 text-white shadow-lg shadow-blue-200' : 'bg-white border-gray-100 text-gray-400 hover:border-blue-300 hover:text-blue-500'}" onclick={() => (exportFormat = format as any)}>{format}</button>
                 {/each}
             </div>
-
-            <div class="flex gap-2">
-                <button class="btn-primary flex-1" onclick={exportSession}>
-                    Export
-                </button>
-                <button
-                    class="btn-secondary flex-1"
-                    onclick={() => (showExportDialog = false)}
-                >
-                    Cancel
-                </button>
+            <div class="flex gap-3">
+                <button class="btn-primary flex-1 py-3" onclick={exportSession}>Confirm Export</button>
+                <button class="btn-secondary flex-1 py-3" onclick={() => (showExportDialog = false)}>Cancel</button>
             </div>
         </div>
     </div>
@@ -367,71 +297,35 @@
 
 <!-- Summary Dialog -->
 {#if showSummaryDialog}
-    <div
-        class="fixed inset-0 bg-white/95 backdrop-blur-sm flex items-center justify-center z-50"
-    >
-        <div
-            class="glass-card p-6 max-w-2xl w-full mx-4 max-h-[80vh] overflow-y-auto"
-        >
-            <h3 class="text-lg font-bold text-gray-900 mb-4">
-                Session Summary
-            </h3>
-
+    <div class="fixed inset-0 bg-white/95 backdrop-blur-sm flex items-center justify-center z-50">
+        <div class="glass-card p-6 max-w-2xl w-full max-h-[80vh] overflow-y-auto m-4">
+            <h3 class="text-lg font-black text-gray-900 uppercase tracking-tight mb-6">AI Session Summary</h3>
             {#if sessionSummary}
-                <div class="space-y-4">
-                    <div class="glass-card p-4">
-                        <h4 class="text-sm font-medium text-blue-500 mb-2">
-                            Overview
-                        </h4>
-                        <p class="text-sm text-gray-700">
-                            {sessionSummary.overview || "No overview available"}
-                        </p>
+                <div class="space-y-6">
+                    <div class="bg-blue-50 border border-blue-100 p-5 rounded-2xl">
+                        <h4 class="text-[10px] font-bold text-blue-600 uppercase tracking-[0.2em] mb-3">Strategic Overview</h4>
+                        <p class="text-sm font-medium text-gray-800 leading-relaxed">{sessionSummary.overview || "Analysis pending."}</p>
                     </div>
-
                     {#if sessionSummary.key_points?.length > 0}
-                        <div class="glass-card p-4">
-                            <h4 class="text-sm font-medium text-blue-500 mb-2">
-                                Key Points
-                            </h4>
-                            <ul class="text-sm text-gray-700 space-y-1">
+                        <div>
+                            <h4 class="text-[10px] font-bold text-gray-400 uppercase tracking-[0.2em] mb-3 px-1">Key Objectives</h4>
+                            <div class="space-y-2">
                                 {#each sessionSummary.key_points as point}
-                                    <li class="flex gap-2">
-                                        <span class="text-blue-500">•</span>
-                                        {point}
-                                    </li>
+                                    <div class="bg-white p-3.5 rounded-xl border border-gray-100 flex gap-3 items-start">
+                                        <span class="text-blue-500 mt-1">•</span>
+                                        <p class="text-[13px] font-medium text-gray-800">{point}</p>
+                                    </div>
                                 {/each}
-                            </ul>
-                        </div>
-                    {/if}
-
-                    {#if sessionSummary.action_items?.length > 0}
-                        <div class="glass-card p-4">
-                            <h4 class="text-sm font-medium text-blue-500 mb-2">
-                                Action Items
-                            </h4>
-                            <ul class="text-sm text-gray-700 space-y-1">
-                                {#each sessionSummary.action_items as item}
-                                    <li class="flex gap-2">
-                                        <span class="text-green-600">→</span>
-                                        {item}
-                                    </li>
-                                {/each}
-                            </ul>
+                            </div>
                         </div>
                     {/if}
                 </div>
             {:else}
-                <p class="text-sm text-gray-400 text-center py-8">
-                    No summary available
-                </p>
+                <div class="py-12 text-center">
+                    <p class="text-[11px] font-bold text-gray-400 uppercase tracking-widest">No Intelligence Summary Available</p>
+                </div>
             {/if}
-
-            <button
-                class="btn-secondary w-full mt-4"
-                onclick={() => (showSummaryDialog = false)}
-            >
-                Close
-            </button>
+            <button class="btn-secondary w-full mt-8 py-3 font-black uppercase tracking-widest text-[10px]" onclick={() => (showSummaryDialog = false)}>Dismiss Summary</button>
         </div>
     </div>
 {/if}

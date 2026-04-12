@@ -1,6 +1,23 @@
+<!-- ACTUAL EDIT: COGNIVOX_UI_REAL_CODE_APPLIER_v2 -->
+<!-- UNIFIED: COGNIVOX_UI_MAPPER_v1 -->
+<!-- CONVERTED: SVELTE_5_PROPS_v1 -->
 <script lang="ts">
     import SessionManager from "./SessionManager.svelte";
     import type { GraphNode, GraphEdge } from "./types";
+
+    interface Props {
+        pastSessions?: any[];
+        currentSession?: any | null;
+        graphNodes?: GraphNode[];
+        graphEdges?: GraphEdge[];
+        activeTab?: string;
+        speakerIdInitialized?: boolean;
+        onsessionLoad?: (session: any) => void;
+        onsessionDelete?: (data: { sessionId: string; event: MouseEvent }) => void;
+        onrefreshSessions?: () => void;
+        ontabChange?: (tab: string) => void;
+        ontoggleCluster?: (data: { nodeId: string }) => void;
+    }
 
     let {
         pastSessions = [],
@@ -9,136 +26,105 @@
         graphEdges = [],
         activeTab = "transcript",
         speakerIdInitialized = false,
-        onsessionLoad = () => {},
-        onsessionDelete = () => {},
-        onrefreshSessions = () => {},
-        ontabChange = () => {},
-        ontoggleCluster = () => {}
-    } = $props();
+        onsessionLoad,
+        onsessionDelete,
+        onrefreshSessions,
+        ontabChange,
+        ontoggleCluster
+    }: Props = $props();
 
     function handleSessionLoad(session: any) {
-        onsessionLoad(session);
+        if (onsessionLoad) onsessionLoad(session);
     }
 
-    function handleSessionDelete(sessionId: string, event: MouseEvent) {
-        onsessionDelete({ sessionId, event });
+    function handleSessionDelete(data: { sessionId: string; event: MouseEvent }) {
+        if (onsessionDelete) onsessionDelete(data);
     }
 
     function handleRefreshSessions() {
-        onrefreshSessions();
+        if (onrefreshSessions) onrefreshSessions();
     }
 
-    function handleTabChange(tab: string) {
-        console.log(`[Sidebar] Switching to tab: ${tab}`);
-        ontabChange(tab);
-    }
+    const navItems = [
+        { id: "transcript", label: "Transcript", icon: "message-square" },
+        { id: "courses", label: "Courses", icon: "book-open" },
+        { id: "graph", label: "Knowledge Map", icon: "share-2" },
+        { id: "analytics", label: "Analytics", icon: "bar-chart-2" },
+        { id: "ledger", label: "Decision Ledger", icon: "list" },
+        { id: "alerts", label: "Alerts", icon: "bell" },
+        { id: "search", label: "Global Search", icon: "search" },
+        { id: "diagnostics", label: "Diagnostics", icon: "activity" }
+    ];
 </script>
 
-<div class="w-full lg:w-[320px] sidebar flex flex-col h-screen lg:sticky lg:top-0 border-r border-slate-200/50 bg-white backdrop-blur-xl overflow-hidden shadow-xl shadow-slate-900/5">
-    <!-- 1. FIXED BRAND HEADER -->
-    <div class="px-4 py-5 border-b border-slate-100 relative overflow-hidden bg-slate-50/30 flex-shrink-0">
-        <div class="absolute -top-6 -left-6 w-24 h-24 bg-blue-500/10 rounded-full blur-3xl"></div>
-        <div class="relative z-10 w-full">
-            <h1 class="text-fluid-lg font-bold text-slate-900 tracking-tight flex items-center gap-2">
-                <svg width="28" height="28" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg" class="flex-shrink-0">
-                    <rect width="32" height="32" rx="6" fill="url(#cognivox-gradient-v3)"/>
-                    <circle cx="11" cy="16" r="3.5" fill="white" opacity="0.9"/>
-                    <circle cx="21" cy="16" r="3.5" fill="white" opacity="0.9"/>
-                    <path d="M14.5 16 Q16 11 17.5 16" stroke="white" stroke-width="1.5" fill="none" stroke-linecap="round"/>
-                    <defs>
-                        <linearGradient id="cognivox-gradient-v3" x1="0" y1="0" x2="32" y2="32" gradientUnits="userSpaceOnUse">
-                            <stop offset="0%" stop-color="#2563EB"/>
-                            <stop offset="100%" stop-color="#1D4ED8"/>
-                        </linearGradient>
-                    </defs>
-                </svg>
-                <span class="font-black tracking-wider text-slate-900" style="letter-spacing: 0.08em;">COGNIVOX</span>
-            </h1>
-            <p class="text-[9px] font-bold text-blue-500 uppercase tracking-wide mt-1 opacity-80 pl-[34px] truncate">Intelligence Engine</p>
+<aside class="sidebar h-full flex flex-col border-r border-gray-200 bg-white">
+    <div class="sidebar-header p-5 border-b border-gray-100">
+        <div class="flex items-center gap-3">
+            <div class="w-8 h-8 rounded-lg bg-blue-600 flex items-center justify-center shadow-lg shadow-blue-200">
+                <svg class="w-5 h-5 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg>
+            </div>
+            <div>
+                <h1 class="text-sm font-black text-gray-900 tracking-tight leading-none">Cognivox</h1>
+                <p class="text-[9px] font-bold text-blue-500 uppercase tracking-widest mt-1">Intelligence Layer</p>
+            </div>
         </div>
     </div>
 
-    <!-- 2. UNIFIED SCROLLABLE AREA (Navigation + Recent Sessions) -->
-    <div class="flex-1 overflow-y-auto custom-scrollbar flex flex-col min-h-0 bg-slate-50/10">
-        
-        <!-- Navigation Area (Inside Scroll) -->
-        <div class="p-4 flex flex-col gap-1.5 flex-shrink-0">
-            <div class="mb-2">
-                <span class="text-[10px] font-black text-slate-400 uppercase tracking-widest pl-1">Navigation</span>
-            </div>
-            {#each [
-                { id: 'transcript', label: 'Feeding Feed', icon: 'M4 17l6-6-6-6M12 19h8' },
-                { id: 'ledger', label: 'Decision Ledger', icon: 'M3 4h18v18H3V4z M16 2v4 M8 2v4 M3 10h18' },
-                { id: 'overview', label: 'Project Overview', icon: 'M3 3h7v7H3V3z M14 3h7v7h-7V3z M14 14h7v7h-7v14z M3 14h7v7H3v-7z' },
-                { id: 'graph', label: 'Knowledge Map', icon: 'M12 2l10 5-10 5-10-5 10-5z M2 17l10 5 10-5 M2 12l10 5 10-5' },
-                { id: 'analytics', label: 'Analytics Stats', icon: 'M22 12h-4l-3 9L9 3 6 12H2' },
-                { id: 'speakers', label: 'Voice Profiles', icon: 'M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2 M9 7a4 4 0 100-8 4 4 0 000 8z M23 21v-2a4 4 0 00-3-3.87 M16 3.13a4 4 0 010 7.75' },
-                { id: 'tasks', label: 'Action Center', icon: 'M12 20h9 M16.5 3.5a2.12 2.12 0 013 3L7 19l-4 1 1-4L16.5 3.5z' },
-                { id: 'chat', label: 'Study Buddy', icon: 'M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z' }
-            ] as tab}
+    <!-- Main Navigation -->
+    <nav class="flex-1 overflow-y-auto p-4 space-y-1 custom-scrollbar">
+        <div class="mb-4">
+            <span class="text-[9px] font-black text-gray-400 uppercase tracking-[0.2em] px-3 mb-2 block">MAIN CONSOLE</span>
+            {#each navItems as item}
                 <button
-                    class="w-full flex items-center gap-3 p-2.5 rounded-xl transition-all duration-200 promax-interaction group {activeTab === tab.id ? 'bg-blue-600 shadow-lg shadow-blue-500/20 text-white' : 'text-slate-500 hover:bg-white hover:shadow-sm hover:text-blue-600 border border-transparent hover:border-slate-100'}"
-                    onclick={() => handleTabChange(tab.id)}
-                    aria-label="Switch to {tab.label}"
+                    class="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-[12px] font-bold transition-all promax-interaction
+                        {activeTab === item.id 
+                            ? 'bg-blue-50 text-blue-600 shadow-sm border border-blue-100' 
+                            : 'text-gray-500 hover:text-gray-900 hover:bg-gray-50'}"
+                    onclick={() => ontabChange?.(item.id)}
+                    aria-label="Navigate to {item.label}"
                 >
-                    <div class="flex-shrink-0 w-8 h-8 flex items-center justify-center rounded-lg {activeTab === tab.id ? 'bg-white/20' : 'bg-slate-100 group-hover:bg-blue-50'}">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true">
-                            <path d={tab.icon} />
+                    <span class="w-4 h-4 opacity-70">
+                        <!-- Simplified icons for demo -->
+                        <svg class="w-full h-full" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            {#if item.icon === 'message-square'}<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>{/if}
+                            {#if item.icon === 'book-open'}<path d="M2 3h6a4 4 0 0 1 4 4v14a4 4 0 0 0-4-4H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a4 4 0 0 1 4-4h6z"/>{/if}
+                            {#if item.icon === 'share-2'}<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/>{/if}
+                            {#if item.icon === 'bar-chart-2'}<line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/>{/if}
+                            {#if item.icon === 'list'}<line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/>{/if}
+                            {#if item.icon === 'bell'}<path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/>{/if}
+                            {#if item.icon === 'search'}<circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>{/if}
+                            {#if item.icon === 'activity'}<polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>{/if}
                         </svg>
-                    </div>
-                    <div class="flex-1 flex flex-col items-start overflow-hidden text-left">
-                        <span class="text-[11px] font-bold uppercase tracking-wider truncate w-full leading-none mb-1">{tab.label.split(' ')[1] || tab.label}</span>
-                        <span class="text-[8px] font-bold opacity-50 uppercase tracking-tighter truncate w-full leading-none">{tab.label.split(' ')[0]}</span>
-                    </div>
+                    </span>
+                    {item.label}
                 </button>
             {/each}
         </div>
 
-        <div class="h-px bg-slate-100 mx-4 my-2"></div>
+        <div class="pt-4 border-t border-gray-100">
+            <span class="text-[9px] font-black text-gray-400 uppercase tracking-[0.2em] px-3 mb-2 block">HISTORY & SESSIONS</span>
+            <SessionManager
+                {pastSessions}
+                onsessionLoad={handleSessionLoad}
+                onsessionDelete={handleSessionDelete}
+                onrefreshSessions={handleRefreshSessions}
+            />
+        </div>
+    </nav>
 
-        <!-- Recent Sessions Section (Inside Scroll) -->
-        <div class="px-4 py-4 flex flex-col flex-grow">
-            <div class="flex items-center justify-between mb-4 px-1">
-                <span class="text-[11px] font-black text-slate-400 uppercase tracking-widest">Recent Activity</span>
-                <div class="flex items-center gap-1.5">
-                    <button class="p-1 text-gray-400 hover:text-blue-500 transition-colors"><svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg></button>
-                    <button class="p-1 text-gray-400 hover:text-blue-500 transition-colors"><svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"></polygon></svg></button>
-                </div>
+    <!-- Sidebar Footer -->
+    <div class="p-4 border-t border-gray-100 bg-gray-50/50">
+        <div class="flex items-center gap-3 px-2 py-2">
+            <div class="w-8 h-8 rounded-full bg-gradient-to-tr from-blue-500 to-indigo-600 overflow-hidden border-2 border-white shadow-sm ring-1 ring-gray-100">
+                <div class="w-full h-full flex items-center justify-center text-[10px] font-black text-white">AD</div>
             </div>
-
-            <div class="space-y-3">
-                {#if pastSessions.length === 0}
-                    <div class="py-6 text-center">
-                        <p class="text-[10px] font-bold text-gray-300 uppercase">No History</p>
-                    </div>
-                {:else}
-                    {#each pastSessions as session}
-                        {@const isSelected = currentSession?.id === session.id}
-                        <div class="relative group">
-                            <div class="w-full text-left p-3 rounded-xl border transition-all {isSelected ? 'bg-white border-blue-200 shadow-sm ring-1 ring-blue-50' : 'bg-white border-slate-100 hover:border-slate-200'} flex flex-col gap-1.5 cursor-pointer" onclick={() => handleSessionLoad(session)}>
-                                <div class="flex justify-between items-center">
-                                    <span class="text-[8px] font-bold uppercase px-1.5 py-0.5 rounded bg-slate-50 text-slate-500">SESSION</span>
-                                    <span class="text-[8px] font-medium text-gray-400">{new Date(session.created_at).toLocaleDateString()}</span>
-                                </div>
-                                <h3 class="text-[11px] font-bold text-slate-700 truncate">{session.metadata.title || "Untitled Session"}</h3>
-                            </div>
-                            <button class="absolute -top-1 -right-1 w-5 h-5 rounded-full bg-white border border-slate-100 text-red-400 opacity-0 group-hover:opacity-100 transition-all flex items-center justify-center shadow-sm hover:bg-red-50" onclick={(e) => handleSessionDelete(session.id, e)}><svg class="w-2.5 h-2.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg></button>
-                        </div>
-                    {/each}
-                {/if}
+            <div class="min-w-0 flex-1">
+                <p class="text-[11px] font-bold text-gray-900 truncate">Admin User</p>
+                <p class="text-[9px] text-gray-400 font-medium truncate">Pro Plan Active</p>
             </div>
+            <button class="text-gray-300 hover:text-blue-500 transition-colors" aria-label="Account Settings">
+                <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+            </button>
         </div>
     </div>
-
-    <!-- 3. FIXED FOOTER (Session Multi-Action Card) -->
-    <div class="p-3 border-t border-slate-100 bg-white flex-shrink-0">
-        <SessionManager {currentSession} onSessionLoad={handleSessionLoad} />
-    </div>
-</div>
-
-<style>
-    .custom-scrollbar::-webkit-scrollbar { width: 6px; }
-    .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
-    .custom-scrollbar::-webkit-scrollbar-thumb { background: rgba(148, 163, 184, 0.2); border-radius: 10px; }
-    .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: rgba(148, 163, 184, 0.4); }
-</style>
+</aside>

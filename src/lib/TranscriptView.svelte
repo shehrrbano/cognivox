@@ -1,9 +1,23 @@
 <!-- ACTUAL EDIT: COGNIVOX_UI_REAL_CODE_APPLIER_v2 -->
 <!-- UNIFIED: COGNIVOX_UI_MAPPER_v1 -->
+<!-- CONVERTED: SVELTE_5_PROPS_v1 -->
 <script lang="ts">
     import type { Transcript, GraphNode, GraphEdge } from "./types";
-    import { createEventDispatcher, onMount } from "svelte";
     import KnowledgeGraph from "./KnowledgeGraph.svelte";
+    import { settingsStore } from "./settingsStore";
+
+    interface Props {
+        transcripts?: Transcript[];
+        graphNodes?: GraphNode[];
+        graphEdges?: GraphEdge[];
+        isCollapsed?: boolean;
+        debugMode?: boolean;
+        debugEventCount?: number;
+        debugLastEvent?: string;
+        debugLastTranscript?: string;
+        onexpandGraph?: () => void;
+        onrenameSpeaker?: (data: { speakerId: string | undefined; newLabel: string }) => void;
+    }
 
     let {
         transcripts = [],
@@ -13,18 +27,16 @@
         debugMode = false,
         debugEventCount = 0,
         debugLastEvent = "",
-        debugLastTranscript = ""
-    } = $props();
+        debugLastTranscript = "",
+        onexpandGraph,
+        onrenameSpeaker
+    }: Props = $props();
 
-    import { settingsStore } from "./settingsStore";
-
-    const dispatch = createEventDispatcher();
-
-    // Task 2.3 (BATCH2): Inline speaker rename — dispatch to parent (+page.svelte)
+    // Task 2.3 (BATCH2): Inline speaker rename — callback to parent (+page.svelte)
     function renameSpeakerInline(speakerId: string | undefined, currentName: string) {
         const newName = prompt(`Rename "${currentName}" to:`, currentName);
         if (newName && newName.trim() && newName.trim() !== currentName) {
-            dispatch('renameSpeaker', { speakerId, newLabel: newName.trim() });
+            if (onrenameSpeaker) onrenameSpeaker({ speakerId, newLabel: newName.trim() });
         }
     }
 
@@ -66,7 +78,7 @@
         'TOPIC_DRIFT': 'topicDrifts'
     };
 
-    let filteredNodes = $derived((graphNodes || []).filter(node => {
+    let filteredNodes = $derived((graphNodes || []).filter((node: GraphNode) => {
         // KG_REDESIGN_v1: "Start"/"Root" nodes are deprecated — filter them out entirely
         if (node.id === 'Start' || node.type === 'Root') return false;
         // Always show speaker, entity, and tone nodes
@@ -80,9 +92,9 @@
         return true;
     }));
 
-    let filteredEdges = $derived((graphEdges || []).filter(edge => {
-        const sourceVisible = filteredNodes.some(n => n.id === (edge as any).source || n.id === edge.from);
-        const targetVisible = filteredNodes.some(n => n.id === (edge as any).target || n.id === edge.to);
+    let filteredEdges = $derived((graphEdges || []).filter((edge: GraphEdge) => {
+        const sourceVisible = filteredNodes.some((n: GraphNode) => n.id === (edge as any).source || n.id === edge.from);
+        const targetVisible = filteredNodes.some((n: GraphNode) => n.id === (edge as any).target || n.id === edge.to);
         return sourceVisible && targetVisible;
     }));
 

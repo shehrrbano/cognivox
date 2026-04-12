@@ -1,127 +1,137 @@
 <!-- ACTUAL EDIT: COGNIVOX_UI_REAL_CODE_APPLIER_v2 -->
 <!-- UNIFIED: COGNIVOX_UI_MAPPER_v1 -->
+<!-- CONVERTED: SVELTE_5_PROPS_v1 -->
 <script lang="ts">
-    import { createEventDispatcher } from "svelte";
-    import type {
-        SpeakerIdStatus,
-        SpeakerProfile,
-        IdentifiedSpeaker,
-    } from "./types";
+    import type { SpeakerIdStatus, SpeakerProfile, IdentifiedSpeaker } from "./types";
 
-    export let speakerIdInitialized = false;
-    export let speakerIdStatus: SpeakerIdStatus | null = null;
-    export let speakerProfiles: SpeakerProfile[] = [];
-    export let lastIdentifiedSpeaker: IdentifiedSpeaker | null = null;
-
-    const dispatch = createEventDispatcher();
-
-    function initializeSpeakerId() {
-        dispatch("initializeSpeakerId");
+    interface Props {
+        speakerIdInitialized?: boolean;
+        speakerIdStatus?: SpeakerIdStatus | null;
+        speakerProfiles?: SpeakerProfile[];
+        lastIdentifiedSpeaker?: IdentifiedSpeaker | null;
+        oninitializeSpeakerId?: () => void;
+        onclearSpeakerProfiles?: () => void;
+        onrenameSpeaker?: (data: { speakerId: string; newLabel: string }) => void;
     }
 
-    function clearSpeakerProfiles() {
-        dispatch("clearSpeakerProfiles");
-    }
+    let {
+        speakerIdInitialized = false,
+        speakerIdStatus = null,
+        speakerProfiles = [],
+        lastIdentifiedSpeaker = null,
+        oninitializeSpeakerId,
+        onclearSpeakerProfiles,
+        onrenameSpeaker
+    }: Props = $props();
 
-    function renameSpeaker(speakerId: string) {
-        const name = prompt(
-            "New name for " +
-                speakerProfiles.find((p) => p.id === speakerId)?.label +
-                ":",
-        );
-        if (name) {
-            dispatch("renameSpeaker", { speakerId, newLabel: name });
+    function handleRename(id: string) {
+        const newLabel = prompt("Enter new name for speaker:");
+        if (newLabel && onrenameSpeaker) {
+            onrenameSpeaker({ speakerId: id, newLabel });
         }
     }
 </script>
 
-<!-- ECAPA-TDNN Speaker Identification Panel -->
-<div class="p-3 sm:p-4 space-y-fluid-gap">
+<div class="h-full flex flex-col space-y-6 p-6 overflow-y-auto">
+    <!-- Header -->
     <div class="flex items-center justify-between">
-        <h3 class="text-fluid-base font-semibold text-blue-600">
-            Speaker Identification
-        </h3>
-        <span
-            class="text-xs px-2 py-1 rounded {speakerIdInitialized
-                ? 'bg-green-50 text-green-600'
-                : 'bg-yellow-50 text-yellow-600'}"
-        >
-            {speakerIdInitialized ? "ECAPA-TDNN Active" : "Not Initialized"}
-        </span>
-    </div>
-
-    <div class="text-xs text-gray-400 space-y-1">
-        <p>Model: ECAPA-TDNN (192-dim embeddings, ~95% accuracy)</p>
-        <p>Method: Voice biometric comparison via cosine similarity</p>
-        {#if speakerIdStatus}
-            <p>
-                Known speakers: {speakerIdStatus.speaker_count}
-                | Threshold: {speakerIdStatus.threshold.toFixed(2)}
-            </p>
-        {/if}
+        <div>
+            <h2 class="text-xl font-bold text-gray-900">Speaker Recognition</h2>
+            <p class="text-sm text-gray-500">Manage and identify participants in the session</p>
+        </div>
+        <div class="flex gap-2">
+            {#if !speakerIdInitialized}
+                <button 
+                    class="btn-primary"
+                    onclick={oninitializeSpeakerId}
+                >
+                    Initialize AI
+                </button>
+            {:else}
+                <button 
+                    class="btn-secondary text-red-500 border-red-100 hover:bg-red-50"
+                    onclick={onclearSpeakerProfiles}
+                >
+                    Clear All Profiles
+                </button>
+            {/if}
+        </div>
     </div>
 
     {#if !speakerIdInitialized}
-        <button
-            class="px-4 py-2 rounded bg-blue-50 border border-blue-300 text-blue-600 hover:bg-blue-100 transition text-sm"
-            onclick={initializeSpeakerId}
-        >
-            Initialize Speaker ID
-        </button>
-        <p class="text-xs text-gray-400">
-            Requires ONNX model. Run: <code class="text-blue-500"
-                >python scripts/export_ecapa_tdnn.py</code
-            >
-        </p>
-    {/if}
-
-    {#if lastIdentifiedSpeaker}
-        <div class="p-3 rounded bg-blue-50 border border-blue-200">
-            <p class="text-sm text-blue-600">
-                Last identified: <strong
-                    >{lastIdentifiedSpeaker.speaker_label}</strong
-                >
-            </p>
-            <p class="text-xs text-gray-400">
-                Confidence: {(lastIdentifiedSpeaker.confidence * 100).toFixed(
-                    1,
-                )}% | {lastIdentifiedSpeaker.is_new
-                    ? "New speaker"
-                    : "Known speaker"}
-            </p>
+        <div class="flex-1 flex flex-col items-center justify-center p-12 text-center bg-gray-50 rounded-2xl border-2 border-dashed border-gray-200">
+            <div class="w-16 h-16 bg-blue-100 rounded-full flex items-center justify-center mb-4">
+                <svg class="w-8 h-8 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z"/></svg>
+            </div>
+            <h3 class="text-lg font-bold text-gray-900 mb-2">Speaker ID Offline</h3>
+            <p class="text-gray-500 max-w-sm">The local speaker identification engine is not active. Click initialize to begin learning voices from the live stream.</p>
         </div>
-    {/if}
-
-    {#if speakerProfiles.length > 0}
-        <div class="space-y-2">
-            <h4 class="text-sm font-medium text-gray-800">
-                Known Speakers ({speakerProfiles.length})
-            </h4>
-            {#each speakerProfiles as profile}
-                <div
-                    class="flex flex-col sm:flex-row items-start sm:items-center justify-between p-2 rounded bg-gray-50 border border-gray-200 gap-2"
-                >
-                    <div>
-                        <span class="text-sm text-blue-600"
-                            >{profile.label}</span
-                        >
-                        <span class="text-xs text-gray-400 ml-2"
-                            >({profile.sample_count} segments)</span
-                        >
-                    </div>
-                    <div class="flex gap-2">
-                        <button
-                            class="text-xs px-2 py-1 rounded bg-blue-50 text-blue-500 hover:bg-blue-100"
-                            onclick={() => renameSpeaker(profile.id)}
-                            >Rename</button
-                        >
-                    </div>
+    {:else}
+        <!-- Stats Bar -->
+        <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <div class="glass-card p-4 border border-gray-100">
+                <span class="text-[10px] font-black text-gray-400 uppercase tracking-widest block mb-1">Status</span>
+                <div class="flex items-center gap-2">
+                    <span class="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
+                    <span class="text-sm font-bold text-gray-800">Engine Active</span>
                 </div>
-            {/each}
-            <button
-                class="text-xs px-3 py-1.5 rounded bg-red-50 border border-red-300 text-red-500 hover:bg-red-100 mt-2"
-                onclick={clearSpeakerProfiles}>Clear All Profiles</button
-            >
+            </div>
+            <div class="glass-card p-4 border border-gray-100">
+                <span class="text-[10px] font-black text-gray-400 uppercase tracking-widest block mb-1">Profiles</span>
+                <span class="text-lg font-bold text-gray-900">{speakerProfiles.length}</span>
+            </div>
+            <div class="glass-card p-4 border border-gray-100">
+                <span class="text-[10px] font-black text-gray-400 uppercase tracking-widest block mb-1">Last Match</span>
+                <span class="text-sm font-medium text-blue-600 truncate block">
+                    {lastIdentifiedSpeaker ? lastIdentifiedSpeaker.speaker_label : 'Waiting for voice...'}
+                </span>
+            </div>
+        </div>
+
+        <!-- Profiles List -->
+        <div class="space-y-4">
+            <h3 class="text-xs font-black text-gray-400 uppercase tracking-widest">Active Profiles</h3>
+            
+            {#if speakerProfiles.length === 0}
+                <div class="text-center py-8 text-gray-400 text-sm italic">
+                    No speaker profiles learned yet. Start talking to train the engine.
+                </div>
+            {:else}
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {#each speakerProfiles as profile}
+                        <div class="glass-card p-4 border border-gray-100 flex items-center justify-between group">
+                            <div class="flex items-center gap-4">
+                                <div class="w-10 h-10 rounded-full bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center text-white font-bold">
+                                    {profile.label.charAt(0).toUpperCase()}
+                                </div>
+                                <div>
+                                    <div class="flex items-center gap-2">
+                                        <span class="font-bold text-gray-900">{profile.label}</span>
+                                        <button 
+                                            class="opacity-0 group-hover:opacity-100 transition-opacity text-blue-500 hover:text-blue-700"
+                                            onclick={() => handleRename(profile.id)}
+                                            aria-label="Rename speaker"
+                                        >
+                                            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"/></svg>
+                                        </button>
+                                    </div>
+                                    <div class="flex items-center gap-3 text-[10px] text-gray-400">
+                                        <span>{profile.sample_count} samples</span>
+                                        <span>•</span>
+                                        <span>Learned {new Date(profile.created_at * 1000).toLocaleTimeString()}</span>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="flex flex-col items-end">
+                                <span class="text-[10px] font-bold text-gray-400 uppercase">Confidence</span>
+                                <div class="w-16 h-1 bg-gray-100 rounded-full mt-1 overflow-hidden">
+                                    <div class="h-full bg-blue-500" style="width: 85%"></div>
+                                </div>
+                            </div>
+                        </div>
+                    {/each}
+                </div>
+            {/if}
         </div>
     {/if}
 </div>

@@ -4,6 +4,21 @@
     import KnowledgeGraph from "./KnowledgeGraph.svelte";
     import Icon from "./Icon.svelte";
 
+    interface Props {
+        isRecording?: boolean;
+        isRecordingStarting?: boolean;
+        currentVolume?: number;
+        isGeminiConnected?: boolean;
+        transcripts?: any[];
+        graphNodes?: any[];
+        graphEdges?: any[];
+        stressLevel?: number;
+        engagementLevel?: number;
+        urgencyLevel?: number;
+        clarityLevel?: number;
+        recordingSeconds?: number;
+    }
+
     let {
         isRecording = false,
         isRecordingStarting = false,
@@ -17,7 +32,7 @@
         urgencyLevel = $bindable(0),
         clarityLevel = $bindable(0.4),
         recordingSeconds = 0
-    } = $props();
+    }: Props = $props();
 
     // Track last processed tone to avoid re-triggering on same transcript
     let lastProcessedToneId = $state("");
@@ -40,9 +55,6 @@
     let isGraphExpanded = $state(false);
 
     // === WEB AUDIO API dB METER ===
-    // Using $state for dB values so they drive reactive template updates.
-    // Polled via setInterval(50ms) instead of requestAnimationFrame to avoid
-    // flooding Svelte 5 scheduler with 60fps $state writes.
     let inputDb = $state(-60);
     let processedDb = $state(-60);
     let audioCtx: AudioContext | null = null;
@@ -50,10 +62,9 @@
     let micStream: MediaStream | null = null;
     let dbPollInterval: ReturnType<typeof setInterval> | null = null;
     let webAudioActive = $state(false);
-    // smoothed value for processedDb (plain non-reactive variable)
     let _smoothedDb = -60;
 
-    // React to isRecording changes: start/stop waveform interval and Web Audio
+    // React to isRecording changes
     $effect(() => {
         if (isRecording && !isRecordingStarting && !wasRecording) {
             barHistory = [];
@@ -74,10 +85,9 @@
         }
     });
 
-    // Effective volume: Web Audio when available and Tauri volume is flat
     let effectiveVolume = $derived(
         webAudioActive && inputDb > -58
-            ? Math.pow(10, (inputDb + 6) / 20) // scale up slightly for waveform
+            ? Math.pow(10, (inputDb + 6) / 20)
             : currentVolume
     );
 
@@ -91,7 +101,6 @@
             const src = audioCtx.createMediaStreamSource(micStream);
             src.connect(analyserNode);
             webAudioActive = true;
-            // Poll at 20fps (50ms) instead of 60fps rAF to avoid flooding Svelte scheduler
             dbPollInterval = setInterval(sampleDb, 50);
         } catch (e) {
             console.warn('[LiveRecordingPanel] Web Audio init failed (will use Tauri volume):', e);
@@ -123,7 +132,6 @@
         _smoothedDb = -60;
     }
 
-    // dB to 0..100% for meter fill
     function dbToPercent(db: number): number {
         return Math.max(0, Math.min(100, ((db + 60) / 60) * 100));
     }
@@ -135,7 +143,6 @@
         return '#3b82f6';
     }
 
-    // Recent transcript for live display
     let liveTranscript = $derived(
         transcripts.length > 0 ? transcripts[transcripts.length - 1] : null
     );
@@ -158,7 +165,6 @@
         clarityLevel = Math.max(0.3, clarityLevel - 0.0008);
     }
 
-    // Track emotions from transcript tones
     $effect(() => {
         if (liveTranscript?.tone && liveTranscript?.id !== lastProcessedToneId) {
             lastProcessedToneId = liveTranscript.id;
@@ -188,19 +194,11 @@
         return "#22c55e";
     }
 
-    function formatTime(ms: number): string {
-        const seconds = Math.floor(ms / 1000);
-        const minutes = Math.floor(seconds / 60);
-        const secs = seconds % 60;
-        return `${minutes}:${secs.toString().padStart(2, "0")}`;
-    }
-
     function getMinBufferPercent(): number {
         const minRequired = vadManager.getConfig().minSpeechDuration;
         return Math.min(100, (vadState.bufferDuration / minRequired) * 100);
     }
 
-    // Whisper status label
     let whisperStatusLabel = $derived(
         vadState.chunksSent > 0
             ? `${vadState.chunksSent} chunk${vadState.chunksSent !== 1 ? 's' : ''} sent`
@@ -241,12 +239,8 @@
 
 {#if isRecording}
     <div class="live-recording-panel animate-fadeIn">
-
-        <!-- === LIVE RECORDING STATUS BAR === -->
         <div class="status-bar glass-card p-3 sm:p-4 mb-4 border-blue-200">
             <div class="flex flex-col sm:flex-row items-start sm:items-center gap-3 sm:gap-4">
-
-                <!-- LEFT: Status indicator + mic animation -->
                 <div class="flex items-center gap-3 flex-shrink-0">
                     <div class="relative flex items-center justify-center w-8 h-8">
                         {#if vadState.isSpeaking}
@@ -266,16 +260,13 @@
                         <span class="text-xs font-bold {vadState.isSpeaking ? 'text-green-600' : 'text-gray-500'} uppercase tracking-wider">
                             {vadState.isSpeaking ? 'Speaking' : 'Listening...'}
                         </span>
-                        <!-- Whisper activity -->
                         <span class="text-[10px] font-mono {whisperStatusColor} mt-0.5">
                             Whisper: {whisperStatusLabel}
                         </span>
                     </div>
                 </div>
 
-                <!-- CENTER: dB meters + waveform -->
                 <div class="flex-1 w-full sm:w-auto flex flex-col gap-1.5">
-                    <!-- Input dB meter -->
                     <div class="flex items-center gap-2">
                         <span class="text-[10px] font-mono text-gray-400 w-16 text-right flex-shrink-0">
                             {inputDb > -59 ? `${inputDb.toFixed(1)} dB` : '--- dB'}
@@ -288,7 +279,6 @@
                         </div>
                         <span class="text-[10px] font-bold text-gray-400 w-6 flex-shrink-0">IN</span>
                     </div>
-                    <!-- Processed/output dB meter -->
                     <div class="flex items-center gap-2">
                         <span class="text-[10px] font-mono text-gray-400 w-16 text-right flex-shrink-0">
                             {processedDb > -59 ? `${processedDb.toFixed(1)} dB` : '--- dB'}
@@ -303,17 +293,13 @@
                     </div>
                 </div>
 
-                <!-- RIGHT: Stats row -->
                 <div class="flex items-center gap-3 text-[10px] font-bold uppercase tracking-widest text-gray-400 flex-shrink-0 flex-wrap">
-                    <!-- LIVE badge -->
                     <div class="flex items-center gap-1 px-2 py-1 bg-red-50 rounded-full border border-red-100">
                         <span class="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse"></span>
                         <span class="text-red-600 font-mono">{recordingSeconds.toString().padStart(2,'0')}s</span>
                         <span class="text-red-400 font-black ml-0.5">LIVE</span>
                     </div>
-                    <!-- VAD confidence -->
                     <span class="text-blue-500">{(vadState.vadConfidence * 100).toFixed(0)}% VAD</span>
-                    <!-- Buffer -->
                     <div class="flex items-center gap-1.5">
                         <span>Buf</span>
                         <div class="w-12 h-1.5 bg-gray-100 rounded-full overflow-hidden">
@@ -324,10 +310,8 @@
                         </div>
                     </div>
                 </div>
-
             </div>
 
-            <!-- Waveform row -->
             {#if barHistory.length > 0}
                 <div class="mt-3 flex items-end gap-px h-8 w-full">
                     {#each barHistory.slice(-BAR_COUNT) as bar, i}
@@ -339,7 +323,6 @@
                     {/each}
                 </div>
             {:else}
-                <!-- Skeleton bars while initializing -->
                 <div class="mt-3 flex items-end gap-px h-8 w-full opacity-20">
                     {#each Array(BAR_COUNT) as _, i}
                         <div class="flex-1 min-w-[1px] max-w-[3px] rounded-t-sm bg-blue-200 h-1"></div>
@@ -348,15 +331,11 @@
             {/if}
         </div>
 
-        <!-- === MAIN GRID: Transcript + Knowledge Graph === -->
         <div class="grid grid-cols-1 xl:grid-cols-12 gap-0 border border-gray-100 rounded-xl overflow-hidden bg-white shadow-sm">
-
-            <!-- LEFT: Real-Time Transcript -->
             <div class="xl:col-span-4 border-b xl:border-b-0 xl:border-r border-gray-100 bg-white flex flex-col min-h-[400px]">
                 <div class="p-4 sm:p-5 border-b border-gray-50 flex items-center justify-between">
                     <span class="text-xs font-black text-blue-600 tracking-widest uppercase">Real-Time Transcript</span>
                     <div class="flex items-center gap-2">
-                        <!-- Whisper processing badge -->
                         {#if vadState.status === 'sending'}
                             <span class="bg-blue-50 text-blue-600 text-[10px] font-bold px-2 py-0.5 rounded tracking-wider uppercase animate-pulse">
                                 Sending to Whisper
@@ -405,7 +384,6 @@
                         {/each}
                     {:else}
                         <div class="flex flex-col items-center justify-center h-full gap-3 text-center py-12">
-                            <!-- Animated mic waiting icon -->
                             <div class="relative w-10 h-10">
                                 <div class="absolute inset-0 bg-blue-100 rounded-full animate-pulse"></div>
                                 <div class="absolute inset-2 bg-blue-200 rounded-full animate-ping opacity-40"></div>
@@ -423,10 +401,7 @@
                 </div>
             </div>
 
-            <!-- RIGHT: Knowledge Graph -->
             <div class="xl:col-span-8 bg-[#fafafa] relative flex flex-col min-h-[400px]" style="background-image: radial-gradient(circle, #e5e7eb 1px, transparent 1px); background-size: 24px 24px;">
-
-                <!-- Graph legend -->
                 <div class="absolute top-4 left-4 flex gap-2 z-10 flex-wrap">
                     {#each [['bg-blue-500','Tasks'],['bg-green-500','Decisions'],['bg-red-500','Risks']] as [color, label]}
                         <div class="bg-white border border-gray-100 rounded-full shadow-sm px-2.5 py-1 flex items-center gap-1.5">
@@ -436,7 +411,6 @@
                     {/each}
                 </div>
 
-                <!-- Graph -->
                 <div class="flex-1 w-full relative">
                     <KnowledgeGraph
                         nodes={graphNodes}
@@ -446,7 +420,6 @@
                     />
                 </div>
 
-                <!-- Expand button -->
                 <div class="absolute bottom-4 right-4">
                     <button
                         onclick={() => isGraphExpanded = true}
@@ -471,6 +444,4 @@
     .transcript-scroll::-webkit-scrollbar { width: 3px; }
     .transcript-scroll::-webkit-scrollbar-track { background: rgba(0,0,0,0.03); border-radius: 1px; }
     .transcript-scroll::-webkit-scrollbar-thumb { background: rgba(59,130,246,0.2); border-radius: 1px; }
-
-    .live-recording-panel { /* fills space */ }
 </style>

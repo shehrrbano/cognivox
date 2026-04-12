@@ -1,5 +1,24 @@
+<!-- ACTUAL EDIT: COGNIVOX_UI_REAL_CODE_APPLIER_v2 -->
+<!-- UNIFIED: COGNIVOX_UI_MAPPER_v1 -->
+<!-- CONVERTED: SVELTE_5_PROPS_v1 -->
 <script lang="ts">
     import { keyManager } from "./keyManager";
+
+    interface Props {
+        isGeminiConnected?: boolean;
+        isRecording?: boolean;
+        apiKeyCount?: number;
+        activeKeyName?: string;
+        activeKeyIndex?: number;
+        isRateLimited?: boolean;
+        lastRequestTime?: string | null;
+        debugMode?: boolean;
+        requestCount?: number;
+        whisperReady?: boolean;
+        whisperLoading?: boolean;
+        whisperProgress?: number;
+        onopenSettings?: () => void;
+    }
 
     let {
         isGeminiConnected = false,
@@ -15,7 +34,7 @@
         whisperLoading = false,
         whisperProgress = 0,
         onopenSettings = () => {}
-    } = $props();
+    }: Props = $props();
 
     function getStatusText(): string {
         if (apiKeyCount === 0) return "No API key – click to setup";
@@ -28,70 +47,70 @@
     }
 
     function getStatusColor(): string {
-        if (apiKeyCount === 0) return "bg-red-500";
-        if (isRateLimited) return "bg-yellow-500 animate-pulse";
-        if (isGeminiConnected) return "bg-green-500";
-        return "bg-blue-500 animate-pulse";
-    }
-
-    function handleClick() {
-        if (apiKeyCount === 0 || !isGeminiConnected) {
-            onopenSettings();
-        }
+        if (apiKeyCount === 0) return "text-red-500 bg-red-50 border-red-100";
+        if (isRateLimited) return "text-yellow-600 bg-yellow-50 border-yellow-100 animate-pulse";
+        if (isGeminiConnected) return "text-green-600 bg-green-50 border-green-100";
+        return "text-blue-500 bg-blue-50 border-blue-100";
     }
 </script>
 
-<div class="fixed bottom-0 left-0 right-0 z-[60] h-6 xs:h-8 bg-white/95 border-t border-gray-200 backdrop-blur-sm flex items-center justify-between px-2 sm:px-4">
-    <!-- Left: Connection Status -->
-    <button 
-        class="flex items-center gap-2 hover:bg-blue-50 px-2 py-1 rounded transition-colors"
-        onclick={handleClick}
-    >
-        <span class="w-2 h-2 rounded-full {getStatusColor()}"></span>
-        <span class="text-xs {isGeminiConnected ? 'text-green-600' : apiKeyCount === 0 ? 'text-red-500' : 'text-gray-500'}">
+<footer class="fixed bottom-0 left-0 right-0 h-10 border-t border-gray-200 bg-white/80 backdrop-blur-sm z-40 px-6 flex items-center justify-between pointer-events-auto">
+    <!-- LEFT: System Status -->
+    <div class="flex items-center gap-4">
+        <div 
+            class="flex items-center gap-2 px-2 py-1 rounded-md border text-[10px] font-bold uppercase tracking-wider transition-all cursor-pointer {getStatusColor()}"
+            onclick={onopenSettings}
+            role="button"
+            tabindex="0"
+            onkeydown={(e) => e.key === 'Enter' && onopenSettings()}
+        >
+            <div class="w-1.5 h-1.5 rounded-full {isGeminiConnected ? 'bg-green-500 animate-pulse' : 'bg-current'}"></div>
             {getStatusText()}
-        </span>
-    </button>
+        </div>
 
-    <div class="flex items-center gap-1.5 min-w-[100px]">
-        {#if whisperReady}
-            <span class="w-2 h-2 rounded-full bg-green-500"></span>
-            <span class="text-xs text-green-600">STT Ready</span>
-        {:else if whisperLoading}
-            <div class="flex flex-col items-center gap-0.5">
-                <div class="flex items-center gap-1.5">
-                    <span class="w-1.5 h-1.5 rounded-full bg-orange-400 animate-pulse"></span>
-                    <span class="text-[10px] text-orange-500 font-medium">Downloading: {Math.round(whisperProgress)}%</span>
+        {#if whisperLoading}
+            <div class="flex items-center gap-2">
+                <div class="w-20 h-1.5 bg-gray-100 rounded-full overflow-hidden">
+                    <div class="h-full bg-blue-500 transition-all duration-300" style="width: {whisperProgress}%"></div>
                 </div>
-                <div class="w-24 h-1 bg-gray-100 rounded-full overflow-hidden">
-                    <div class="h-full bg-orange-400 transition-all duration-300" style="width: {whisperProgress}%"></div>
-                </div>
+                <span class="text-[9px] font-bold text-blue-500 uppercase tracking-widest">Loading AI {whisperProgress}%</span>
+            </div>
+        {:else if !whisperReady && !whisperLoading}
+            <div class="flex items-center gap-1.5 px-2 py-1 rounded-md bg-slate-50 border border-slate-100 text-slate-500 text-[9px] font-bold uppercase tracking-widest">
+                <span class="w-1 h-1 rounded-full bg-slate-400"></span>
+                Engine Standby
             </div>
         {:else}
-            <span class="w-2 h-2 rounded-full bg-gray-300"></span>
-            <span class="text-xs text-gray-400">STT Idle</span>
+            <div class="flex items-center gap-1.5 px-2 py-1 rounded-md bg-blue-50 border border-blue-100 text-blue-500 text-[9px] font-bold uppercase tracking-widest">
+                <span class="w-1 h-1 rounded-full bg-blue-500 animate-pulse"></span>
+                Engine Ready
+            </div>
         {/if}
     </div>
 
-    <!-- Center: Recording indicator -->
-    {#if isRecording}
-        <div class="flex items-center gap-2">
-            <span class="w-2 h-2 rounded-full bg-red-500 animate-pulse"></span>
-            <span class="text-xs text-red-500">Recording Active</span>
+    <!-- RIGHT: Info & Debug -->
+    <div class="flex items-center gap-4">
+        {#if lastRequestTime}
+            <span class="text-[9px] text-gray-400 font-mono">Last Signal: {lastRequestTime}</span>
+        {/if}
+
+        <div class="h-4 w-px bg-gray-200"></div>
+
+        <div class="flex items-center gap-3">
+            <div class="flex items-center gap-1.5">
+                <span class="text-[9px] font-bold text-gray-400 uppercase tracking-widest">Session Integrity</span>
+                <div class="flex gap-0.5">
+                    <div class="w-1.5 h-1.5 rounded-full bg-green-500"></div>
+                    <div class="w-1.5 h-1.5 rounded-full bg-green-500"></div>
+                    <div class="w-1.5 h-1.5 rounded-full bg-blue-500"></div>
+                </div>
+            </div>
+
+            {#if debugMode}
+                <div class="px-1.5 py-0.5 rounded bg-gray-900 text-white text-[8px] font-mono font-bold uppercase">Debug</div>
+            {/if}
+
+            <span class="text-[10px] font-bold text-gray-300">v0.1.0-alpha</span>
         </div>
-    {/if}
-
-    <!-- Right: Stats & Debug -->
-    <div class="hidden sm:flex items-center gap-4 text-[7px] sm:text-xs text-gray-400">
-        {#if debugMode && lastRequestTime}
-            <span>Last request: {lastRequestTime}</span>
-        {/if}
-        {#if requestCount > 0}
-            <span>API calls: {requestCount}</span>
-        {/if}
-        {#if apiKeyCount > 1}
-            <span title="Multiple keys for failover" class="flex items-center gap-1"><svg class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg> {apiKeyCount} keys</span>
-        {/if}
-        <span class="hidden xs:inline text-gray-400">Cognivox v1.0</span>
     </div>
-</div>
+</footer>

@@ -1,12 +1,23 @@
 <!-- ACTUAL EDIT: COGNIVOX_UI_REAL_CODE_APPLIER_v2 -->
 <!-- UNIFIED: COGNIVOX_UI_MAPPER_BATCH2_v1 -->
 <!-- FIXED: FULL_FUNCTIONALITY_AUDITOR_AND_FIXER_v1 — real metrics wired -->
+<!-- CONVERTED: SVELTE_5_PROPS_v1 -->
 <script lang="ts">
-    export let transcripts: any[] = [];
-    export let graphNodes: any[] = [];
-    export let latencyMs: number = 0;
-    export let isGeminiConnected: boolean = false;
-    export let isRecording: boolean = false;
+    interface Props {
+        transcripts?: any[];
+        graphNodes?: any[];
+        latencyMs?: number;
+        isGeminiConnected?: boolean;
+        isRecording?: boolean;
+    }
+
+    let {
+        transcripts = [],
+        graphNodes = [],
+        latencyMs = 0,
+        isGeminiConnected = false,
+        isRecording = false
+    }: Props = $props();
 
     const EMOTION_COLORS = ['bg-[#60a5fa]','bg-[#3b82f6]','bg-[#bfdbfe]','bg-[#dbeafe]','bg-[#0b66ff]'];
     const EMOTION_LABELS = ['POSITIVE','TRUST','FEAR','ANGER','SURPRISE'];
@@ -20,7 +31,7 @@
     };
 
     // Speaker dominance — derived from real transcripts
-    $: speakers = (() => {
+    let speakers = $derived.by(() => {
         if (!transcripts || transcripts.length === 0) return [
             { name: "Speaker A", percent: 42 },
             { name: "Speaker B", percent: 28 },
@@ -37,10 +48,10 @@
             .sort((a, b) => b[1] - a[1])
             .slice(0, 4)
             .map(([name, count]) => ({ name, percent: Math.round((count / total) * 100) }));
-    })();
+    });
 
     // Emotional pulse — derived from tone field
-    $: emotions = (() => {
+    let emotions = $derived.by(() => {
         const buckets: Record<string, number> = { POSITIVE: 0, TRUST: 0, FEAR: 0, ANGER: 0, SURPRISE: 0 };
         if (transcripts && transcripts.length > 0) {
             for (const t of transcripts) {
@@ -55,18 +66,18 @@
             height: `${Math.max(10, Math.round((buckets[label] / maxVal) * 100))}%`,
             color: EMOTION_COLORS[i]
         }));
-    })();
+    });
 
     // KPI metrics
-    $: avgSentiment = (() => {
+    let avgSentiment = $derived.by(() => {
         if (!transcripts || transcripts.length === 0) return 74;
         const pos = transcripts.filter(t =>
             ['POSITIVE','TRUST','JOY','HAPPY','CALM'].includes((t.tone || '').toUpperCase())
         ).length;
         return Math.round((pos / transcripts.length) * 100);
-    })();
+    });
 
-    $: dominanceIndex = (() => {
+    let dominanceIndex = $derived.by(() => {
         if (!transcripts || transcripts.length === 0) return '0.82';
         const counts: Record<string, number> = {};
         for (const t of transcripts) {
@@ -77,14 +88,14 @@
         if (vals.length === 0) return '0.82';
         const max = Math.max(...vals);
         return (max / transcripts.length).toFixed(2);
-    })();
+    });
 
-    $: totalUtterances = transcripts.length > 0
+    let totalUtterances = $derived(transcripts.length > 0
         ? transcripts.length.toLocaleString()
-        : '0';
+        : '0');
 
     // Simple SVG path for tone chart — sample last N tones as Y values
-    $: tonePath = (() => {
+    let tonePath = $derived.by(() => {
         const W = 1000, H = 200;
         if (!transcripts || transcripts.length === 0) {
             return "M 0 170 C 150 140, 250 160, 400 130 C 500 50, 600 50, 700 160 C 800 120, 900 -20, 1000 80";
@@ -102,7 +113,7 @@
         };
         if (sample.length < 2) return `M 0 ${toneToY(sample[0]?.tone || '')} L ${W} ${toneToY(sample[0]?.tone || '')}`;
         const step = W / (sample.length - 1);
-        const points = sample.map((t, i) => ({ x: Math.round(i * step), y: toneToY(t.tone) }));
+        const points = sample.map((t: any, i: number) => ({ x: Math.round(i * step), y: toneToY(t.tone) }));
         let d = `M ${points[0].x} ${points[0].y}`;
         for (let i = 1; i < points.length; i++) {
             const cp1x = Math.round(points[i-1].x + step * 0.4);
@@ -112,17 +123,16 @@
             d += ` C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${points[i].x} ${points[i].y}`;
         }
         return d;
-    })();
+    });
 
     // Peak positivity info
-    $: peakInfo = (() => {
+    let peakInfo = $derived.by(() => {
         if (!transcripts || transcripts.length === 0) return { label: 'Peak Positivity', val: '88% at 14:20' };
-        const pos = transcripts.filter(t => ['POSITIVE','JOY','TRUST'].includes((t.tone||'').toUpperCase()));
+        const pos = transcripts.filter((t: any) => ['POSITIVE','JOY','TRUST'].includes((t.tone||'').toUpperCase()));
         const pct = transcripts.length > 0 ? Math.round((pos.length / transcripts.length) * 100) : 0;
         const ts = pos.length > 0 ? (pos[Math.floor(pos.length/2)]?.timestamp || '') : '';
         return { label: 'Peak Positivity', val: `${pct}%${ts ? ' at ' + ts : ''}` };
-    })();
-
+    });
 </script>
 
 <div class="flex-1 w-full bg-[#fafafb] overflow-y-auto px-4 lg:px-10 py-8 custom-scrollbar">

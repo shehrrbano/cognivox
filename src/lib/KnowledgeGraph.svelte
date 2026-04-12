@@ -1,18 +1,29 @@
 <script lang="ts">
     import { onMount, onDestroy, untrack } from "svelte";
 
+    interface Props {
+        nodes?: any[];
+        edges?: any[];
+        compact?: boolean;
+        searchQuery?: string;
+        initialPositions?: Record<string, { x: number; y: number }> | null;
+        pauseSimulation?: boolean;
+        isFullscreen?: boolean;
+        ontoggleCluster?: (d: { nodeId: string }) => void;
+        onlayoutChanged?: (d: { positions: Record<string, { x: number; y: number }> }) => void;
+    }
+
     let {
         nodes = [],
         edges = [],
         compact = false,
         searchQuery = "",
-        initialPositions = null as Record<string, { x: number; y: number }> | null, // [PERSISTENCE_v1] Load saved coordinates
+        initialPositions = null,
         pauseSimulation = false,
         isFullscreen = $bindable(false),
-        // KG_UNIFIED_v1: callback props replace createEventDispatcher (Svelte 5 compatible)
-        ontoggleCluster = undefined as ((d: { nodeId: string }) => void) | undefined,
-        onlayoutChanged = undefined as ((d: { positions: Record<string, { x: number; y: number }> }) => void) | undefined,
-    } = $props();
+        ontoggleCluster,
+        onlayoutChanged,
+    }: Props = $props();
 
     // INTELLIGENT_PARSING_FIXED: local search term overrides prop when set
     let localSearchTerm = $state("");
@@ -23,12 +34,12 @@
         if (q.length < 2) return new Set<string>();
         return new Set(
             nodes
-                .filter(n =>
+                .filter((n: any) =>
                     n.id.toLowerCase().includes(q) ||
                     (n.label || '').toLowerCase().includes(q) ||
                     n.type.toLowerCase().includes(q)
                 )
-                .map(n => n.id)
+                .map((n: any) => n.id)
         );
     });
 
@@ -61,8 +72,8 @@
 
     let svgElement = $state<SVGSVGElement>();
     let containerEl = $state<HTMLDivElement>();
-    let containerWidth = $state(600);
-    let containerHeight = $state(400);
+    let containerWidth = $state(800);
+    let containerHeight = $state(600);
     let animationFrame: number;
     let isSimulating = $state(true);
     let draggedNode = $state<string | null>(null);
@@ -492,7 +503,29 @@
 
     let prevSvgElement: SVGSVGElement | null = null;
 
+    function handleKeyDown(e: KeyboardEvent) {
+        if (!svgElement) return;
+        const panAmount = 40 / zoomLevel;
+        switch (e.key) {
+            case 'ArrowLeft': panX += panAmount; break;
+            case 'ArrowRight': panX -= panAmount; break;
+            case 'ArrowUp': panY += panAmount; break;
+            case 'ArrowDown': panY -= panAmount; break;
+            case '+': 
+            case '=': 
+                if (e.ctrlKey) { e.preventDefault(); zoomIn(); }
+                break;
+            case '-':
+                if (e.ctrlKey) { e.preventDefault(); zoomOut(); }
+                break;
+            case 'f':
+                if (e.ctrlKey) { e.preventDefault(); fitToView(); }
+                break;
+        }
+    }
+
     function measureAndAttach() {
+
         if (prevSvgElement && prevSvgElement !== svgElement) {
             prevSvgElement.removeEventListener("wheel", handleZoom);
         }
@@ -767,12 +800,15 @@
         <div class="flex-1 relative overflow-hidden">
             <svg
                 bind:this={svgElement}
-                class="w-full h-full touch-none"
+                class="w-full h-full touch-none focus:outline-none focus:ring-1 focus:ring-blue-400 rounded-lg"
                 viewBox="0 0 {containerWidth} {containerHeight}"
                 onmousedown={handleBackgroundMouseDown}
+                onkeydown={handleKeyDown}
                 role="application"
-                aria-label="Knowledge graph visualization - fullscreen"
+                tabindex="0"
+                aria-label="Knowledge graph visualization - fullscreen. Use arrow keys to pan, Ctrl +/- to zoom."
             >
+
                 <defs>
                     <pattern id="dotGrid" width="16" height="16" patternUnits="userSpaceOnUse"><circle cx="2" cy="2" r="1.5" fill="var(--kg-dot-color)"/></pattern>
                     <filter
@@ -893,11 +929,9 @@
                                 )}
                                 {@const isCluster = node.collapsed}
                                 {@const nodeR = isCluster ? 36 : 28}
-                                {@const isDimmed = selectedNode && selectedNode !== node.id && !edges.some(e => (e.from === selectedNode && e.to === node.id) || (e.to === selectedNode && e.from === node.id))}
                                 <g
                                     transform="translate({pos.x}, {pos.y})"
-                                    class="cursor-grab transition-all duration-300 {draggedNode === node.id ? 'cursor-grabbing' : 'hover:scale-110'}"
-                                    style="opacity: {isDimmed ? 0.15 : 1}"
+                                    class="w-full h-full block bg-transparent transition-opacity duration-700 opacity-100 cursor-grab {draggedNode === node.id ? 'cursor-grabbing' : 'hover:scale-110'}"
                                     onmousedown={(e) =>
                                         handleMouseDown(e, node.id)}
                                     onclick={() => handleNodeClick(node.id)}
@@ -1306,12 +1340,15 @@
     {:else}
         <svg
             bind:this={svgElement}
-            class="w-full h-full touch-none"
+            class="w-full h-full touch-none focus:outline-none focus:ring-1 focus:ring-blue-400 rounded-lg"
             viewBox="0 0 {containerWidth} {containerHeight}"
             onmousedown={handleBackgroundMouseDown}
+            onkeydown={handleKeyDown}
             role="application"
-            aria-label="Knowledge graph visualization"
+            tabindex="0"
+            aria-label="Knowledge graph visualization. Use arrow keys to pan."
         >
+
             <defs>
                     <pattern id="dotGrid" width="16" height="16" patternUnits="userSpaceOnUse"><circle cx="2" cy="2" r="1.5" fill="var(--kg-dot-color)"/></pattern>
                 <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
@@ -1359,8 +1396,8 @@
                 <!-- Edges -->
                 <g class="edges">
                     {#each edges as edge}
-                        {@const nodeFrom = nodes.find(n => n.id === edge.from)}
-                        {@const nodeTo = nodes.find(n => n.id === edge.to)}
+                        {@const nodeFrom = nodes.find((n: any) => n.id === edge.from)}
+                        {@const nodeTo = nodes.find((n: any) => n.id === edge.to)}
                         {#if nodeFrom && nodeTo}
                             {@const from = positions[edge.from]}
                             {@const to = positions[edge.to]}

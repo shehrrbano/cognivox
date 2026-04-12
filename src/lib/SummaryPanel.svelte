@@ -1,17 +1,20 @@
 <!-- ACTUAL EDIT: COGNIVOX_UI_REAL_CODE_APPLIER_v2 -->
 <!-- UNIFIED: COGNIVOX_UI_MAPPER_v1 -->
+<!-- CONVERTED: SVELTE_5_PROPS_v1 -->
 <script lang="ts">
-    import { createEventDispatcher } from "svelte";
     import type { ExtractedSummary } from "./types";
 
-    export let show = false;
-    export let extractedSummary: ExtractedSummary | null = null;
-
-    const dispatch = createEventDispatcher();
-
-    function close() {
-        dispatch("close");
+    interface Props {
+        show?: boolean;
+        extractedSummary?: ExtractedSummary | null;
+        onclose?: () => void;
     }
+
+    let { 
+        show = false, 
+        extractedSummary = null,
+        onclose
+    }: Props = $props();
 </script>
 
 {#if show && extractedSummary}
@@ -39,7 +42,7 @@
             >
             <button
                 class="icon-btn text-gray-500 hover:text-white"
-                onclick={close}
+                onclick={onclose}
                 aria-label="Close summary panel"
             >
                 <svg
@@ -58,7 +61,7 @@
             </button>
         </div>
         <div class="p-4 sm:p-6 space-y-fluid-gap">
-            {#if extractedSummary.topics?.length > 0}
+            {#if extractedSummary.topics && extractedSummary.topics.length > 0}
                 <div>
                     <h4
                         class="text-xs text-gray-500 uppercase tracking-wider mb-2"
@@ -75,7 +78,7 @@
                     </div>
                 </div>
             {/if}
-            {#if extractedSummary.decisions?.length > 0}
+            {#if extractedSummary.decisions && extractedSummary.decisions.length > 0}
                 <div>
                     <h4
                         class="text-xs text-gray-500 uppercase tracking-wider mb-2"
@@ -101,7 +104,7 @@
                     </ul>
                 </div>
             {/if}
-            {#if extractedSummary.actionItems?.length > 0}
+            {#if extractedSummary.actionItems && extractedSummary.actionItems.length > 0}
                 <div>
                     <h4
                         class="text-xs text-gray-500 uppercase tracking-wider mb-2"
@@ -120,7 +123,7 @@
                     </ul>
                 </div>
             {/if}
-            {#if extractedSummary.keyPoints?.length > 0}
+            {#if extractedSummary.keyPoints && extractedSummary.keyPoints.length > 0}
                 <div>
                     <h4
                         class="text-xs text-gray-500 uppercase tracking-wider mb-2"

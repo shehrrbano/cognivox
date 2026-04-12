@@ -1,33 +1,38 @@
 <!-- ACTUAL EDIT: COGNIVOX_UI_REAL_CODE_APPLIER_v2 -->
 <!-- UNIFIED: COGNIVOX_UI_MAPPER_v1 -->
+<!-- CONVERTED: SVELTE_5_COMPATIBILITY_v1 -->
 <script lang="ts">
-    import { createEventDispatcher } from "svelte";
     import type { Transcript } from "./types";
 
-    export let extractError: string | null = null;
-    export let isCollapsed = false;
-    export let transcripts: Transcript[] = [];
-    export let showMemoriesPanel = false;
-    export let showSummaryPanel = false;
-    export let isExtractingMemories = false;
-    export let isExtractingSummary = false;
-
-    const dispatch = createEventDispatcher();
-
-    function toggleCollapse() {
-        dispatch("toggleCollapse");
+    interface Props {
+        extractError?: string | null;
+        isCollapsed?: boolean;
+        transcripts?: Transcript[];
+        showMemoriesPanel?: boolean;
+        showSummaryPanel?: boolean;
+        isExtractingMemories?: boolean;
+        isExtractingSummary?: boolean;
+        ontoggleCollapse?: () => void;
+        onextractMemories?: () => void;
+        onextractSummary?: () => void;
+        onaudioUpload?: (d: { file: File }) => void;
     }
 
-    function extractMemories() {
-        dispatch("extractMemories");
-    }
-
-    function extractSummary() {
-        dispatch("extractSummary");
-    }
+    let { 
+        extractError = null, 
+        isCollapsed = false, 
+        transcripts = [], 
+        showMemoriesPanel = false, 
+        showSummaryPanel = false, 
+        isExtractingMemories = false, 
+        isExtractingSummary = false,
+        ontoggleCollapse,
+        onextractMemories,
+        onextractSummary,
+        onaudioUpload
+    }: Props = $props();
 
     // MEETING_TASKS_v1: Task 2.2 — Audio Upload Feature
-    // Triggers a hidden <input type="file"> and dispatches the selected file up for processing.
     let audioFileInput: HTMLInputElement;
 
     function triggerAudioUpload() {
@@ -44,8 +49,7 @@
             input.value = '';
             return;
         }
-        dispatch("audioUpload", { file });
-        // Reset so same file can be selected again if needed
+        if (onaudioUpload) onaudioUpload({ file });
         input.value = '';
     }
 </script>
@@ -64,7 +68,7 @@
 
     <button
         class="btn-action promax-interaction {isCollapsed ? 'bg-blue-50 border-blue-200 text-blue-600' : ''} min-h-[44px] px-5"
-        onclick={toggleCollapse}
+        onclick={ontoggleCollapse}
         disabled={transcripts.length === 0}
         aria-label={isCollapsed ? "Expand Transcript" : "Collapse Transcript"}
     >
@@ -91,7 +95,7 @@
 
     <button
         class="btn-action promax-interaction {showMemoriesPanel ? 'bg-purple-50 border-purple-200 text-purple-600' : ''} min-h-[44px] px-5"
-        onclick={extractMemories}
+        onclick={onextractMemories}
         disabled={isExtractingMemories || transcripts.length === 0}
         aria-label={isExtractingMemories ? "Extracting Memories" : "Extract Memories"}
     >
@@ -125,7 +129,7 @@
 
     <button
         class="btn-action promax-interaction {showSummaryPanel ? 'bg-green-50 border-green-200 text-green-600' : ''} min-h-[44px] px-5"
-        onclick={extractSummary}
+        onclick={onextractSummary}
         disabled={isExtractingSummary || transcripts.length === 0}
         aria-label={isExtractingSummary ? "Generating Summary" : "Generate Summary"}
     >
@@ -155,7 +159,6 @@
     </button>
 
     <!-- MEETING_TASKS_v1: Task 2.2 — Audio Upload Button -->
-    <!-- Hidden file input — triggered programmatically by the button below -->
     <input
         bind:this={audioFileInput}
         type="file"

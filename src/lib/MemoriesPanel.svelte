@@ -1,17 +1,20 @@
 <!-- ACTUAL EDIT: COGNIVOX_UI_REAL_CODE_APPLIER_v2 -->
 <!-- UNIFIED: COGNIVOX_UI_MAPPER_v1 -->
+<!-- CONVERTED: SVELTE_5_PROPS_v1 -->
 <script lang="ts">
-    import { createEventDispatcher } from "svelte";
     import type { ExtractedMemoriesData } from "./types";
 
-    export let show = false;
-    export let extractedMemories: ExtractedMemoriesData | null = null;
-
-    const dispatch = createEventDispatcher();
-
-    function close() {
-        dispatch("close");
+    interface Props {
+        show?: boolean;
+        extractedMemories?: ExtractedMemoriesData | null;
+        onclose?: () => void;
     }
+
+    let { 
+        show = false, 
+        extractedMemories = null,
+        onclose
+    }: Props = $props();
 </script>
 
 {#if show && extractedMemories}
@@ -32,7 +35,7 @@
             >
             <button
                 class="icon-btn text-gray-500 hover:text-white"
-                onclick={close}
+                onclick={onclose}
                 aria-label="Close memories panel"
             >
                 <svg
@@ -51,7 +54,7 @@
             </button>
         </div>
         <div class="p-4 sm:p-6 space-y-fluid-gap">
-            {#if extractedMemories.keyMoments?.length > 0}
+            {#if extractedMemories.keyMoments && extractedMemories.keyMoments.length > 0}
                 <div>
                     <h4
                         class="text-xs text-gray-500 uppercase tracking-wider mb-2"
@@ -69,7 +72,7 @@
                     </ul>
                 </div>
             {/if}
-            {#if extractedMemories.quotes?.length > 0}
+            {#if extractedMemories.quotes && extractedMemories.quotes.length > 0}
                 <div>
                     <h4
                         class="text-xs text-gray-500 uppercase tracking-wider mb-2"
@@ -87,7 +90,7 @@
                     </div>
                 </div>
             {/if}
-            {#if extractedMemories.personalInsights?.length > 0}
+            {#if extractedMemories.personalInsights && extractedMemories.personalInsights.length > 0}
                 <div>
                     <h4
                         class="text-xs text-gray-500 uppercase tracking-wider mb-2"
@@ -106,7 +109,7 @@
                     </ul>
                 </div>
             {/if}
-            {#if extractedMemories.emotionShifts?.length > 0}
+            {#if extractedMemories.emotionShifts && extractedMemories.emotionShifts.length > 0}
                 <div>
                     <h4
                         class="text-xs text-gray-500 uppercase tracking-wider mb-2"

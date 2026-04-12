@@ -1,5 +1,28 @@
+<!-- ACTUAL EDIT: COGNIVOX_UI_REAL_CODE_APPLIER_v2 -->
+<!-- UNIFIED: COGNIVOX_UI_MAPPER_v1 -->
+<!-- CONVERTED: SVELTE_5_PROPS_v1 -->
 <script lang="ts">
     import type { KeyManagerState } from "./keyManager";
+
+    interface Props {
+        status?: string;
+        isRecording?: boolean;
+        isProcessing?: boolean;
+        isGeminiConnected?: boolean;
+        keyState: KeyManagerState;
+        forceNewSession?: boolean;
+        hasExistingSession?: boolean;
+        isSidebarOpen?: boolean;
+        isRecordingStarting?: boolean;
+        recordingSeconds?: number;
+        vadState?: { isSpeaking: boolean; vadConfidence: number };
+        whisperReady?: boolean;
+        whisperLoading?: boolean;
+        onopenSettings?: () => void;
+        ontoggleCapture?: () => void;
+        onnewSession?: () => void;
+        ontoggleSidebar?: () => void;
+    }
 
     let {
         status = "Ready",
@@ -15,11 +38,11 @@
         vadState = { isSpeaking: false, vadConfidence: 0 },
         whisperReady = false,
         whisperLoading = false,
-        onopenSettings = () => {},
-        ontoggleCapture = () => {},
-        onnewSession = () => {},
-        ontoggleSidebar = () => {}
-    } = $props();
+        onopenSettings,
+        ontoggleCapture,
+        onnewSession,
+        ontoggleSidebar
+    }: Props = $props();
 
     function formatTime(seconds: number): string {
         const mins = Math.floor(seconds / 60);
@@ -28,15 +51,15 @@
     }
 
     function openSettings() {
-        onopenSettings();
+        if (onopenSettings) onopenSettings();
     }
 
     function toggleCapture() {
-        ontoggleCapture();
+        if (ontoggleCapture) ontoggleCapture();
     }
 
     function newSession() {
-        onnewSession();
+        if (onnewSession) onnewSession();
     }
 </script>
 
@@ -49,7 +72,7 @@
         <button
             class="min-h-[44px] min-w-[44px] p-2 rounded-xl bg-slate-50 text-slate-500 hover:bg-blue-50 hover:text-blue-600 transition-all duration-200 promax-interaction border border-slate-100 shadow-sm flex-shrink-0 flex items-center justify-center"
             onclick={() => {
-                ontoggleSidebar();
+                if (ontoggleSidebar) ontoggleSidebar();
             }}
             aria-label={isSidebarOpen ? "Close Sidebar" : "Open Sidebar"}
         >

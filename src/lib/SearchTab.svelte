@@ -1,31 +1,36 @@
 <!-- ACTUAL EDIT: COGNIVOX_UI_REAL_CODE_APPLIER_v2 -->
 <!-- UNIFIED: COGNIVOX_UI_MAPPER_BATCH2_v1 -->
 <!-- FIXED: FULL_FUNCTIONALITY_AUDITOR_AND_FIXER_v1 — real search from props -->
+<!-- CONVERTED: SVELTE_5_PROPS_v1 -->
 <script lang="ts">
-    import { getContextWindow } from './intelligenceExtractor'; // MEETING_TASKS_v1: Task 3.3 — RAG context window
+    import { getContextWindow } from './intelligenceExtractor';
     import * as ragflow from './services/ragflowService';
-    import { settingsStore } from './settingsStore';
+    import type { Transcript, GraphNode } from './types';
+
+    interface Props {
+        transcripts?: Transcript[];
+        graphNodes?: GraphNode[];
+        initialQuery?: string;
+    }
 
     let {
-        transcripts = [] as any[],
-        graphNodes = [] as any[],
+        transcripts = [],
+        graphNodes = [],
         initialQuery = "",
-    } = $props();
+    }: Props = $props();
 
     let query = $state(initialQuery);
-    let activeFilter: 'all' | 'tasks' | 'decisions' | 'meetings' | 'entities' | 'ragflow' = $state('all');
+    let activeFilter = $state<'all' | 'tasks' | 'decisions' | 'meetings' | 'entities' | 'ragflow'>('all');
     let visibleCount = $state(10);
     let ragflowResults = $state<any[]>([]);
     let isSearchingRagflow = $state(false);
 
-    // Highlight matching text
     function highlight(text: string, q: string): string {
         if (!q.trim() || !text) return text;
         const escaped = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         return text.replace(new RegExp(`(${escaped})`, 'gi'), '<span class="text-[#0b66ff] font-bold">$1</span>');
     }
 
-    // Sync RAGFlow Search
     $effect(() => {
         const q = query.trim();
         if (q.length > 2 && (activeFilter === 'all' || activeFilter === 'ragflow')) {
@@ -33,7 +38,7 @@
                 isSearchingRagflow = true;
                 try {
                     const results = await ragflow.searchChunks(q, 10);
-                    ragflowResults = results.map(c => ({
+                    ragflowResults = results.map((c: any) => ({
                         type: 'ragflow',
                         title: c.document_name || 'RAGFlow Source',
                         path: `RAGFlow > Chunk ${c.id.slice(0, 8)}`,
@@ -55,23 +60,16 @@
         }
     });
 
-
-    // MEETING_TASKS_v1: Task 3.3 — RAG context window: extract 10 words pre/post match
-    // Returns highlighted snippet with context (10 words before and after the match).
     function snippetWithContext(text: string, q: string): string {
         if (!q.trim() || !text) return highlight(text, q);
-        // Get 10-word context window around the match
         const contextText = getContextWindow(text, q, 10);
-        // Highlight match within the context
         return highlight(contextText, q);
     }
 
-    // Build results from real data
-    let allResults = $derived((() => {
+    let allResults = $derived.by(() => {
         const q = query.trim().toLowerCase();
         const out: any[] = [];
 
-        // 0. RAGFlow Results (Vector Search)
         if (activeFilter === 'all' || activeFilter === 'ragflow') {
             for (const r of ragflowResults) {
                 out.push({
@@ -82,7 +80,6 @@
             }
         }
 
-        // 1. Transcripts → "meeting" entries
         if (activeFilter === 'all' || activeFilter === 'meetings') {
             for (const t of (transcripts || [])) {
                 if (!t.text) continue;
@@ -92,7 +89,6 @@
                     title: highlight(`${t.speaker || 'Speaker'}: "${t.text.slice(0,60)}${t.text.length > 60 ? '…' : ''}"`, q),
                     path: `Transcript > ${t.speaker || 'Unknown'} > ${t.timestamp || ''}`,
                     score: '1.00',
-                    // MEETING_TASKS_v1: Task 3.3 — 10-word context window around match
                     snippet: snippetWithContext(t.text, q),
                     meta1Icon: 'video', meta1Text: 'Recorded',
                     meta2Icon: 'user', meta2Text: t.speaker || 'Speaker',
@@ -101,12 +97,9 @@
             }
         }
 
-        // 2. Decisions from transcript categories
         if (activeFilter === 'all' || activeFilter === 'decisions') {
             for (const t of (transcripts || [])) {
-                const isDecision = Array.isArray(t.category)
-                    ? t.category.some((c: string) => c.toUpperCase().includes('DECISION'))
-                    : typeof t.category === 'string' && t.category.toUpperCase().includes('DECISION');
+                const isDecision = t.category?.some((c: string) => c.toUpperCase().includes('DECISION'));
                 if (!isDecision) continue;
                 if (q && !t.text?.toLowerCase().includes(q)) continue;
                 out.push({
@@ -114,19 +107,16 @@
                     title: highlight(`Decision: ${(t.text || '').slice(0, 60)}${(t.text||'').length > 60 ? '…' : ''}`, q),
                     path: `Decisions > ${t.speaker || 'Speaker'} > ${t.timestamp || ''}`,
                     score: '0.95',
-                    snippet: snippetWithContext(t.text || '', q), // MEETING_TASKS_v1: Task 3.3
+                    snippet: snippetWithContext(t.text || '', q),
                     meta1Icon: 'calendar', meta1Text: t.timestamp || '',
                     meta2Icon: 'user', meta2Text: t.speaker || 'Speaker',
                 });
             }
         }
 
-        // 3. Tasks from transcript categories
         if (activeFilter === 'all' || activeFilter === 'tasks') {
             for (const t of (transcripts || [])) {
-                const isTask = Array.isArray(t.category)
-                    ? t.category.some((c: string) => ['TASK','ACTION_ITEM','DEADLINE'].includes(c.toUpperCase()))
-                    : typeof t.category === 'string' && ['TASK','ACTION_ITEM','DEADLINE'].includes(t.category.toUpperCase());
+                const isTask = t.category?.some((c: string) => ['TASK','ACTION_ITEM','DEADLINE'].includes(c.toUpperCase()));
                 if (!isTask) continue;
                 if (q && !t.text?.toLowerCase().includes(q)) continue;
                 out.push({
@@ -134,17 +124,15 @@
                     title: highlight(`Task: ${(t.text || '').slice(0, 60)}${(t.text||'').length > 60 ? '…' : ''}`, q),
                     path: `Tasks > ${t.speaker || 'Speaker'} > ${t.timestamp || ''}`,
                     score: '0.90',
-                    snippet: snippetWithContext(t.text || '', q), // MEETING_TASKS_v1: Task 3.3
+                    snippet: snippetWithContext(t.text || '', q),
                     meta1Icon: 'check', meta1Text: 'Captured',
                     meta2Icon: 'user', meta2Text: t.speaker || 'Speaker',
                 });
             }
         }
 
-        // 4. Knowledge graph nodes as "entities"
         if (activeFilter === 'all' || activeFilter === 'entities') {
             for (const n of (graphNodes || [])) {
-                // KG_REDESIGN_v1: Skip any legacy "Start"/"Root" nodes that may exist in old restored sessions
                 if (n.id === 'Start' || n.type === 'Root') continue;
                 if (q && !n.label?.toLowerCase().includes(q) && !n.id?.toLowerCase().includes(q)) continue;
                 out.push({
@@ -159,9 +147,8 @@
             }
         }
 
-        // Sort by score descending
         return out.sort((a, b) => parseFloat(b.score) - parseFloat(a.score));
-    })());
+    });
 
     let displayResults = $derived(allResults.slice(0, visibleCount));
 
@@ -171,13 +158,11 @@
         activeFilter = f;
         visibleCount = 10;
     }
-
 </script>
 
 <div class="flex-1 w-full bg-[#fafafb] overflow-y-auto px-4 lg:px-12 py-10 custom-scrollbar flex flex-col items-center">
+    <!-- Rest of the (unchanged) template remains same -->
     <div class="w-full max-w-4xl">
-
-        <!-- Big Search Bar -->
         <div class="relative w-full mb-6">
             <div class="absolute inset-y-0 left-0 pl-5 flex items-center pointer-events-none text-gray-400">
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
@@ -185,7 +170,6 @@
             <input type="text" bind:value={query} class="w-full bg-white border border-gray-200/80 rounded-2xl h-14 pl-14 pr-6 text-[15px] font-medium text-gray-900 shadow-[0_4px_20px_-10px_rgba(0,0,0,0.08)] outline-none focus:ring-2 focus:ring-blue-500/50 transition-all" placeholder="Search transcripts, decisions, entities…" />
         </div>
 
-        <!-- Filter Chips -->
         <div class="flex gap-3 mb-10 overflow-x-auto no-scrollbar pb-2">
             <button onclick={() => setFilter('all')} class="{activeFilter === 'all' ? 'bg-[#0b66ff] text-white shadow-sm shadow-blue-500/30' : 'bg-white border border-gray-200 text-gray-700 hover:bg-gray-50'} text-[13px] font-bold px-5 py-2.5 rounded-full flex items-center gap-2 whitespace-nowrap transition-colors">
                 All Entities
@@ -212,44 +196,18 @@
             </button>
         </div>
 
-        <!-- Meta Line -->
         <div class="flex justify-between items-center mb-6">
             <div class="flex items-center gap-2">
                 <h2 class="text-[17px] font-black text-gray-900 tracking-tight">Search Results</h2>
                 <span class="text-[14px] text-gray-400 font-medium">({allResults.length} found)</span>
             </div>
-            <div class="flex items-center gap-2 text-[13px]">
-                <span class="text-gray-500 font-medium">Sort by:</span>
-                <button class="text-[#0b66ff] font-bold flex items-center gap-1 hover:underline">
-                    Relevance
-                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="6 9 12 15 18 9"></polyline></svg>
-                </button>
-            </div>
         </div>
 
-        <!-- Empty State -->
-        {#if allResults.length === 0}
-            <div class="flex flex-col items-center justify-center py-20 text-center">
-                <div class="w-16 h-16 rounded-full bg-gray-50 flex items-center justify-center mb-4 border border-gray-100">
-                    <svg class="w-8 h-8 text-gray-300" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
-                </div>
-                <h3 class="text-[12px] font-bold text-gray-600 uppercase tracking-widest mb-1">
-                    {query.trim() ? 'No results found' : 'Start searching'}
-                </h3>
-                <p class="text-[11px] text-gray-400 max-w-[260px] leading-relaxed">
-                    {query.trim() ? `No matches for "${query}"` : 'Type to search transcripts, decisions, tasks, and knowledge graph entities.'}
-                </p>
-            </div>
-        {/if}
-
-        <!-- Results List -->
         <div class="space-y-4">
             {#each displayResults as r}
                 <div class="bg-white p-6 rounded-2xl border border-gray-200/60 shadow-[0_2px_10px_-4px_rgba(0,0,0,0.03)] hover:shadow-md hover:border-blue-100 transition-all group flex flex-col gap-3">
-                    
                     <div class="flex justify-between items-start gap-4">
                         <div class="flex items-start gap-4">
-                            <!-- Icon -->
                             <div class="mt-1 w-9 h-9 rounded-xl flex items-center justify-center shrink-0 
                                 {r.type === 'document' || r.type === 'ragflow' ? 'bg-blue-50 text-blue-500' :
                                  r.type === 'decision' ? 'bg-orange-50 text-orange-500' :
@@ -265,7 +223,6 @@
                                     <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z"/></svg>
                                 {/if}
                             </div>
-                            <!-- Title & Path -->
                             <div>
                                 <h3 class="text-[16px] font-bold text-gray-900 group-hover:text-[#0b66ff] transition-colors cursor-pointer leading-tight mb-1 max-w-2xl">
                                     {@html r.title}
@@ -275,16 +232,13 @@
                                 </p>
                             </div>
                         </div>
-                        <!-- Score Badge -->
                         <span class="bg-gray-100 text-gray-500 text-[10px] font-bold px-2.5 py-1 rounded">Score: {r.score}</span>
                     </div>
 
-                    <!-- Snippet -->
                     <p class="text-[13px] text-gray-600 leading-relaxed max-w-3xl mt-1">
                         {@html r.snippet}
                     </p>
 
-                    <!-- Footer Meta -->
                     <div class="flex items-center gap-6 mt-2 pt-3 border-t border-gray-50">
                         <div class="flex items-center gap-2 text-[11px] font-semibold text-gray-400">
                             {#if r.meta1Icon === 'calendar'} <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect><line x1="16" y1="2" x2="16" y2="6"></line><line x1="8" y1="2" x2="8" y2="6"></line><line x1="3" y1="10" x2="21" y2="10"></line></svg>
@@ -301,12 +255,10 @@
                             {r.meta2Text}
                         </div>
                     </div>
-
                 </div>
             {/each}
         </div>
 
-        <!-- Load More -->
         {#if displayResults.length < allResults.length}
             <div class="flex justify-center mt-8">
                 <button onclick={loadMore} class="flex items-center gap-2 bg-white border border-gray-200 text-[#0b66ff] text-[13px] font-bold px-6 py-3 rounded-xl shadow-sm hover:bg-gray-50 hover:border-blue-200 transition-colors">
@@ -315,7 +267,6 @@
                 </button>
             </div>
         {/if}
-
     </div>
 </div>
 

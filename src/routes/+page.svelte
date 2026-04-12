@@ -43,6 +43,12 @@
     import SearchTab from "$lib/SearchTab.svelte";
     import RAGFlowChat from "$lib/RAGFlowChat.svelte";
 
+    // === NEW COURSES COMPONENTS ===
+    import CoursesView from "$lib/CoursesView.svelte";
+    import CourseInterface from "$lib/CourseInterface.svelte";
+    import CourseMemoryScreen from "$lib/CourseMemoryScreen.svelte";
+    import { courseStore, activeCourseId } from "$lib/courseStore";
+
     // === SERVICE MODULES ===
     import type {
         Transcript,
@@ -1722,12 +1728,12 @@
 <SettingsModal
     isOpen={showSettingsModal}
     onclose={closeSettings}
-    onsave={(e) => {
+    onsave={(data: any) => {
         showToast("Settings consolidated across all systems", "info");
     }}
-    onconnected={(e) => {
+    onconnected={(data: { key: string; model: string }) => {
         isGeminiConnected = true;
-        apiKey = e.detail.key;
+        apiKey = data.key;
         status = "Connected to Gemini ✓";
     }}
 />
@@ -1762,6 +1768,10 @@
         <div 
             class="fixed inset-0 bg-slate-900/20 backdrop-blur-sm z-40 lg:hidden animate-fadeIn"
             onclick={() => (isSidebarOpen = false)}
+            onkeydown={(e) => e.key === 'Escape' && (isSidebarOpen = false)}
+            role="button"
+            tabindex="0"
+            aria-label="Close sidebar"
         ></div>
     {/if}
 
@@ -1775,13 +1785,13 @@
                 {graphEdges}
                 {activeTab}
                 {speakerIdInitialized}
-                onsessionLoad={(session) => {
+                onsessionLoad={(session: any) => {
                     handleSessionLoad(session);
                 }}
-                onsessionDelete={(data) =>
+                onsessionDelete={(data: { sessionId: string; event: MouseEvent }) =>
                     handleSessionDelete(data.sessionId, data.event)}
                 onrefreshSessions={refreshSessionList}
-                ontabChange={(tab) => {
+                ontabChange={(tab: string) => {
                     activeTab = tab;
                 }}
                 ontoggleCluster={handleToggleCluster}
@@ -1913,11 +1923,11 @@
                         captureMode={captureMode}
                         currentVolume={currentVolume}
                         isRecording={isRecording}
-                        on:settingsChange={(e) =>
-                            handleSettingsChange(e.detail)}
-                        on:connectGemini={connectGemini}
-                        on:setCaptureMode={(e) => setCaptureMode(e.detail)}
+                        onsettingsChange={handleSettingsChange}
+                        onconnectGemini={connectGemini}
+                        onsetCaptureMode={setCaptureMode}
                     />
+
                 {:else if activeTab === "diagnostics"}
                     <Diagnostics {isRecording} {isGeminiConnected} />
                 {:else if activeTab === "speakers"}
@@ -1928,12 +1938,13 @@
                         {lastIdentifiedSpeaker}
                         oninitializeSpeakerId={initializeSpeakerId}
                         onclearSpeakerProfiles={clearSpeakerProfiles}
-                        onrenameSpeaker={(e) =>
+                        onrenameSpeaker={(d: { speakerId: string; newLabel: string }) =>
                             renameSpeaker(
-                                e.detail.speakerId,
-                                e.detail.newLabel,
+                                d.speakerId,
+                                d.newLabel,
                             )}
                     />
+
                 {:else if activeTab === "tasks"}
                     <div class="h-[600px] w-full bg-white rounded-2xl border border-gray-200/60 shadow-sm overflow-hidden animate-fadeIn">
                         <InsightsPanel />
@@ -1944,7 +1955,6 @@
                     <ProjectOverview {transcripts} {graphNodes} {pastSessions} />
                 {:else if activeTab === "search"}
                     <SearchTab {transcripts} {graphNodes} initialQuery={searchQuery} />
-                {:else if activeTab === "chat"}
                     <div class="h-[600px] w-full animate-fadeIn">
                         <RAGFlowChat
                             {graphNodes}
@@ -1952,7 +1962,27 @@
                             onopenSettings={openSettings}
                         />
                     </div>
+                {:else if activeTab === "courses"}
+                    <CoursesView 
+                        courses={$courseStore} 
+                        activeId={$activeCourseId}
+                        onselectCourse={(id) => {
+                            activeCourseId.set(id);
+                            activeTab = "active-course";
+                        }}
+                    />
+                {:else if activeTab === "active-course"}
+                    <CourseInterface 
+                        courseId={$activeCourseId} 
+                        onback={() => activeTab = "courses"}
+                    />
+                {:else if activeTab === "memory"}
+                    <CourseMemoryScreen 
+                        courses={$courseStore}
+                        onclose={() => activeTab = "courses"}
+                    />
                 {/if}
+
 
                 <!-- KG_SYNC_v1: GraphTab always mounted (CSS-toggled) to preserve KnowledgeGraph physics state across tab switches.
                      Conditional rendering caused positions map to reset every tab switch → layout scrambled each visit. -->

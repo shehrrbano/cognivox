@@ -1,16 +1,18 @@
 <!-- ACTUAL EDIT: COGNIVOX_UI_REAL_CODE_APPLIER_v2 -->
 <!-- UNIFIED: COGNIVOX_UI_MAPPER_v1 -->
+<!-- CONVERTED: SVELTE_5_PROPS_v1 -->
 <script lang="ts">
-    import { createEventDispatcher } from "svelte";
     import type { Alert } from "./types";
 
-    export let alerts: Alert[] = [];
-
-    const dispatch = createEventDispatcher();
-
-    function clearAlerts() {
-        dispatch("clearAlerts");
+    interface Props {
+        alerts?: Alert[];
+        onclearAlerts?: () => void;
     }
+
+    let { 
+        alerts = [], 
+        onclearAlerts 
+    }: Props = $props();
 </script>
 
 <div class="content-card">
@@ -27,7 +29,7 @@
                 /></svg
             > Intelligence Alerts</span
         >
-        <button class="btn-ghost text-xs" onclick={clearAlerts}
+        <button class="btn-ghost text-xs" onclick={onclearAlerts}
             >Clear All</button
         >
     </div>
