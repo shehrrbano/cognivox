@@ -3,21 +3,58 @@
 <!-- FIXED: FULL_FUNCTIONALITY_AUDITOR_AND_FIXER_v1 — real search from props -->
 <script lang="ts">
     import { getContextWindow } from './intelligenceExtractor'; // MEETING_TASKS_v1: Task 3.3 — RAG context window
+    import * as ragflow from './services/ragflowService';
+    import { settingsStore } from './settingsStore';
 
-    export let transcripts: any[] = [];
-    export let graphNodes: any[] = [];
-    export let initialQuery: string = '';
+    let {
+        transcripts = [] as any[],
+        graphNodes = [] as any[],
+        initialQuery = "",
+    } = $props();
 
-    let query = initialQuery;
-    let activeFilter: 'all' | 'tasks' | 'decisions' | 'meetings' | 'documents' = 'all';
-    let visibleCount = 10;
+    let query = $state(initialQuery);
+    let activeFilter: 'all' | 'tasks' | 'decisions' | 'meetings' | 'entities' | 'ragflow' = $state('all');
+    let visibleCount = $state(10);
+    let ragflowResults = $state<any[]>([]);
+    let isSearchingRagflow = $state(false);
 
     // Highlight matching text
     function highlight(text: string, q: string): string {
-        if (!q.trim()) return text;
+        if (!q.trim() || !text) return text;
         const escaped = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         return text.replace(new RegExp(`(${escaped})`, 'gi'), '<span class="text-[#0b66ff] font-bold">$1</span>');
     }
+
+    // Sync RAGFlow Search
+    $effect(() => {
+        const q = query.trim();
+        if (q.length > 2 && (activeFilter === 'all' || activeFilter === 'ragflow')) {
+            const timer = setTimeout(async () => {
+                isSearchingRagflow = true;
+                try {
+                    const results = await ragflow.searchChunks(q, 10);
+                    ragflowResults = results.map(c => ({
+                        type: 'ragflow',
+                        title: c.document_name || 'RAGFlow Source',
+                        path: `RAGFlow > Chunk ${c.id.slice(0, 8)}`,
+                        score: (c.similarity || 0).toFixed(2),
+                        snippet: c.content,
+                        meta1Icon: 'book', meta1Text: 'RAG Source',
+                        meta2Icon: 'clock', meta2Text: 'Knowledge Base',
+                    }));
+                } catch (e) {
+                    console.error('[SearchTab] RAGFlow search failed:', e);
+                    ragflowResults = [];
+                } finally {
+                    isSearchingRagflow = false;
+                }
+            }, 300);
+            return () => clearTimeout(timer);
+        } else {
+            ragflowResults = [];
+        }
+    });
+
 
     // MEETING_TASKS_v1: Task 3.3 — RAG context window: extract 10 words pre/post match
     // Returns highlighted snippet with context (10 words before and after the match).
@@ -30,11 +67,22 @@
     }
 
     // Build results from real data
-    $: allResults = (() => {
+    let allResults = $derived((() => {
         const q = query.trim().toLowerCase();
         const out: any[] = [];
 
-        // Transcripts → "meeting" entries
+        // 0. RAGFlow Results (Vector Search)
+        if (activeFilter === 'all' || activeFilter === 'ragflow') {
+            for (const r of ragflowResults) {
+                out.push({
+                    ...r,
+                    title: highlight(r.title, q),
+                    snippet: highlight(r.snippet, q)
+                });
+            }
+        }
+
+        // 1. Transcripts → "meeting" entries
         if (activeFilter === 'all' || activeFilter === 'meetings') {
             for (const t of (transcripts || [])) {
                 if (!t.text) continue;
@@ -53,7 +101,7 @@
             }
         }
 
-        // Decisions from transcript categories
+        // 2. Decisions from transcript categories
         if (activeFilter === 'all' || activeFilter === 'decisions') {
             for (const t of (transcripts || [])) {
                 const isDecision = Array.isArray(t.category)
@@ -73,7 +121,7 @@
             }
         }
 
-        // Tasks from transcript categories
+        // 3. Tasks from transcript categories
         if (activeFilter === 'all' || activeFilter === 'tasks') {
             for (const t of (transcripts || [])) {
                 const isTask = Array.isArray(t.category)
@@ -93,8 +141,8 @@
             }
         }
 
-        // Knowledge graph nodes as "documents"
-        if (activeFilter === 'all' || activeFilter === 'documents') {
+        // 4. Knowledge graph nodes as "entities"
+        if (activeFilter === 'all' || activeFilter === 'entities') {
             for (const n of (graphNodes || [])) {
                 // KG_REDESIGN_v1: Skip any legacy "Start"/"Root" nodes that may exist in old restored sessions
                 if (n.id === 'Start' || n.type === 'Root') continue;
@@ -111,10 +159,11 @@
             }
         }
 
-        return out;
-    })();
+        // Sort by score descending
+        return out.sort((a, b) => parseFloat(b.score) - parseFloat(a.score));
+    })());
 
-    $: displayResults = allResults.slice(0, visibleCount);
+    let displayResults = $derived(allResults.slice(0, visibleCount));
 
     function loadMore() { visibleCount += 10; }
 
@@ -141,6 +190,10 @@
             <button onclick={() => setFilter('all')} class="{activeFilter === 'all' ? 'bg-[#0b66ff] text-white shadow-sm shadow-blue-500/30' : 'bg-white border border-gray-200 text-gray-700 hover:bg-gray-50'} text-[13px] font-bold px-5 py-2.5 rounded-full flex items-center gap-2 whitespace-nowrap transition-colors">
                 All Entities
             </button>
+            <button onclick={() => setFilter('ragflow')} class="{activeFilter === 'ragflow' ? 'bg-[#ff6b0b] text-white' : 'bg-white border border-gray-200 text-gray-700 hover:bg-gray-50'} text-[13px] font-semibold px-5 py-2.5 rounded-full shadow-sm flex items-center gap-2 transition-colors whitespace-nowrap">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+                {isSearchingRagflow ? 'Searching RAGFlow...' : 'RAGFlow Docs'}
+            </button>
             <button onclick={() => setFilter('tasks')} class="{activeFilter === 'tasks' ? 'bg-[#0b66ff] text-white' : 'bg-white border border-gray-200 text-gray-700 hover:bg-gray-50'} text-[13px] font-semibold px-5 py-2.5 rounded-full shadow-sm flex items-center gap-2 transition-colors whitespace-nowrap">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line></svg>
                 Tasks
@@ -153,7 +206,7 @@
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle></svg>
                 Meetings
             </button>
-            <button onclick={() => setFilter('documents')} class="{activeFilter === 'documents' ? 'bg-[#0b66ff] text-white' : 'bg-white border border-gray-200 text-gray-700 hover:bg-gray-50'} text-[13px] font-semibold px-5 py-2.5 rounded-full shadow-sm flex items-center gap-2 transition-colors whitespace-nowrap">
+            <button onclick={() => setFilter('entities')} class="{activeFilter === 'entities' ? 'bg-[#0b66ff] text-white' : 'bg-white border border-gray-200 text-gray-700 hover:bg-gray-50'} text-[13px] font-semibold px-5 py-2.5 rounded-full shadow-sm flex items-center gap-2 transition-colors whitespace-nowrap">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>
                 Entities
             </button>
@@ -198,11 +251,11 @@
                         <div class="flex items-start gap-4">
                             <!-- Icon -->
                             <div class="mt-1 w-9 h-9 rounded-xl flex items-center justify-center shrink-0 
-                                {r.type === 'document' ? 'bg-blue-50 text-blue-500' :
+                                {r.type === 'document' || r.type === 'ragflow' ? 'bg-blue-50 text-blue-500' :
                                  r.type === 'decision' ? 'bg-orange-50 text-orange-500' :
                                  r.type === 'task' ? 'bg-green-50 text-green-500' :
                                  'bg-purple-50 text-purple-500'}">
-                                {#if r.type === 'document'}
+                                {#if r.type === 'document' || r.type === 'ragflow'}
                                     <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6zM6 20V4h7v5h5v11H6z"/></svg>
                                 {:else if r.type === 'decision'}
                                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
@@ -237,6 +290,7 @@
                             {#if r.meta1Icon === 'calendar'} <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect><line x1="16" y1="2" x2="16" y2="6"></line><line x1="8" y1="2" x2="8" y2="6"></line><line x1="3" y1="10" x2="21" y2="10"></line></svg>
                             {:else if r.meta1Icon === 'check'} <span class="text-green-500 flex items-center gap-1.5"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"></polyline></svg></span>
                             {:else if r.meta1Icon === 'video'} <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="23 7 16 12 23 17 23 7"></polygon><rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect></svg>
+                            {:else if r.meta1Icon === 'book'} <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path></svg>
                             {/if}
                             <span class={r.meta1Icon === 'check' ? 'text-green-500' : ''}>{r.meta1Text}</span>
                         </div>

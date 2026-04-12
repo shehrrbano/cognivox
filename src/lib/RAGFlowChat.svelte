@@ -8,7 +8,10 @@
         type RAGFlowAnswer,
         type RAGFlowChunk,
         type RAGFlowStatus,
+        uploadDocument,
+        parseDocuments,
     } from './services/ragflowService';
+    import { open } from "@tauri-apps/plugin-opener";
     // ZERO_CONFIG_RAGFLOW_AUTO_SETUP_v1: Hide all manual setup UI for normal users.
     import {
         initializeRAGFlowAutoSetup,
@@ -168,6 +171,52 @@
         conversationId = null;
     }
 
+    let fileInput: HTMLInputElement | undefined = $state();
+
+    async function handleFileUpload(e: Event) {
+        const input = e.target as HTMLInputElement;
+        if (!input.files?.length || !$settingsStore.knowledgeBaseId) return;
+
+        const file = input.files[0];
+        isLoading = true;
+        messages = [...messages, {
+            role: 'assistant',
+            content: `Uploading and parsing "${file.name}"...`,
+            timestamp: new Date().toLocaleTimeString(),
+        }];
+
+        try {
+            const doc = await uploadDocument($settingsStore.knowledgeBaseId, file.name, file);
+            if (doc?.id) {
+                await parseDocuments($settingsStore.knowledgeBaseId, [doc.id]);
+                messages = [...messages, {
+                    role: 'assistant',
+                    content: `Successfully added "${file.name}" to your knowledge base. It is now being indexed and will be available for questions in a few moments.`,
+                    timestamp: new Date().toLocaleTimeString(),
+                }];
+                loadDatasetName();
+            } else {
+                throw new Error('Upload failed');
+            }
+        } catch (err: any) {
+            messages = [...messages, {
+                role: 'assistant',
+                content: `Failed to upload "${file.name}": ${err.message}`,
+                timestamp: new Date().toLocaleTimeString(),
+            }];
+        } finally {
+            isLoading = false;
+            input.value = '';
+        }
+    }
+
+    async function launchDashboard() {
+        const url = ($settingsStore.ragflowUrl || 'http://localhost:9380').trim();
+        const cleanUrl = url.split('/api')[0];
+        try { await open(cleanUrl); }
+        catch (e) { console.error('[RAGFlow] Failed to open dashboard:', e); }
+    }
+
     // Derived state
     let isConfigured = $derived(!!$settingsStore.ragflowUrl && !!$settingsStore.ragflowApiKey);
     let hasDataset = $derived(!!$settingsStore.knowledgeBaseId);
@@ -228,6 +277,17 @@
                     </span>
                 </div>
             {/if}
+            <!-- Launch Dashboard -->
+            <button
+                class="p-2 rounded-lg text-slate-400 hover:text-blue-500 hover:bg-blue-50 transition-all promax-interaction"
+                onclick={launchDashboard}
+                title="Open RAGFlow Dashboard"
+                aria-label="Launch dashboard"
+            >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+                </svg>
+            </button>
             <!-- Clear Chat -->
             {#if messages.length > 0}
                 <button
@@ -501,7 +561,25 @@
 
     <!-- Input Area -->
     <div class="border-t border-slate-100 p-3 bg-slate-50/50 flex-shrink-0">
+        <input
+            type="file"
+            bind:this={fileInput}
+            class="hidden"
+            onchange={handleFileUpload}
+            accept=".pdf,.doc,.docx,.txt,.md,.jpg,.png"
+        />
         <div class="flex items-end gap-2">
+            <button
+                onclick={() => fileInput?.click()}
+                disabled={!isReady || isLoading}
+                class="flex-shrink-0 w-10 h-10 rounded-xl bg-white border border-slate-200 text-slate-400 flex items-center justify-center hover:text-blue-500 hover:border-blue-200 hover:bg-blue-50 transition-all promax-interaction disabled:opacity-40"
+                title="Upload document to knowledge base"
+                aria-label="Upload file"
+            >
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
+                </svg>
+            </button>
             <textarea
                 bind:value={inputText}
                 onkeydown={handleKeydown}

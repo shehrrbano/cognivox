@@ -260,14 +260,18 @@ export async function deleteDocuments(datasetId: string, documentIds: string[]):
 export async function uploadDocument(
     datasetId: string,
     fileName: string,
-    content: string,
+    content: string | File | Blob,
 ): Promise<RAGFlowDocument | null> {
     const config = getConfig();
     try {
         // RAGFlow expects multipart/form-data for file upload
-        const blob = new Blob([content], { type: 'text/plain' });
         const formData = new FormData();
-        formData.append('file', blob, fileName);
+        if (content instanceof File || content instanceof Blob) {
+            formData.append('file', content, fileName);
+        } else {
+            const blob = new Blob([content], { type: 'text/plain' });
+            formData.append('file', blob, fileName);
+        }
 
         const headers: Record<string, string> = {};
         if (config.apiKey) {

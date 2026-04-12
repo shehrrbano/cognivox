@@ -2,6 +2,7 @@
     import { createEventDispatcher, onMount, untrack as svelteUntrack } from "svelte";
     const untrackHandle = typeof svelteUntrack !== 'undefined' ? svelteUntrack : ((fn: any) => fn());
     import { invoke } from "@tauri-apps/api/core";
+    import { open } from "@tauri-apps/plugin-opener";
     import { settingsStore } from "./settingsStore";
     import { vadManager } from "./vadManager";
     import {
@@ -379,6 +380,17 @@
             }
         } catch (e: any) {
             console.error('[RAGFlow] Create dataset failed:', e);
+        }
+    }
+
+    async function launchDashboard() {
+        const url = ragflowUrl.trim() || 'http://localhost:9380';
+        // Remove /api/v1 if the user mistakenly added it
+        const cleanUrl = url.split('/api')[0];
+        try {
+            await open(cleanUrl);
+        } catch (e) {
+            console.error('[RAGFlow] Failed to open dashboard:', e);
         }
     }
 
@@ -1225,13 +1237,23 @@
                         <label for="ragflow-url-modal" class="block text-xs font-medium text-gray-600 mb-1.5">
                             RAGFlow Server URL
                         </label>
-                        <input
-                            id="ragflow-url-modal"
-                            type="url"
-                            bind:value={ragflowUrl}
-                            class="w-full px-3 py-2.5 rounded-lg border border-gray-200 bg-white text-sm text-gray-800 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-400 transition-all"
-                            placeholder="http://localhost:9380"
-                        />
+                        <div class="flex gap-2">
+                            <input
+                                id="ragflow-url-modal"
+                                type="url"
+                                bind:value={ragflowUrl}
+                                class="flex-1 px-3 py-2.5 rounded-lg border border-gray-200 bg-white text-sm text-gray-800 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-400 transition-all"
+                                placeholder="http://localhost:9380"
+                            />
+                            <button
+                                class="px-3 py-2 rounded-lg border border-gray-200 bg-gray-50 text-gray-600 text-[10px] font-bold uppercase tracking-wider hover:bg-gray-100 transition-colors whitespace-nowrap flex items-center gap-1.5"
+                                onclick={launchDashboard}
+                                title="Open RAGFlow's native web dashboard"
+                            >
+                                <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+                                Dashboard
+                            </button>
+                        </div>
                         <p class="text-[11px] text-gray-400 mt-1">The URL of your deployed RAGFlow instance</p>
                     </div>
 
