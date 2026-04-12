@@ -19,6 +19,7 @@
 import { get } from 'svelte/store';
 import { settingsStore } from '$lib/settingsStore';
 import { keyManager } from '$lib/keyManager';
+import type { GraphNode, GraphEdge } from '$lib/types';
 
 // ============================================================================
 // TYPES
@@ -634,10 +635,16 @@ export async function searchChunks(
             similarity: c.similarity || 0,
             highlight: c.highlight || '',
         }));
+    } catch (e: any) {
+        console.error('[RAGFlow] Search failed:', e);
+        return [];
+    }
+}
+
 /**
  * Build a full Knowledge Graph for a course by extracting concepts from its materials.
  */
-export async function buildGraphFromCourse(datasetId: string): Promise<{ nodes: any[], edges: any[] }> {
+export async function buildGraphFromCourse(datasetId: string): Promise<{ nodes: GraphNode[], edges: GraphEdge[] }> {
     console.log(`[RAGFlow] Building knowledge graph for dataset: ${datasetId}`);
     
     // 1. Get top informative chunks from the dataset
@@ -657,7 +664,7 @@ export async function buildGraphFromCourse(datasetId: string): Promise<{ nodes: 
         Return the result ONLY as a JSON object:
         {
           "nodes": [ { "id": "ConceptID", "label": "Human Readable Label", "type": "topic", "description": "Brief definition" } ],
-          "edges": [ { "source": "NodeA", "target": "NodeB", "label": "Relationship" } ]
+          "edges": [ { "from": "NodeA", "to": "NodeB", "label": "Relationship" } ]
         }
         
         Focus on creating a clean, hierarchical structure. Limit to 15-20 nodes.
@@ -691,8 +698,16 @@ export async function buildGraphFromCourse(datasetId: string): Promise<{ nodes: 
         const parsed = JSON.parse(jsonText);
         
         return {
-            nodes: parsed.nodes || [],
-            edges: parsed.edges || []
+            nodes: (parsed.nodes || []).map((n: any) => ({
+                id: n.id,
+                label: n.label || n.id,
+                type: n.type || 'topic'
+            })),
+            edges: (parsed.edges || []).map((e: any) => ({
+                from: e.from,
+                to: e.to,
+                relation: e.label || e.relation || 'related'
+            }))
         };
     } catch (e) {
         console.error('[RAGFlow] Graph build failed:', e);

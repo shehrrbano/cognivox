@@ -3,7 +3,7 @@
     import RAGFlowChat from './RAGFlowChat.svelte';
     import GraphTab from './GraphTab.svelte';
     import { buildGraphFromCourse } from './services/ragflowService';
-    import type { Course, CourseResource } from './types';
+    import type { Course, CourseResource, GraphNode, GraphEdge } from './types';
 
     let { courseId, onback } = $props<{
         courseId: string | null;
@@ -40,7 +40,7 @@
         return [...baseEdges, ...dynamicGraph.edges];
     });
 
-    let dynamicGraph = $state({ nodes: [], edges: [] });
+    let dynamicGraph = $state<{ nodes: GraphNode[], edges: GraphEdge[] }>({ nodes: [], edges: [] });
     let isBuildingGraph = $state(false);
 
     let isGeneratingGraph = $state(false);
