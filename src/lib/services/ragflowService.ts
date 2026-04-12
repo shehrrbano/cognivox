@@ -617,7 +617,7 @@ export async function searchChunks(
             body: JSON.stringify({
                 question: query,
                 dataset_ids: [activeDsId],
-                kb_ids: [activeDsId], // Included as alias for compatibility
+                kb_ids: [activeDsId], // Alias for compatibility
                 top_k: topK,
             }),
 
@@ -634,37 +634,43 @@ export async function searchChunks(
             similarity: c.similarity || 0,
             highlight: c.highlight || '',
         }));
-    } catch (e: any) {
-        console.error('[RAGFlow] Search failed:', e);
-        return [];
-    }
-}
-
 /**
- * Extract entities and relationships from a list of RAGFlow chunks.
- * Uses Gemini to build a Knowledge Graph from the raw material.
+ * Build a full Knowledge Graph for a course by extracting concepts from its materials.
  */
-export async function buildGraphFromMaterials(chunks: RAGFlowChunk[]): Promise<{ nodes: any[], edges: any[] }> {
-    if (chunks.length === 0) return { nodes: [], edges: [] };
+export async function buildGraphFromCourse(datasetId: string): Promise<{ nodes: any[], edges: any[] }> {
+    console.log(`[RAGFlow] Building knowledge graph for dataset: ${datasetId}`);
+    
+    // 1. Get top informative chunks from the dataset
+    // We search for general knowledge keywords or just use a dummy high-topK search
+    const chunks = await searchChunks("Explain the core concepts and definitions of this course", 20, datasetId);
+    
+    if (chunks.length === 0) {
+        return { nodes: [], edges: [] };
+    }
+
+    // 2. Synthesize concepts using Gemini
+    const context = chunks.map((c, i) => `[Source ${i+1}]: ${c.content}`).join('\n\n');
+    const prompt = `
+        You are a knowledge engineering expert. Below are excerpts from a course's materials.
+        Extract the fundamental concepts and the relationships between them.
+        
+        Return the result ONLY as a JSON object:
+        {
+          "nodes": [ { "id": "ConceptID", "label": "Human Readable Label", "type": "topic", "description": "Brief definition" } ],
+          "edges": [ { "source": "NodeA", "target": "NodeB", "label": "Relationship" } ]
+        }
+        
+        Focus on creating a clean, hierarchical structure. Limit to 15-20 nodes.
+        
+        SOURCE EXCERPTS:
+        ${context}
+    `;
 
     const apiKey = keyManager.getCurrentKey()?.key;
-    if (!apiKey) throw new Error('Gemini API key required for graph extraction');
+    if (!apiKey) throw new Error('Gemini API key missing');
 
-    const combinedText = chunks.map((c, i) => `[Excerpt ${i + 1}]\n${c.content}`).join('\n\n');
-    
     const settings = get(settingsStore);
-    const model = settings.geminiModel || 'gemini-1.5-flash';
-
-    const prompt = `
-        Analyze the following excerpts and extract a structured Knowledge Graph of the most important concepts.
-        Provide the output in JSON format with 'nodes' (id, label, type, description) and 'edges' (source, target, label).
-        
-        Focus on defining the core subject matter and how the concepts interconnect.
-        
-        --- MATERIALS ---
-        ${combinedText}
-        --- END MATERIALS ---
-    `;
+    const model = settings.geminiModel || 'gemini-2.0-flash';
 
     try {
         const resp = await fetch(
@@ -679,16 +685,17 @@ export async function buildGraphFromMaterials(chunks: RAGFlowChunk[]): Promise<{
             }
         );
 
-        if (!resp.ok) throw new Error(`Gemini Error: ${resp.status}`);
+        if (!resp.ok) throw new Error(`Gemini status ${resp.status}`);
         const data = await resp.json();
-        const json = JSON.parse(data.candidates?.[0]?.content?.parts?.[0]?.text || '{}');
+        const jsonText = data.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
+        const parsed = JSON.parse(jsonText);
         
         return {
-            nodes: json.nodes || [],
-            edges: json.edges || []
+            nodes: parsed.nodes || [],
+            edges: parsed.edges || []
         };
-    } catch (e: any) {
-        console.error('[RAGFlow] Graph extraction failed:', e);
+    } catch (e) {
+        console.error('[RAGFlow] Graph build failed:', e);
         return { nodes: [], edges: [] };
     }
 }

@@ -2,7 +2,7 @@
     import { courseStore, getActiveCourse } from './courseStore';
     import RAGFlowChat from './RAGFlowChat.svelte';
     import GraphTab from './GraphTab.svelte';
-    import { searchChunks, buildGraphFromMaterials } from './services/ragflowService';
+    import { buildGraphFromCourse } from './services/ragflowService';
     import type { Course, CourseResource } from './types';
 
     let { courseId, onback } = $props<{
@@ -12,15 +12,12 @@
 
     let course = $derived($courseStore.find(c => c.id === courseId));
     
-    let liveGraphNodes = $state<any[]>([]);
-    let liveGraphEdges = $state<any[]>([]);
-
-    // Aggregate all extracted graphs (static + live)
+    // Aggregate all extracted graphs from all resources in this course
     let graphNodes = $derived.by(() => {
         if (!course) return [];
         const nodesMap = new Map();
         
-        // Static nodes from images
+        // Static resource nodes
         course.resources.forEach(res => {
             if (res.extractedGraph?.nodes) {
                 res.extractedGraph.nodes.forEach(node => {
@@ -29,8 +26,8 @@
             }
         });
 
-        // Live discovered nodes from text/chat
-        liveGraphNodes.forEach(node => {
+        // Dynamic discovered nodes
+        dynamicGraph.nodes.forEach(node => {
             nodesMap.set(node.id || node.label, node);
         });
 
@@ -39,9 +36,12 @@
 
     let graphEdges = $derived.by(() => {
         if (!course) return [];
-        const staticEdges = course.resources.flatMap(res => res.extractedGraph?.edges || []);
-        return [...staticEdges, ...liveGraphEdges];
+        const baseEdges = course.resources.flatMap(res => res.extractedGraph?.edges || []);
+        return [...baseEdges, ...dynamicGraph.edges];
     });
+
+    let dynamicGraph = $state({ nodes: [], edges: [] });
+    let isBuildingGraph = $state(false);
 
     let isGeneratingGraph = $state(false);
     let chatRef = $state<any>();
@@ -70,25 +70,17 @@
         }
     }
 
-    async function generateCourseGraph() {
-        if (!course || isGeneratingGraph) return;
-        isGeneratingGraph = true;
+    async function handleBuildGraph() {
+        if (!course?.datasetId || isBuildingGraph) return;
+        isBuildingGraph = true;
         try {
-            console.log('[CourseInterface] Generating global concept map from materials...');
-            // 1. Fetch informative chunks
-            const chunks = await searchChunks('What are the core concepts and definitions in this material?', 15, course.datasetId);
-            
-            // 2. Extract KG
-            const result = await buildGraphFromMaterials(chunks);
-            
-            // 3. Update live state
-            liveGraphNodes = result.nodes;
-            liveGraphEdges = result.edges;
-            console.log(`[CourseInterface] Map generated: ${liveGraphNodes.length} nodes found.`);
-        } catch (e) {
-            console.error('[CourseInterface] Graph generation failed:', e);
+            const result = await buildGraphFromCourse(course.datasetId);
+            dynamicGraph = {
+                nodes: [...dynamicGraph.nodes, ...result.nodes],
+                edges: [...dynamicGraph.edges, ...result.edges]
+            };
         } finally {
-            isGeneratingGraph = false;
+            isBuildingGraph = false;
         }
     }
 
@@ -221,6 +213,20 @@
                             Summarize Course
                         </button>
                         <button 
+                            onclick={handleBuildGraph}
+                            disabled={isBuildingGraph}
+                            class="flex items-center gap-3 w-full p-2.5 rounded-xl bg-blue-600 text-white hover:bg-blue-700 transition-all text-xs font-bold text-left group shadow-lg shadow-blue-500/20 disabled:opacity-50"
+                        >
+                            <div class="w-8 h-8 rounded-lg bg-white/10 text-white flex items-center justify-center group-hover:bg-white/20">
+                                {#if isBuildingGraph}
+                                    <svg class="animate-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+                                {:else}
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+                                {/if}
+                            </div>
+                            Build Concept Map
+                        </button>
+                        <button 
                             onclick={() => triggerAgent('quiz')}
                             class="flex items-center gap-3 w-full p-2.5 rounded-xl bg-slate-800 text-slate-200 hover:bg-slate-700 hover:text-white transition-all text-xs font-bold text-left group"
                         >
@@ -246,23 +252,6 @@
                                 <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
                             </div>
                             Assignment Creator
-                        </button>
-
-                        <div class="h-px bg-slate-800 my-2"></div>
-
-                        <button 
-                            onclick={generateCourseGraph}
-                            disabled={isGeneratingGraph}
-                            class="flex items-center gap-3 w-full p-2.5 rounded-xl bg-blue-600 text-white hover:bg-blue-500 transition-all text-xs font-bold text-left group shadow-lg shadow-blue-500/10 disabled:opacity-50"
-                        >
-                            <div class="w-8 h-8 rounded-lg bg-white/10 flex items-center justify-center">
-                                {#if isGeneratingGraph}
-                                    <svg class="animate-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg>
-                                {:else}
-                                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><path d="M12 8v8"/><path d="M8 12h8"/></svg>
-                                {/if}
-                            </div>
-                            {isGeneratingGraph ? 'Analyzing...' : 'Build Concept Map'}
                         </button>
                     </div>
                 </div>
