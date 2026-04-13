@@ -48,6 +48,8 @@
     const navItems = [
         { id: "transcript", label: "Transcript", icon: "message-square" },
         { id: "courses", label: "Courses", icon: "book-open" },
+        { id: "study-buddy", label: "Study Buddy", icon: "bot" },
+        { id: "memory", label: "Context Memory", icon: "database" },
         { id: "graph", label: "Knowledge Map", icon: "share-2" },
         { id: "analytics", label: "Analytics", icon: "bar-chart-2" },
         { id: "ledger", label: "Decision Ledger", icon: "list" },
@@ -93,6 +95,8 @@
                             {#if item.icon === 'list'}<line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/>{/if}
                             {#if item.icon === 'bell'}<path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/>{/if}
                             {#if item.icon === 'search'}<circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>{/if}
+                            {#if item.icon === 'bot'}<path d="M12 8V4H8"/><rect x="4" y="8" width="16" height="12" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/>{/if}
+                            {#if item.icon === 'database'}<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>{/if}
                             {#if item.icon === 'activity'}<polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>{/if}
                         </svg>
                     </span>

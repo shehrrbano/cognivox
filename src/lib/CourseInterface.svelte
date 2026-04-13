@@ -5,9 +5,10 @@
     import { buildGraphFromCourse } from './services/ragflowService';
     import type { Course, CourseResource, GraphNode, GraphEdge } from './types';
 
-    let { courseId, onback } = $props<{
+    let { courseId, onback, onopenMemory } = $props<{
         courseId: string | null;
         onback: () => void;
+        onopenMemory?: () => void;
     }>();
 
     let course = $derived($courseStore.find(c => c.id === courseId));
@@ -133,6 +134,16 @@
                         <div class="w-8 h-8 rounded-full border-2 border-white bg-indigo-100 flex items-center justify-center text-[10px] font-bold text-indigo-600 shadow-sm">KG</div>
                         <div class="w-8 h-8 rounded-full border-2 border-white bg-slate-100 flex items-center justify-center text-[10px] font-bold text-slate-600 shadow-sm">DB</div>
                     </div>
+                    {#if onopenMemory}
+                        <button
+                            onclick={onopenMemory}
+                            class="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold flex items-center gap-2 transition-all active:scale-95"
+                            title="Manage course files and RAGFlow documents"
+                        >
+                            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"></path></svg>
+                            Manage Files
+                        </button>
+                    {/if}
                     <div class="h-10 w-px bg-slate-200 mx-2"></div>
                     <div class="text-right">
                         <div class="text-[10px] font-black text-slate-400 uppercase tracking-widest leading-none mb-1">Status</div>

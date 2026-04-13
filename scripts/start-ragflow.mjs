@@ -80,6 +80,10 @@ function startRagflowBackend() {
         detached: true,
         stdio: 'ignore',
         shell: true,
+        env: {
+            ...process.env,
+            PYTHONPATH: RAGFLOW_DIR,
+        },
     });
     child.unref();
     log(`API server spawned (PID: ${child.pid})`);
@@ -93,6 +97,10 @@ function startTaskExecutor() {
         detached: true,
         stdio: 'ignore',
         shell: true,
+        env: {
+            ...process.env,
+            PYTHONPATH: RAGFLOW_DIR,
+        },
     });
     child.unref();
     log(`Task executor spawned (PID: ${child.pid})`);
@@ -143,7 +151,10 @@ async function main() {
         log(`API server already running on port ${API_PORT}`);
     } else {
         startRagflowBackend();
-        await waitForBackend(60);
+        const success = await waitForBackend(60);
+        if (!success) {
+            throw new Error('RAGFlow API server failed to become responsive. Check ragflow/logs/ragflow_server.log for details.');
+        }
     }
 
     // 3. Start task executor if needed (handles document parsing)

@@ -3,10 +3,11 @@
     import CourseCreationModal from './CourseCreationModal.svelte';
     import type { Course } from './types';
 
-    let { courses = [], activeId = null, onselectCourse } = $props<{
+    let { courses = [], activeId = null, onselectCourse, oncreateCourse } = $props<{
         courses: Course[];
         activeId: string | null;
         onselectCourse: (id: string) => void;
+        oncreateCourse?: (id: string) => void;
     }>();
 
     let showModal = $state(false);
@@ -84,8 +85,16 @@
 </div>
 
 {#if showModal}
-    <CourseCreationModal 
-        onclose={() => showModal = false} 
+    <CourseCreationModal
+        onclose={() => showModal = false}
+        oncreate={(id) => {
+            showModal = false;
+            if (oncreateCourse) {
+                oncreateCourse(id);
+            } else {
+                onselectCourse(id);
+            }
+        }}
     />
 {/if}
 

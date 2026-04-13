@@ -1955,6 +1955,7 @@
                     <ProjectOverview {transcripts} {graphNodes} {pastSessions} />
                 {:else if activeTab === "search"}
                     <SearchTab {transcripts} {graphNodes} initialQuery={searchQuery} />
+                {:else if activeTab === "study-buddy"}
                     <div class="h-[600px] w-full animate-fadeIn">
                         <RAGFlowChat
                             {graphNodes}
@@ -1963,22 +1964,28 @@
                         />
                     </div>
                 {:else if activeTab === "courses"}
-                    <CoursesView 
-                        courses={$courseStore} 
+                    <CoursesView
+                        courses={$courseStore}
                         activeId={$activeCourseId}
                         onselectCourse={(id) => {
                             activeCourseId.set(id);
                             activeTab = "active-course";
                         }}
+                        oncreateCourse={(id) => {
+                            activeCourseId.set(id);
+                            activeTab = "active-course";
+                        }}
                     />
                 {:else if activeTab === "active-course"}
-                    <CourseInterface 
-                        courseId={$activeCourseId} 
+                    <CourseInterface
+                        courseId={$activeCourseId}
                         onback={() => activeTab = "courses"}
+                        onopenMemory={() => activeTab = "memory"}
                     />
                 {:else if activeTab === "memory"}
-                    <CourseMemoryScreen 
+                    <CourseMemoryScreen
                         courses={$courseStore}
+                        initialCourseId={$activeCourseId}
                         onclose={() => activeTab = "courses"}
                     />
                 {/if}

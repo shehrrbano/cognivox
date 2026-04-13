@@ -8,11 +8,12 @@
     interface Props {
         courses: Course[];
         onclose: () => void;
+        initialCourseId?: string | null;
     }
 
-    let { courses = [], onclose }: Props = $props();
+    let { courses = [], onclose, initialCourseId = null }: Props = $props();
 
-    let selectedCourseId = $state<string | null>(null);
+    let selectedCourseId = $state<string | null>(initialCourseId);
     let selectedCourse = $derived(courses.find((c: Course) => c.id === selectedCourseId));
     let ragflowDocs = $state<any[]>([]);
     let isLoading = $state(false);

@@ -4,7 +4,7 @@
     import { parseFile, parseAudio, parsePicture } from './services/courseParsingService';
     import type { Course } from './types';
 
-    let { onclose } = $props<{ onclose: () => void }>();
+    let { onclose, oncreate } = $props<{ onclose: () => void; oncreate?: (courseId: string) => void }>();
 
     let courseName = $state('');
     let files = $state<File[]>([]);
@@ -61,7 +61,13 @@
             ]);
 
             status = 'Course created successfully!';
-            setTimeout(onclose, 1500);
+            setTimeout(() => {
+                if (oncreate) {
+                    oncreate(newCourse.id);
+                } else {
+                    onclose();
+                }
+            }, 1500);
         } catch (e: any) {
             console.error('[CourseCreation] Error:', e);
             status = `Error: ${e.message}`;
